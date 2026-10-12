@@ -1,0 +1,5 @@
+# gpui at the revision pinned in Cargo.lock needs 1.97 or newer. This is the version zed builds with.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

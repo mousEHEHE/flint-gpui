@@ -1,0 +1,149 @@
+# Builds flint for macOS (arm64, x86_64), Windows x64 and Linux x64.
+#
+# It is started by hand, for all platforms or just one:
+#   gh workflow run release.yml --ref v0.1.0
+# A run on a version tag attaches the archives to a draft GitHub release.
+# A run on a branch makes no release: the archives stay on the run as artifacts.
+#
+# The builds are not signed or notarized.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        default: all
+        options: [all, macos-arm64, macos-x86_64, windows-x86_64, linux-x86_64]
+
+# Only the publish job may write to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A job cannot be skipped by its matrix value, so the list is filtered here.
+  plan:
+    name: pick the platforms
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          ONLY: ${{ inputs.platform || 'all' }}
+          # ubuntu-22.04 is the oldest hosted Ubuntu, so the binary runs on older glibc too.
+          ALL: |
+            [
+              {"name": "macos-arm64", "os": "macos-14", "target": "aarch64-apple-darwin"},
+              {"name": "macos-x86_64", "os": "macos-14", "target": "x86_64-apple-darwin"},
+              {"name": "windows-x86_64", "os": "windows-latest", "target": "x86_64-pc-windows-msvc"},
+              {"name": "linux-x86_64", "os": "ubuntu-22.04", "target": "x86_64-unknown-linux-gnu"}
+            ]
+        run: |
+          echo "matrix=$(jq -c --arg only "$ONLY" 'map(select($only == "all" or .name == $only))' <<< "$ALL")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # With no arguments rustup installs the compiler pinned in rust-toolchain.toml.
+      - name: Install Rust
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config \
+            libfontconfig-dev libfreetype-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libvulkan1
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Zed's fork: cargo-bundle from crates.io does not know
+          # osx_minimum_system_version in Cargo.toml and stops on it.
+          cargo install cargo-bundle --locked \
+            --git https://github.com/zed-industries/cargo-bundle.git \
+            --rev 2be2669972dff3ddd4daf89a2cb29d2d06cad7c7
+          cargo bundle --release --target ${{ matrix.target }}
+          app="target/${{ matrix.target }}/release/bundle/osx/Flint.app"
+          # Ad-hoc signature: Apple silicon refuses to run unsigned code.
+          codesign --force --deep --sign - "$app"
+          # The license files go next to the app, not inside it.
+          mkdir package
+          ditto "$app" package/Flint.app
+          cp LICENSE THIRD-PARTY.md assets/fonts/CascadiaCode-LICENSE.txt assets/icons/LUCIDE-LICENSE.txt package/
+          ditto -c -k package "Flint-${{ github.ref_name }}-${{ matrix.name }}.zip"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release/flint.exe", LICENSE, THIRD-PARTY.md, `
+              assets/fonts/CascadiaCode-LICENSE.txt, assets/icons/LUCIDE-LICENSE.txt `
+            -DestinationPath "Flint-${{ github.ref_name }}-${{ matrix.name }}.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir package
+          cp "target/${{ matrix.target }}/release/flint" LICENSE THIRD-PARTY.md \
+            assets/fonts/CascadiaCode-LICENSE.txt assets/icons/LUCIDE-LICENSE.txt package/
+          tar -czf "Flint-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" -C package .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: Flint-*
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write the checksums
+        working-directory: artifacts
+        run: sha256sum Flint-* > SHA256SUMS
+
+      # A draft, so the archives can be tried before anyone is notified.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "flint ${{ github.ref_name }}" \
+            --generate-notes \
+            --draft

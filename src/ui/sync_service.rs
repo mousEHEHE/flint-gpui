@@ -1,0 +1,1108 @@
+//! Keeps the open vault in step with the sync account: runs a round when
+//! something changed, on a timer, and right after unlock. Also owns the
+//! sign-in, so closing Settings while the browser is open does not lose it.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui::{App, AppContext as _, Context, Entity, Global};
+use secrecy::SecretString;
+use uuid::Uuid;
+
+use crate::account::api::JoinRequest;
+use crate::account::team::{self, Roster, TeamError, TeamKeys};
+use crate::account::{self, AccountError, Api, ApiError, GitHubStep, OAuthError};
+use crate::ui::VaultState;
+use crate::vault::sync::{
+    AdoptedAccount, InviteSecret, PendingJoin, Registration, SyncResult, TeamContext, TeamUpdate,
+    TeamsUpdate,
+};
+use crate::vault::{RecoveryPhrase, VaultError, VaultManager};
+
+/// How often the vault is checked for edits to send.
+const TICK: Duration = Duration::from_secs(20);
+/// How often the server is asked for changes when nothing was edited here.
+const PULL_INTERVAL: Duration = Duration::from_secs(120);
+/// How long to leave the server alone after a failed round.
+const RETRY_DELAY: Duration = Duration::from_secs(60);
+/// A round that leaves work behind is followed by another right away, but
+/// only this many times: two devices editing one host must not spin forever.
+const MAX_ROUNDS_IN_A_ROW: u8 = 3;
+
+pub enum SignIn {
+    Idle,
+    /// Waiting for the user to finish with GitHub in the browser.
+    Browser,
+    /// GitHub is done; the password is needed to open or create the account.
+    Password(Arc<GitHubStep>),
+    Working(Arc<GitHubStep>),
+}
+
+pub struct SyncService {
+    vault_state: Entity<VaultState>,
+    pub sign_in: SignIn,
+    pub sign_in_error: Option<String>,
+    is_cancelled: Arc<AtomicBool>,
+    /// Counts sign-in attempts, so an answer to a cancelled one is ignored.
+    attempt: u64,
+    /// Counts sign-outs and deleted vaults, so an answer meant for one
+    /// account or vault is not given to the next.
+    generation: u64,
+    /// An account made while the vault got locked. The server already has
+    /// it, with a recovery phrase the user has not seen, so it is installed
+    /// and the phrase shown as soon as the vault opens again.
+    owed_registration: Option<(Registration, RecoveryPhrase)>,
+    pub is_syncing: bool,
+    pub last_synced: Option<Instant>,
+    pub sync_error: Option<String>,
+    retry_after: Option<Instant>,
+    rounds_left: u8,
+    was_unlocked: bool,
+    teams_checked: Option<Instant>,
+    /// When members who left may next be signed out automatically. Without
+    /// it a request that keeps failing would be sent in a tight loop.
+    left_retry: Option<Instant>,
+    /// A team action is running, or it is done and the teams are being
+    /// fetched again. The pane shows a spinner for the whole stretch, so a
+    /// row does not sit there looking alive after its button was pressed.
+    pub is_team_busy: bool,
+    is_settling: bool,
+    pub team_error: Option<String>,
+    /// Shown once after a team action that has something to say.
+    pub team_notice: Option<String>,
+    /// People waiting to be let into a team, by team. Each was checked
+    /// against the secret of an invite link made on this device.
+    pub join_requests: BTreeMap<Uuid, Vec<(Uuid, JoinRequest)>>,
+}
+
+/// Something the user asked to do with a team.
+pub enum TeamAction {
+    Create {
+        name: String,
+    },
+    Invite {
+        team_id: Uuid,
+    },
+    Revoke {
+        team_id: Uuid,
+        invite_id: Uuid,
+    },
+    Join {
+        link: String,
+    },
+    Accept {
+        team_id: Uuid,
+        invite_id: Uuid,
+        request: JoinRequest,
+    },
+    Remove {
+        team_id: Uuid,
+        user_ids: Vec<Uuid>,
+    },
+    SetRole {
+        team_id: Uuid,
+        user_id: Uuid,
+        role: &'static str,
+    },
+    HandOver {
+        team_id: Uuid,
+        user_id: Uuid,
+    },
+    Leave {
+        team_id: Uuid,
+    },
+    Delete {
+        team_id: Uuid,
+    },
+    AddVault {
+        team_id: Uuid,
+        name: String,
+    },
+    RenameVault {
+        team_id: Uuid,
+        vault_id: Uuid,
+        name: String,
+    },
+    DeleteVault {
+        team_id: Uuid,
+        vault_id: Uuid,
+    },
+    /// The plain members who see the vault from now on.
+    SetAccess {
+        team_id: Uuid,
+        vault_id: Uuid,
+        user_ids: Vec<Uuid>,
+    },
+}
+
+enum TeamDone {
+    Created(TeamUpdate),
+    Invited(Uuid, InviteSecret),
+    Joined(String, PendingJoin),
+    Changed,
+}
+
+struct TeamsChecked {
+    update: TeamsUpdate,
+    join_requests: BTreeMap<Uuid, Vec<(Uuid, JoinRequest)>>,
+}
+
+struct GlobalSyncService(Entity<SyncService>);
+
+impl Global for GlobalSyncService {}
+
+enum SignInEvent {
+    OpenBrowser(String),
+    Done(Result<GitHubStep, AccountError>),
+}
+
+enum Opened {
+    Registered(Registration, RecoveryPhrase),
+    Adopted(AdoptedAccount),
+}
+
+enum Round {
+    /// With the session token the round used.
+    Synced(String, Vec<Result<SyncResult, ApiError>>),
+    RecoveryTold(Result<Option<String>, ApiError>),
+    /// `None` when the account has no team keys, so it is in no team.
+    Teams(Result<Option<TeamsChecked>, TeamError>),
+}
+
+/// Run blocking work on its own thread and hand the result to async code.
+fn in_background<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> async_channel::Receiver<T> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.try_send(work());
+    });
+    rx
+}
+
+impl SyncService {
+    pub fn install(vault_state: Entity<VaultState>, cx: &mut App) {
+        let service = cx.new(|cx| Self::new(vault_state, cx));
+        cx.set_global(GlobalSyncService(service));
+    }
+
+    pub fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalSyncService>().0.clone()
+    }
+
+    fn new(vault_state: Entity<VaultState>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&vault_state, |this, vault_state, cx| {
+            let is_unlocked = vault_state.read(cx).manager().is_some();
+            let just_unlocked = is_unlocked && !this.was_unlocked;
+            this.was_unlocked = is_unlocked;
+            if !just_unlocked {
+                return;
+            }
+            match this.owed_registration.take() {
+                Some((registration, phrase)) => {
+                    let installed = vault_state.update(cx, |vault_state, cx| {
+                        cx.notify();
+                        install(vault_state, Opened::Registered(registration, phrase))
+                    });
+                    if let Err(e) = installed {
+                        tracing::error!(
+                            ?e,
+                            "could not attach the sync account made before the lock"
+                        );
+                        this.sign_in_error = Some(format!(
+                            "The sync account was created, but this vault could not be attached \
+                             to it: {e}. Sign in with GitHub again."
+                        ));
+                    }
+                }
+                None => this.sync_now(cx),
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(TICK).await;
+            if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                break;
+            }
+        })
+        .detach();
+
+        Self {
+            vault_state,
+            sign_in: SignIn::Idle,
+            sign_in_error: None,
+            is_cancelled: Arc::new(AtomicBool::new(false)),
+            attempt: 0,
+            generation: 0,
+            owed_registration: None,
+            is_syncing: false,
+            last_synced: None,
+            sync_error: None,
+            retry_after: None,
+            rounds_left: 0,
+            was_unlocked: false,
+            teams_checked: None,
+            left_retry: None,
+            is_team_busy: false,
+            is_settling: false,
+            team_error: None,
+            team_notice: None,
+            join_requests: BTreeMap::new(),
+        }
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.retry_after.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self.is_settling {
+            // Nothing to wait for when the vault got locked or signed out.
+            let can_check = self
+                .vault_state
+                .read(cx)
+                .manager()
+                .is_some_and(|v| v.team_context().is_some());
+            if !can_check {
+                self.settle(cx);
+                return;
+            }
+            self.rounds_left = MAX_ROUNDS_IN_A_ROW;
+            self.run_round(cx);
+            return;
+        }
+        let is_pull_due = self
+            .last_synced
+            .is_none_or(|at| at.elapsed() >= PULL_INTERVAL);
+        let has_edits = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .is_some_and(VaultManager::has_unsynced_changes);
+        if is_pull_due || has_edits {
+            self.rounds_left = MAX_ROUNDS_IN_A_ROW;
+            self.run_round(cx);
+        }
+    }
+
+    pub fn sync_now(&mut self, cx: &mut Context<Self>) {
+        self.rounds_left = MAX_ROUNDS_IN_A_ROW;
+        self.run_round(cx);
+    }
+
+    fn run_round(&mut self, cx: &mut Context<Self>) {
+        if self.is_syncing || self.rounds_left == 0 {
+            return;
+        }
+        let Some(vault) = self.vault_state.read(cx).manager() else {
+            return;
+        };
+        // The account must hear about a recovery first: until then it still
+        // checks the old password.
+        let recovery = vault.recovery_job();
+        let jobs = vault.begin_sync();
+        if recovery.is_none() && jobs.is_empty() {
+            return;
+        }
+        // Teams before items: a vault whose key changed cannot be read until
+        // the new key is here.
+        let is_teams_due = vault.is_behind_on_teams()
+            || self
+                .teams_checked
+                .is_none_or(|at| at.elapsed() >= PULL_INTERVAL);
+        let teams = vault
+            .team_context()
+            .filter(|_| is_teams_due && recovery.is_none());
+        if teams.is_some() {
+            self.teams_checked = Some(Instant::now());
+        }
+
+        self.rounds_left -= 1;
+        self.is_syncing = true;
+        cx.notify();
+
+        let round = in_background(move || {
+            let api = Api::new();
+            if let Some(recovery) = recovery {
+                return Round::RecoveryTold(account::tell_recovery(&api, &recovery));
+            }
+            if let Some(context) = teams {
+                return Round::Teams(check_teams(&api, &context));
+            }
+            let token = jobs[0].session_token.clone();
+            let results = jobs
+                .into_iter()
+                .map(|job| account::run_sync(&api, job))
+                .collect();
+            Round::Synced(token, results)
+        });
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let Ok(round) = round.recv().await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.finish_round(round, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn settle(&mut self, cx: &mut Context<Self>) {
+        self.is_settling = false;
+        self.is_team_busy = false;
+        cx.notify();
+    }
+
+    fn finish_round(&mut self, round: Round, cx: &mut Context<Self>) {
+        self.is_syncing = false;
+        let was_team_check = matches!(round, Round::Teams(_));
+        let outcome = self.vault_state.update(cx, |vault_state, cx| {
+            // Locked while the round ran. Nothing is lost: the next round
+            // after unlock fetches the same changes again.
+            let Some(vault) = vault_state.manager_mut() else {
+                return Ok(false);
+            };
+            if let Round::Teams(Ok(Some(checked))) = &round {
+                self.join_requests = checked.join_requests.clone();
+            }
+            let (has_more, changed) = take_in(vault, round)?;
+            if changed {
+                cx.notify();
+            }
+            Ok(has_more)
+        });
+
+        match outcome {
+            Ok(has_more) => {
+                self.sync_error = None;
+                self.retry_after = None;
+                self.last_synced = Some(Instant::now());
+                if was_team_check && self.is_settling {
+                    self.settle(cx);
+                }
+                self.remove_those_who_left(cx);
+                // A round that was already running when a team action ended
+                // did not look at the teams. Do that now, even with no rounds
+                // left. Work left behind gets only the rounds that are left:
+                // a vault that stays behind must not be asked in a tight loop.
+                if self.is_settling {
+                    self.rounds_left = self.rounds_left.max(1);
+                }
+                if has_more || self.is_settling {
+                    self.run_round(cx);
+                }
+            }
+            Err(message) => {
+                tracing::warn!(error = %message, "sync round failed");
+                self.sync_error = Some(message);
+                self.retry_after = Some(Instant::now() + RETRY_DELAY);
+                if self.is_settling {
+                    self.settle(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn start_sign_in(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.sign_in, SignIn::Idle) {
+            return;
+        }
+        self.sign_in = SignIn::Browser;
+        self.sign_in_error = None;
+        self.is_cancelled = Arc::new(AtomicBool::new(false));
+        self.attempt += 1;
+        let attempt = self.attempt;
+        cx.notify();
+
+        let (tx, rx) = async_channel::unbounded();
+        let is_cancelled = self.is_cancelled.clone();
+        std::thread::spawn(move || {
+            let open_browser = |url| {
+                let _ = tx.try_send(SignInEvent::OpenBrowser(url));
+            };
+            let step = account::github_sign_in(&Api::new(), open_browser, &is_cancelled);
+            let _ = tx.try_send(SignInEvent::Done(step));
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                let handled = this.update(cx, |this, cx| {
+                    // Cancelled since: this belongs to an attempt nobody waits for.
+                    if this.attempt != attempt {
+                        return;
+                    }
+                    match event {
+                        SignInEvent::OpenBrowser(url) => cx.open_url(&url),
+                        SignInEvent::Done(step) => this.finish_github(step, cx),
+                    }
+                });
+                if handled.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn finish_github(&mut self, step: Result<GitHubStep, AccountError>, cx: &mut Context<Self>) {
+        match step {
+            Ok(step) => self.sign_in = SignIn::Password(Arc::new(step)),
+            Err(AccountError::OAuth(OAuthError::Cancelled)) => self.sign_in = SignIn::Idle,
+            Err(e) => {
+                tracing::warn!(error = %e, "GitHub sign-in failed");
+                self.sign_in = SignIn::Idle;
+                self.sign_in_error = Some(e.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.is_cancelled.store(true, Ordering::Relaxed);
+        self.attempt += 1;
+        self.sign_in = SignIn::Idle;
+        self.sign_in_error = None;
+        cx.notify();
+    }
+
+    /// Open the account with `password`, or create it when GitHub said the
+    /// user has none.
+    pub fn submit_password(&mut self, password: SecretString, cx: &mut Context<Self>) {
+        let SignIn::Password(step) = &self.sign_in else {
+            return;
+        };
+        let step = step.clone();
+        let Some(slot) = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .map(VaultManager::password_slot)
+        else {
+            return;
+        };
+
+        self.sign_in = SignIn::Working(step.clone());
+        self.sign_in_error = None;
+        cx.notify();
+
+        // Argon2id and two requests: a second or two.
+        let opened = in_background({
+            let step = step.clone();
+            move || {
+                let api = Api::new();
+                if step.is_new {
+                    account::register(&api, &step, &slot, &password)
+                        .map(|(registration, phrase)| Opened::Registered(registration, phrase))
+                } else {
+                    account::sign_in(&api, &step, &password).map(Opened::Adopted)
+                }
+            }
+        });
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let Ok(opened) = opened.recv().await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.finish_password(step, opened, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_password(
+        &mut self,
+        step: Arc<GitHubStep>,
+        opened: Result<Opened, AccountError>,
+        cx: &mut Context<Self>,
+    ) {
+        let is_locked = self.vault_state.read(cx).manager().is_none();
+        let opened = match opened {
+            Ok(Opened::Registered(registration, phrase)) if is_locked => {
+                self.owed_registration = Some((registration, phrase));
+                self.sign_in = SignIn::Idle;
+                cx.notify();
+                return;
+            }
+            other => other,
+        };
+        let installed = opened.and_then(|opened| {
+            self.vault_state.update(cx, |vault_state, cx| {
+                cx.notify();
+                install(vault_state, opened).map_err(AccountError::Vault)
+            })
+        });
+
+        match installed {
+            Ok(()) => {
+                tracing::info!(login = %step.github_login, is_new = step.is_new, "signed in to sync");
+                self.sign_in = SignIn::Idle;
+                self.sync_error = None;
+                self.retry_after = None;
+                self.sync_now(cx);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sync sign-in failed");
+                // Another password will not help these: GitHub has to be asked again.
+                let is_stale = matches!(
+                    &e,
+                    AccountError::Api(api)
+                        if matches!(api.code(), Some("ticket_invalid" | "account_exists"))
+                );
+                self.sign_in = if is_stale {
+                    SignIn::Idle
+                } else {
+                    SignIn::Password(step.clone())
+                };
+                self.sign_in_error = Some(sign_in_problem(&e, step.is_new));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Do something with a team. `password` is the master password: needed
+    /// the first time the account uses teams, and to leave or delete one.
+    pub fn team_action(
+        &mut self,
+        action: TeamAction,
+        password: Option<SecretString>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_team_busy {
+            return;
+        }
+        let Some(vault) = self.vault_state.read(cx).manager() else {
+            return;
+        };
+        let Some(context) = vault.team_context() else {
+            return;
+        };
+        let slot = vault.password_slot();
+        self.is_team_busy = true;
+        self.team_error = None;
+        self.team_notice = None;
+        cx.notify();
+
+        let done = in_background(move || {
+            let auth_key = match password.map(|password| slot.open(&password)) {
+                Some(Ok(opened)) => Some(opened.auth_key),
+                Some(Err(_)) => return Err("Wrong master password.".to_string()),
+                None => None,
+            };
+            run_team_action(&Api::new(), &context, auth_key, action).map_err(|e| team_problem(&e))
+        });
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let Ok(done) = done.recv().await else { return };
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.finish_team_action(done, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_team_action(
+        &mut self,
+        done: Result<(TeamKeys, TeamDone), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let stored = done.and_then(|(keys, done)| {
+            self.vault_state.update(cx, |vault_state, cx| {
+                cx.notify();
+                let Some(vault) = vault_state.manager_mut() else {
+                    return Err("The vault was locked first.".to_string());
+                };
+                let mut notice = None;
+                let saved = vault.set_key_seed(keys.seed()).and_then(|()| match done {
+                    TeamDone::Created(team) => vault.add_team(team),
+                    TeamDone::Invited(id, invite) => vault.add_invite(id, invite),
+                    TeamDone::Joined(name, join) => {
+                        notice = Some(format!(
+                            "Asked to join {name}. You are in once the person who sent the \
+                             link opens flint and accepts."
+                        ));
+                        vault.add_join(join)
+                    }
+                    TeamDone::Changed => Ok(()),
+                });
+                saved
+                    .map(|()| notice)
+                    .map_err(|e| format!("Could not save the vault: {e}"))
+            })
+        });
+        match stored {
+            Ok(notice) => {
+                self.team_notice = notice;
+                // Stay busy until the teams were fetched again: only then
+                // does the pane show what the action changed.
+                self.is_settling = true;
+            }
+            Err(message) => {
+                self.team_error = Some(message);
+                self.is_team_busy = false;
+            }
+        }
+        self.teams_checked = None;
+        self.sync_now(cx);
+        cx.notify();
+    }
+
+    /// A member who left is still in the roster, and still holds the vault
+    /// keys. The server takes no other change to the team until an admin's
+    /// device signs them out and changes the keys, so do it without asking.
+    fn remove_those_who_left(&mut self, cx: &mut Context<Self>) {
+        let Some(context) = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|v| v.team_context())
+        else {
+            return;
+        };
+        let owed = context.teams.iter().find(|(_, team)| {
+            let is_manager =
+                Roster::parse(&team.roster).is_some_and(|r| r.is_manager(context.user_id));
+            is_manager && !team.left.is_empty()
+        });
+        if self.left_retry.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if let Some((team_id, team)) = owed {
+            self.left_retry = Some(Instant::now() + RETRY_DELAY);
+            tracing::info!(team = %team_id, "signing out members who left the team");
+            let action = TeamAction::Remove {
+                team_id: *team_id,
+                user_ids: team.left.clone(),
+            };
+            self.team_action(action, None, cx);
+        }
+    }
+
+    /// Forget the account on this device. Records stay in the vault and on
+    /// the server.
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        let signed_out = self.vault_state.update(cx, |vault_state, cx| {
+            let vault = vault_state.manager_mut()?;
+            let token = vault.sync_state()?.session_token.clone();
+            if let Err(e) = vault.sign_out() {
+                tracing::error!(?e, "failed to save the vault after signing out of sync");
+            }
+            cx.notify();
+            Some(token)
+        });
+        // No account here (or a locked vault): a sign-in that is under way
+        // is not this account's, and its answer must still land.
+        let Some(token) = signed_out else { return };
+        if let Some(token) = token {
+            // Best effort: a session that stays open on the server holds
+            // nothing this device still uses.
+            std::thread::spawn(move || {
+                if let Err(e) = Api::new().logout(&token) {
+                    tracing::warn!(error = %e, "could not close the sync session on the server");
+                }
+            });
+        }
+        self.forget_account(cx);
+    }
+
+    /// The vault was deleted. Whatever was going on belonged to it: a
+    /// sign-in half done, an account owed to it, a team action, its errors.
+    /// The next vault starts with none of that.
+    pub fn forget_vault(&mut self, cx: &mut Context<Self>) {
+        self.cancel_sign_in(cx);
+        self.owed_registration = None;
+        self.forget_account(cx);
+    }
+
+    /// Drop what belonged to the account: a round or a team action still
+    /// running, the teams, the errors. Their answers are ignored from here on.
+    fn forget_account(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        // The answer to a password that is being checked is ignored as well.
+        if matches!(self.sign_in, SignIn::Working(_)) {
+            self.sign_in = SignIn::Idle;
+        }
+        self.is_syncing = false;
+        self.last_synced = None;
+        self.sync_error = None;
+        self.retry_after = None;
+        self.rounds_left = 0;
+        self.teams_checked = None;
+        self.left_retry = None;
+        self.is_team_busy = false;
+        self.is_settling = false;
+        self.team_error = None;
+        self.team_notice = None;
+        self.join_requests.clear();
+        cx.notify();
+    }
+}
+
+/// Fetch and check the account's teams, and who waits to join them.
+fn check_teams(api: &Api, context: &TeamContext) -> Result<Option<TeamsChecked>, TeamError> {
+    let keys = match team::ensure_keys(api, context, None) {
+        Ok(keys) => keys,
+        Err(TeamError::PasswordNeeded) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut update = team::refresh(api, context, &keys)?;
+    let mut join_requests = BTreeMap::new();
+    for (invite_id, invite) in &context.invites {
+        let team_id = invite.team_id;
+        // An invite of a team that failed its check is kept as it is.
+        if !update.checked.contains(&team_id) {
+            continue;
+        }
+        let (requests, open) = team::requests(api, context, team_id)?;
+        if !open.contains(invite_id) {
+            update.closed_invites.push(*invite_id);
+        }
+        join_requests.insert(team_id, requests);
+    }
+    Ok(Some(TeamsChecked {
+        update,
+        join_requests,
+    }))
+}
+
+fn run_team_action(
+    api: &Api,
+    context: &TeamContext,
+    auth_key: Option<[u8; 32]>,
+    action: TeamAction,
+) -> Result<(TeamKeys, TeamDone), TeamError> {
+    let keys = team::ensure_keys(api, context, auth_key.as_ref())?;
+    let needs_password = || auth_key.ok_or(TeamError::PasswordNeeded);
+    let done = match action {
+        TeamAction::Create { name } => TeamDone::Created(team::create(api, context, &keys, &name)?),
+        TeamAction::Invite { team_id } => {
+            let (id, invite) = team::invite(api, context, &keys, team_id)?;
+            TeamDone::Invited(id, invite)
+        }
+        TeamAction::Revoke { team_id, invite_id } => {
+            team::revoke(api, context, team_id, invite_id)?;
+            TeamDone::Changed
+        }
+        TeamAction::Join { link } => {
+            let (name, join) = team::join(api, context, &keys, &link)?;
+            TeamDone::Joined(name, join)
+        }
+        TeamAction::Accept {
+            team_id,
+            invite_id,
+            request,
+        } => {
+            team::accept(api, context, &keys, team_id, invite_id, &request)?;
+            TeamDone::Changed
+        }
+        TeamAction::Remove { team_id, user_ids } => {
+            team::remove(api, context, &keys, team_id, &user_ids)?;
+            TeamDone::Changed
+        }
+        TeamAction::SetRole {
+            team_id,
+            user_id,
+            role,
+        } => {
+            team::set_role(api, context, &keys, team_id, user_id, role)?;
+            TeamDone::Changed
+        }
+        TeamAction::HandOver { team_id, user_id } => {
+            team::hand_over(api, context, &keys, team_id, user_id)?;
+            TeamDone::Changed
+        }
+        TeamAction::Leave { team_id } => {
+            team::leave(api, context, team_id, &needs_password()?)?;
+            TeamDone::Changed
+        }
+        TeamAction::Delete { team_id } => {
+            team::delete(api, context, team_id, &needs_password()?)?;
+            TeamDone::Changed
+        }
+        TeamAction::AddVault { team_id, name } => {
+            team::add_vault(api, context, &keys, team_id, &name)?;
+            TeamDone::Changed
+        }
+        TeamAction::RenameVault {
+            team_id,
+            vault_id,
+            name,
+        } => {
+            team::rename_vault(api, context, &keys, team_id, vault_id, &name)?;
+            TeamDone::Changed
+        }
+        TeamAction::DeleteVault { team_id, vault_id } => {
+            // The server asks for no password here. It was checked on this
+            // device before the action started; this only insists it was given.
+            needs_password()?;
+            team::delete_vault(api, context, &keys, team_id, vault_id)?;
+            TeamDone::Changed
+        }
+        TeamAction::SetAccess {
+            team_id,
+            vault_id,
+            user_ids,
+        } => {
+            team::set_access(api, context, &keys, team_id, vault_id, &user_ids)?;
+            TeamDone::Changed
+        }
+    };
+    Ok((keys, done))
+}
+
+fn team_problem(error: &TeamError) -> String {
+    match error {
+        TeamError::Api(api) => match api.code() {
+            Some("wrong_password") => "Wrong master password.".into(),
+            Some("invite_not_found") => "This invite does not exist or has expired.".into(),
+            Some("invite_used") => "This invite was already used.".into(),
+            Some("already_a_member") => "You are already in this team.".into(),
+            Some("too_many_teams") => "One account can own three teams.".into(),
+            Some("owner_cannot_leave") => "The owner cannot leave. Delete the team instead.".into(),
+            Some("roster_out_of_date" | "vault_changed") => {
+                "The team changed in the meantime. Try again in a moment.".into()
+            }
+            _ => api.to_string(),
+        },
+        TeamError::Refused(reason) => sentence(reason),
+        other => other.to_string(),
+    }
+}
+
+/// "a team keeps at least one vault" as a line of the pane.
+fn sentence(reason: &str) -> String {
+    let mut text = reason.to_string();
+    if let Some(first) = text.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    text + "."
+}
+
+/// Apply a finished round to the vault. Returns whether another round
+/// should follow at once, and whether any record changed.
+fn take_in(vault: &mut VaultManager, round: Round) -> Result<(bool, bool), String> {
+    let saved = |result: Result<(), VaultError>| {
+        result.map_err(|e| format!("Could not save the vault: {e}"))
+    };
+    match round {
+        Round::Synced(token, results) => {
+            // The personal vault comes first. When it failed, the team vaults
+            // wait too: a host moving into a team must leave here before it
+            // arrives there.
+            let is_personal_ok = results.first().is_some_and(Result::is_ok);
+            let mut answers = Vec::new();
+            let mut problem = None;
+            for (index, result) in results.into_iter().enumerate() {
+                match result {
+                    Ok(result) if is_personal_ok => answers.push(result),
+                    Ok(_) => {}
+                    Err(e) if e.is_session_ended() => {
+                        saved(vault.end_session(&token))?;
+                        return Ok((false, false));
+                    }
+                    // A team vault got a new key, or it was deleted, or this
+                    // account no longer sees it. The team check sorts that out.
+                    Err(e) if index > 0 && is_team_news(&e) => vault.note_behind_on_teams(),
+                    // One full or broken team vault must not stop the others.
+                    Err(e) => problem = problem.or(Some(e.to_string())),
+                }
+            }
+            let changed = vault
+                .finish_round(answers)
+                .map_err(|e| format!("Could not save the vault: {e}"))?;
+            match problem {
+                Some(problem) if changed == 0 => Err(problem),
+                problem => {
+                    // Not shown: the round did bring changes in.
+                    if let Some(problem) = problem {
+                        tracing::warn!(error = %problem, "a vault failed to sync in a round that changed others");
+                    }
+                    Ok((
+                        vault.has_unsynced_changes() || vault.is_behind_on_teams(),
+                        changed > 0,
+                    ))
+                }
+            }
+        }
+        Round::RecoveryTold(Ok(session_token)) => {
+            let is_signed_in = session_token.is_some();
+            saved(vault.finish_recovery(session_token))?;
+            Ok((is_signed_in, false))
+        }
+        Round::Teams(Ok(Some(checked))) => {
+            saved(vault.apply_teams(checked.update))?;
+            // The items come next, in a round of their own.
+            Ok((true, true))
+        }
+        Round::Teams(Ok(None)) => Ok((true, false)),
+        Round::Teams(Err(e)) => Err(e.to_string()),
+        Round::RecoveryTold(Err(e)) => Err(e.to_string()),
+    }
+}
+
+fn is_team_news(error: &ApiError) -> bool {
+    matches!(error.code(), Some("key_rotated" | "vault_not_found"))
+}
+
+fn install(vault_state: &mut VaultState, opened: Opened) -> Result<(), VaultError> {
+    let Some(vault) = vault_state.manager_mut() else {
+        return Err(VaultError::Io(std::io::Error::other(
+            "the vault was locked first",
+        )));
+    };
+    match opened {
+        Opened::Adopted(account) => vault.adopt_account(account),
+        Opened::Registered(registration, phrase) => {
+            vault.install_registration(registration)?;
+            // The new phrase takes over the window until the user confirms
+            // they saved it, exactly like after a recovery.
+            if let VaultState::Unlocked { manager } =
+                std::mem::replace(vault_state, VaultState::Locked)
+            {
+                *vault_state = VaultState::AwaitingPhraseConfirmation {
+                    manager,
+                    phrase,
+                    is_rotation: true,
+                };
+            }
+            Ok(())
+        }
+    }
+}
+
+fn sign_in_problem(error: &AccountError, is_new: bool) -> String {
+    match error {
+        AccountError::Vault(VaultError::InvalidPassword) => "Wrong master password.".into(),
+        AccountError::Api(api) => match api.code() {
+            Some("wrong_password") if is_new => "Wrong master password.".into(),
+            Some("wrong_password") => "Wrong password for this account.".into(),
+            Some("too_many_attempts") => "Too many wrong passwords. Try again in an hour.".into(),
+            Some("ticket_invalid") => "The sign-in expired. Sign in with GitHub again.".into(),
+            Some("account_exists") => {
+                "This GitHub account already has a flint account. Sign in with GitHub again.".into()
+            }
+            _ => api.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::format::KdfParams;
+    use crate::vault::sync::{SyncState, TeamState, VaultKey};
+
+    fn refused(status: u16, code: &str) -> ApiError {
+        ApiError::Refused {
+            status,
+            code: code.into(),
+            message: format!("refused: {code}"),
+        }
+    }
+
+    /// A signed-in vault in a team with one vault. Returns the team vault's id.
+    fn vault_in_a_team(dir: &tempfile::TempDir) -> (VaultManager, Uuid) {
+        let password = SecretString::new("pw".into());
+        let kdf = KdfParams {
+            m_cost: 256,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let (mut vault, _) =
+            VaultManager::create_with_params(&dir.path().join("vault.bin"), &password, kdf)
+                .unwrap();
+        let slot = vault.password_slot().enc_dek_by_password().clone();
+        vault
+            .install_registration(Registration {
+                replaces: slot.clone(),
+                enc_dek_by_recovery: slot,
+                state: SyncState::new(Uuid::nil(), "alice".into(), "token".into(), Uuid::nil()),
+            })
+            .unwrap();
+        let (team_id, vault_id) = (Uuid::new_v4(), Uuid::new_v4());
+        let state = TeamState {
+            name: "ops".into(),
+            roster: Vec::new(),
+            logins: BTreeMap::new(),
+            left: Vec::new(),
+            vault_names: vec![(vault_id, None)],
+        };
+        let vaults = vec![VaultKey {
+            vault_id,
+            key: [7; 32],
+            key_version: 1,
+        }];
+        vault
+            .add_team(TeamUpdate {
+                team_id,
+                state,
+                vaults,
+                pin: None,
+            })
+            .unwrap();
+        (vault, vault_id)
+    }
+
+    fn nothing_new(vault_id: Uuid) -> Result<SyncResult, ApiError> {
+        Ok(SyncResult {
+            vault_id,
+            started_at: 0,
+            pulled: Vec::new(),
+            cursor: 0,
+            pushed: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_team_vault_that_is_gone_asks_for_a_team_check_and_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = vault_in_a_team(&dir);
+        let answers = vec![
+            nothing_new(Uuid::nil()),
+            Err(refused(404, "vault_not_found")),
+        ];
+
+        let outcome = take_in(&mut vault, Round::Synced("token".into(), answers));
+
+        assert_eq!(outcome, Ok((true, false)));
+        assert!(vault.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_full_team_vault_is_still_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = vault_in_a_team(&dir);
+        let answers = vec![nothing_new(Uuid::nil()), Err(refused(413, "vault_full"))];
+
+        let outcome = take_in(&mut vault, Round::Synced("token".into(), answers));
+
+        assert_eq!(outcome, Err("refused: vault_full".to_string()));
+        assert!(!vault.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_missing_personal_vault_is_an_error_and_not_team_news() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, vault_id) = vault_in_a_team(&dir);
+        let answers = vec![Err(refused(404, "vault_not_found")), nothing_new(vault_id)];
+
+        let outcome = take_in(&mut vault, Round::Synced("token".into(), answers));
+
+        assert_eq!(outcome, Err("refused: vault_not_found".to_string()));
+        assert!(!vault.is_behind_on_teams());
+    }
+}

@@ -1,0 +1,93 @@
+[package]
+name = "flint"
+version = "0.1.0"
+edition = "2021"
+description = "SSH and SFTP client"
+license = "GPL-3.0-only"
+repository = "https://github.com/mousEHEHE/flint-gpui"
+rust-version = "1.97"
+publish = false
+
+[package.metadata.bundle]
+name = "Flint"
+identifier = "com.mouse.flint"
+icon = ["assets/app-icon/icon@2x.png", "assets/app-icon/icon_512.png"]
+category = "public.app-category.developer-tools"
+osx_minimum_system_version = "12.0"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "d5821f270317754f2a311a0bb148ec32cbb0ced4" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "d5821f270317754f2a311a0bb148ec32cbb0ced4" }
+
+rust-embed = { version = "8", features = ["include-exclude"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+russh = "0.45"
+russh-sftp = "2"
+alacritty_terminal = "0.26"
+rfd = "0.14"
+notify = "=8.2.0"
+tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "net", "sync", "time"] }
+tokio-socks = "0.5"
+base64 = "0.22"
+async-channel = "2"
+async-trait = "0.1"
+futures = "0.3"
+
+# vault
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+secrecy = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
+ciborium = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+bip39 = { version = "2", features = ["zeroize"] }
+
+# sync
+ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
+subtle = "2"
+hkdf = "0.12"
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = ["Win32_System_Memory", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Foundation"] }
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Style lints that the UI code trips on purpose: gpui handlers take many
+# arguments, and events carry whole entries.
+[lints.clippy]
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+type_complexity = "allow"
+
+# build.rs uses these to make the .ico and put it into the .exe.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+ico = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# gpui and alacritty are too slow to use unoptimized, even in a debug build.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Symbols are stripped, so a panic backtrace in a release build has no function names.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
