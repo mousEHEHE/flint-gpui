@@ -1,16 +1,14 @@
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, FocusHandle, Focusable, Window};
+use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    h_flex,
     input::{Input, InputEvent, InputState},
-    spinner::Spinner,
-    v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _,
 };
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
-use crate::ui::VaultState;
+use crate::ui::{lock_screen, VaultState};
 
 const RECOVERY_WORD_COUNT: usize = 24;
 
@@ -375,239 +373,157 @@ impl UnlockView {
         }
     }
 
-    fn render_delete_form(&self, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme();
-        let is_confirmed = is_delete_confirmed(self.delete_word.read(cx).value().as_ref());
-        let note = |text: &'static str| {
-            div()
-                .text_size(px(11.5))
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
+    fn render_password_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        lock_screen::column()
+            .child(lock_screen::header(
+                "Unlock vault",
+                "Enter your master password to continue.",
+                cx,
+            ))
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
+            .child(Input::new(&self.password).mask_toggle())
+            .child(
+                Button::new("unlock-vault")
+                    .primary()
+                    .child("Unlock")
+                    .on_click(cx.listener(|this, _, window, cx| this.submit_password(window, cx))),
+            )
+            .child(lock_screen::links().child(
+                lock_screen::link("to-recovery", "Forgot password? Use recovery phrase").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.step = Step::RecoveryForm;
+                        this.error = None;
+                        this.phrase_input
+                            .update(cx, |state, cx| state.focus(window, cx));
+                        cx.notify();
+                    }),
+                ),
+            ))
+            .into_any_element()
+    }
 
-        v_flex()
-            .gap(px(8.))
-            .child(div().text_lg().child("Delete vault"))
-            .child(note(
+    fn render_recovery_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let problem = self.recovery_problem(cx);
+        let word_count = recovery_word_count(self.phrase_input.read(cx).value().as_ref());
+        let word_count_color = if word_count == RECOVERY_WORD_COUNT {
+            theme.success
+        } else {
+            theme.muted_foreground
+        };
+        // The red error line already says it after a blocked Enter.
+        let hint = problem
+            .map(RecoveryProblem::message)
+            .filter(|hint| self.error.as_deref() != Some(*hint));
+
+        lock_screen::column()
+            .child(lock_screen::header(
+                "Recover vault",
+                "Enter your 24-word recovery phrase and choose a new password.",
+                cx,
+            ))
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
+            .child(Input::new(&self.phrase_input))
+            .child(lock_screen::note(
+                format!("{word_count} / {RECOVERY_WORD_COUNT} words"),
+                word_count_color,
+            ))
+            .child(Input::new(&self.new_password).mask_toggle())
+            .child(Input::new(&self.confirm_password).mask_toggle())
+            .children(hint.map(|hint| lock_screen::note(hint, theme.muted_foreground)))
+            .child(
+                Button::new("recover")
+                    .primary()
+                    .child("Recover")
+                    .disabled(problem.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_recovery(cx))),
+            )
+            .child(
+                lock_screen::links()
+                    .child(
+                        lock_screen::link("back-to-pw", "Back to password unlock").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.step = Step::PasswordForm;
+                                this.error = None;
+                                this.password
+                                    .update(cx, |state, cx| state.focus(window, cx));
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        lock_screen::link(
+                            "to-delete-vault",
+                            "Lost the recovery phrase too? Delete this vault",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.step = Step::DeleteForm;
+                            this.error = None;
+                            this.delete_word
+                                .update(cx, |state, cx| state.focus(window, cx));
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_delete_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let is_confirmed = is_delete_confirmed(self.delete_word.read(cx).value().as_ref());
+
+        lock_screen::column()
+            .child(lock_screen::header(
+                "Delete vault",
                 "Without the password or the recovery phrase this vault cannot be opened. \
                  Deleting it removes every host, key and snippet stored in it on this device \
                  and closes every open session. Then you can create a new vault.",
+                cx,
             ))
-            .child(note(
+            .child(lock_screen::note(
                 "If this vault synced, the account and its data stay on the server, but only \
                  signing in from a new vault with the same password brings them back. The \
                  recovery phrase works on this vault file alone and is of no use once it is \
                  deleted.",
+                muted,
             ))
-            .children(
-                self.error
-                    .as_ref()
-                    .map(|e| div().text_sm().text_color(theme.danger).child(e.clone())),
-            )
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .child(Input::new(&self.delete_word))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("delete-vault-cancel")
-                            .ghost()
-                            .xsmall()
-                            .child("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.step = Step::RecoveryForm;
-                                this.error = None;
-                                this.delete_word
-                                    .update(cx, |state, cx| state.set_value("", window, cx));
-                                this.phrase_input
-                                    .update(cx, |state, cx| state.focus(window, cx));
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("delete-vault")
-                            .danger()
-                            .child("Delete vault")
-                            .disabled(!is_confirmed)
-                            .on_click(cx.listener(|this, _, _, cx| this.delete_vault(cx))),
-                    ),
+                Button::new("delete-vault")
+                    .danger()
+                    .child("Delete vault")
+                    .disabled(!is_confirmed)
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_vault(cx))),
             )
+            .child(lock_screen::links().child(
+                lock_screen::link("delete-vault-cancel", "Cancel").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.step = Step::RecoveryForm;
+                        this.error = None;
+                        this.delete_word
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.phrase_input
+                            .update(cx, |state, cx| state.focus(window, cx));
+                        cx.notify();
+                    },
+                )),
+            ))
             .into_any_element()
     }
 }
 
 impl Render for UnlockView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let inner: gpui::AnyElement = match self.step {
-            Step::PasswordForm => v_flex()
-                .gap(px(8.))
-                .child(
-                    v_flex()
-                        .gap(px(2.))
-                        .child(div().text_lg().child("Unlock vault"))
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(theme.muted_foreground)
-                                .child("Enter your master password to continue."),
-                        ),
-                )
-                .children(
-                    self.error
-                        .as_ref()
-                        .map(|e| div().text_sm().text_color(theme.danger).child(e.clone())),
-                )
-                .child(Input::new(&self.password).mask_toggle())
-                .child(
-                    Button::new("unlock-vault")
-                        .primary()
-                        .child("Unlock")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.submit_password(window, cx)),
-                        ),
-                )
-                .child(
-                    Button::new("to-recovery")
-                        .ghost()
-                        .xsmall()
-                        .child("Forgot password? Use recovery phrase")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.step = Step::RecoveryForm;
-                            this.error = None;
-                            this.phrase_input
-                                .update(cx, |state, cx| state.focus(window, cx));
-                            cx.notify();
-                        })),
-                )
-                .into_any_element(),
-
-            Step::PasswordWorking => v_flex()
-                .gap_3()
-                .items_center()
-                .child(Spinner::new().large())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Unlocking…"),
-                )
-                .into_any_element(),
-
-            Step::RecoveryForm => {
-                let problem = self.recovery_problem(cx);
-                let word_count = recovery_word_count(self.phrase_input.read(cx).value().as_ref());
-                let word_count_color = if word_count == RECOVERY_WORD_COUNT {
-                    theme.success
-                } else {
-                    theme.muted_foreground
-                };
-                // The red error line already says it after a blocked Enter.
-                let hint = problem
-                    .map(RecoveryProblem::message)
-                    .filter(|hint| self.error.as_deref() != Some(*hint));
-
-                v_flex()
-                    .gap(px(8.))
-                    .child(
-                        v_flex()
-                            .gap(px(2.))
-                            .child(div().text_lg().child("Recover vault"))
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        "Enter your 24-word recovery phrase and choose a new \
-                                         password.",
-                                    ),
-                            ),
-                    )
-                    .children(
-                        self.error
-                            .as_ref()
-                            .map(|e| div().text_sm().text_color(theme.danger).child(e.clone())),
-                    )
-                    .child(Input::new(&self.phrase_input))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(word_count_color)
-                            .child(format!("{word_count} / {RECOVERY_WORD_COUNT} words")),
-                    )
-                    .child(Input::new(&self.new_password).mask_toggle())
-                    .child(Input::new(&self.confirm_password).mask_toggle())
-                    .children(hint.map(|hint| {
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.muted_foreground)
-                            .child(hint)
-                    }))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("back-to-pw")
-                                    .ghost()
-                                    .xsmall()
-                                    .child("Back to password unlock")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.step = Step::PasswordForm;
-                                        this.error = None;
-                                        this.password
-                                            .update(cx, |state, cx| state.focus(window, cx));
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("recover")
-                                    .primary()
-                                    .child("Recover")
-                                    .disabled(problem.is_some())
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.submit_recovery(cx)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        h_flex().child(
-                            Button::new("to-delete-vault")
-                                .ghost()
-                                .xsmall()
-                                .child("Lost the recovery phrase too? Delete this vault")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.step = Step::DeleteForm;
-                                    this.error = None;
-                                    this.delete_word
-                                        .update(cx, |state, cx| state.focus(window, cx));
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .into_any_element()
-            }
-
-            Step::RecoveryWorking => v_flex()
-                .gap_3()
-                .items_center()
-                .child(Spinner::new().large())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Recovering…"),
-                )
-                .into_any_element(),
-
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.step {
+            Step::PasswordForm => self.render_password_form(cx),
+            Step::PasswordWorking => lock_screen::working("Unlocking\u{2026}", cx),
+            Step::RecoveryForm => self.render_recovery_form(cx),
+            Step::RecoveryWorking => lock_screen::working("Recovering\u{2026}", cx),
             Step::DeleteForm => self.render_delete_form(cx),
         };
 
-        v_flex()
-            .size_full()
-            .bg(theme.background)
-            .items_center()
-            .justify_center()
-            .child(v_flex().w(px(300.)).gap(px(8.)).child(inner))
+        lock_screen::screen(content, window, cx)
     }
 }
 

@@ -11,7 +11,7 @@ It is written in Rust with [GPUI](https://www.gpui.rs/), the UI framework from Z
 
 ![file manager and terminal](docs/session.png)
 
-This is version 0.1.0 and I work on it alone. It works for me, but there are bugs for sure and many things are not done yet. Please don't expect too much.
+This is version 0.1.1 and I work on it alone. It works for me, but there are bugs for sure and many things are not done yet. Please don't expect too much.
 
 ## Download
 

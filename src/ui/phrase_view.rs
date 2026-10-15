@@ -10,7 +10,7 @@ use gpui_component::{
 use zeroize::Zeroizing;
 
 use crate::ui::phrase_panel::{phrase_file_text, phrase_panel};
-use crate::ui::VaultState;
+use crate::ui::{lock_screen, VaultState};
 
 const COPIED_LABEL_DURATION: Duration = Duration::from_secs(2);
 const PHRASE_FILE_NAME: &str = "flint-recovery-phrase.txt";
@@ -170,7 +170,7 @@ impl PhraseView {
 }
 
 impl Render for PhraseView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_rotation = matches!(
             self.vault_state.read(cx),
             VaultState::AwaitingPhraseConfirmation {
@@ -191,23 +191,12 @@ impl Render for PhraseView {
         };
 
         let save_message = self.save_result.as_ref().map(|result| match result {
-            Ok(path) => div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format!("Saved to {path}")),
-            Err(error) => div()
-                .text_sm()
-                .text_color(theme.danger)
-                .child(error.clone()),
+            Ok(path) => lock_screen::note(format!("Saved to {path}"), theme.muted_foreground),
+            Err(error) => lock_screen::error(error, cx),
         });
 
-        v_flex()
-            .size_full()
-            .bg(theme.background)
-            .items_center()
-            .justify_center()
-            .child(
-                v_flex()
+        lock_screen::screen(
+            v_flex()
                     .w(px(480.))
                     .gap_3()
                     .child(phrase_panel(&words, "Save your recovery phrase", subtitle, theme))
@@ -224,20 +213,20 @@ impl Render for PhraseView {
                             )),
                     )
                     .children(save_message)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Nobody can reset these words for you. Copy leaves them on the clipboard and Save as text file writes them unencrypted: clear the clipboard after pasting and keep the file somewhere safe."),
-                    )
+                    .child(lock_screen::note(
+                        "Nobody can reset these words for you. Copy leaves them on the clipboard and Save as text file writes them unencrypted: clear the clipboard after pasting and keep the file somewhere safe.",
+                        theme.muted_foreground,
+                    ))
                     .child(
                         Button::new("confirm-phrase")
                             .primary()
                             .child("I have saved this phrase")
                             .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
                     ),
-            )
-            .into_any_element()
+            window,
+            cx,
+        )
+        .into_any_element()
     }
 }
 

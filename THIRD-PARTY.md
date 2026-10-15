@@ -12,15 +12,14 @@ The icons in `assets/icons/` are from [Lucide](https://lucide.dev), except
 © Lucide Icons and Contributors. Some of its icons come from Feather,
 © Cole Bemis, MIT License. Full text: `assets/icons/LUCIDE-LICENSE.txt`.
 
-`gpui-component` embeds its own icon set, which is mostly Lucide icons under
+`gpui-kit-assets` embeds its own icon set, which is mostly Lucide icons under
 the same license.
 
 ## Dependencies
 
-- `gpui`, `gpui_platform` (Zed Industries): Apache-2.0. `gpui` depends on
-  `ztracing` and `zlog` from the same repository, which are
-  GPL-3.0-or-later. That is why flint is GPL.
-- `gpui-component` (Longbridge): Apache-2.0
+- `gpui-pre`, `gpui-pre-platform` (Zed Industries, crates.io snapshots of
+  `gpui`): Apache-2.0
+- `gpui-kit`, `gpui-component`, `gpui-kit-assets` (Longbridge): Apache-2.0
 - `alacritty_terminal`: Apache-2.0
 - `russh`, `russh-sftp`: Apache-2.0
 - `tokio`: MIT

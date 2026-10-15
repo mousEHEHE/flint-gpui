@@ -11,6 +11,7 @@ pub mod forwards_popover;
 pub mod host_sharing;
 pub mod import_view;
 pub mod keyboard_layout;
+pub mod lock_screen;
 pub mod mouse_report;
 pub mod passphrase_prompt;
 pub mod peer_link;
@@ -38,6 +39,7 @@ pub mod transfer_rate;
 pub mod unlock_view;
 pub mod update_service;
 pub mod update_view;
+pub mod window_chrome;
 
 /// The chrome every dialog shares.
 ///

@@ -645,8 +645,6 @@ fn apply_theme(cx: &mut App) {
     t.table_hover           = p.element_hover;
     t.table_row_border      = p.border;
 
-    t.tiles = p.surface;
-
     // Linux only.
     t.window_border = p.border;
 

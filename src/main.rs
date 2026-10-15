@@ -93,6 +93,14 @@ fn main() {
                         })
                         .detach();
 
+                    shell::set_window_visible(window.is_visible());
+                    window
+                        .observe_window_visibility(|visibility, _, _| {
+                            tracing::debug!(?visibility, "window visibility changed");
+                            shell::set_window_visible(visibility.is_visible());
+                        })
+                        .detach();
+
                     let view = cx.new(|cx| RootView::new(window, cx));
                     // gpui defaults every line box to 1.618x the font size, which
                     // makes rows a third taller than the text needs. The whole UI

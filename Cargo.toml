@@ -1,11 +1,11 @@
 [package]
 name = "flint"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SSH and SFTP client"
 license = "GPL-3.0-only"
 repository = "https://github.com/mousEHEHE/flint-gpui"
-rust-version = "1.97"
+rust-version = "1.98"
 publish = false
 
 [package.metadata.bundle]
@@ -16,10 +16,10 @@ category = "public.app-category.developer-tools"
 osx_minimum_system_version = "12.0"
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "d5821f270317754f2a311a0bb148ec32cbb0ced4" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "d5821f270317754f2a311a0bb148ec32cbb0ced4" }
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = "=0.7.3"
+gpui-kit-assets = "=0.7.3"
 
 rust-embed = { version = "8", features = ["include-exclude"] }
 anyhow = "1"

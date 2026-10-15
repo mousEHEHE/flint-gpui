@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable,
-    SystemNotification, Task, WeakEntity, Window, WindowControlArea,
+    SystemNotification, Task, WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, Root, WindowExt as _,
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -34,6 +34,7 @@ use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
 use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
+use crate::ui::window_chrome;
 use crate::ui::{dialog_chrome, VaultState};
 use crate::vault::{AuthMethod, ProxyKind, ServerEntry, SnippetBody};
 
@@ -59,16 +60,24 @@ actions!(
         ActivateTab7,
         ActivateTab8,
         ActivateTab9,
+        Quit,
     ]
 );
 
 pub fn init(cx: &mut App) {
     crate::ui::command_palette::init(cx);
 
+    // A global handler, so it also works on the lock screens.
+    cx.on_action(|_: &Quit, cx| {
+        tracing::info!("quit from the keyboard");
+        cx.quit();
+    });
+
     // `bind_chord` also registers each chord as it arrives on the Russian
     // layout; chords with no letter in them come out as a single binding.
     #[cfg(target_os = "macos")]
     {
+        bind_chord(cx, "cmd-q", Quit, None);
         bind_chord(cx, "cmd-,", ToggleSettings, None);
         bind_chord(cx, "cmd-p", ToggleCommandPalette, None);
         bind_chord(cx, "cmd-l", LockVault, None);
@@ -2350,115 +2359,18 @@ impl AppView {
 
         let update_mark = self.render_update_mark(cx);
 
-        // Draggable empty region (fills the space between "flint" and the
-        // right edge). The absolutely-positioned palette floats over its
-        // center but `.occlude()`s itself, so the gaps on either side of the
-        // palette remain grab handles for moving the window.
-        let drag_region = div()
-            .id("titlebar-drag")
-            .flex_1()
-            .h_full()
-            .window_control_area(WindowControlArea::Drag);
+        // Fills the space between "flint" and the right edge. The palette
+        // floats over its centre but `.occlude()`s itself, so the gaps on
+        // either side of the palette remain grab handles.
+        let drag_region = window_chrome::drag_region("titlebar-drag");
 
-        // macOS: the gpui content view opts out of window-drag (so title-bar
-        // clicks land instantly), so dragging must be started explicitly here.
-        // Linux: gpui does nothing with the control-area marking, so the same
-        // call starts the move there. Windows drags natively from the marking.
-        #[cfg(not(target_os = "windows"))]
-        let drag_region = drag_region.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-            window.start_window_move()
-        });
-
-        // Custom window controls (minimize / maximize-restore / close). macOS
-        // keeps its native traffic lights, so these are Windows/Linux only.
-        // On Windows the platform performs the action from the control-area
-        // marking, so there is no click handler.
         #[cfg(not(target_os = "macos"))]
-        let window_controls = {
-            let text_dim = crate::theme::text_dim();
-            let is_max = window.is_maximized();
-
-            let btn = move |id: &'static str,
-                            icon: IconName,
-                            area: WindowControlArea,
-                            tint: gpui::Hsla,
-                            hover_alpha: f32,
-                            border_alpha: f32| {
-                div()
-                    .id(id)
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.))
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .text_color(text_dim)
-                    .cursor_pointer()
-                    .window_control_area(area)
-                    .hover(move |s| {
-                        s.bg(tint.opacity(hover_alpha))
-                            .text_color(tint)
-                            .border_color(tint.opacity(border_alpha))
-                    })
-                    .active(move |s| {
-                        s.bg(tint.opacity(0.25))
-                            .text_color(tint)
-                            .border_color(tint.opacity(0.6))
-                    })
-                    .child(Icon::new(icon).size(px(12.)))
-            };
-
-            let minimize = btn(
-                "win-minimize",
-                IconName::WindowMinimize,
-                WindowControlArea::Min,
-                crate::theme::yellow(),
-                0.141,
-                0.400,
-            );
-            let maximize = btn(
-                "win-maximize",
-                if is_max {
-                    IconName::WindowRestore
-                } else {
-                    IconName::WindowMaximize
-                },
-                WindowControlArea::Max,
-                crate::theme::green_vc(),
-                0.141,
-                0.400,
-            );
-            let close = btn(
-                "win-close",
-                IconName::WindowClose,
-                WindowControlArea::Close,
-                crate::theme::red_error(),
-                0.161,
-                0.451,
-            );
-
-            // Linux: gpui does nothing with the control-area marking, so the
-            // buttons act on a click. flint has one window, so close quits.
-            #[cfg(not(target_os = "windows"))]
-            let (minimize, maximize, close) = (
-                minimize.on_click(|_, window, _| window.minimize_window()),
-                maximize.on_click(|_, window, _| window.zoom_window()),
-                close.on_click(|_, _, cx| cx.quit()),
-            );
-
-            h_flex()
-                .flex_none()
-                .gap(px(5.))
-                .child(minimize)
-                .child(maximize)
-                .child(close)
-        };
+        let window_controls = window_chrome::window_controls(window);
 
         let bar = h_flex()
             .relative()
             .w_full()
-            .h(px(32.))
+            .h(window_chrome::TITLE_BAR_HEIGHT)
             .pl(left_pad)
             .pr(px(6.))
             .gap(px(8.))
@@ -2717,7 +2629,6 @@ impl Render for AppView {
             )
             .when_some(self.settings_view.as_ref(), |el, sv| el.child(sv.clone()))
             .when_some(self.command_palette.as_ref(), |el, sl| el.child(sl.clone()))
-            .children(Root::render_dialog_layer(window, cx))
     }
 }
 

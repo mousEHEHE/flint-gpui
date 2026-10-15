@@ -1,9 +1,20 @@
 use async_channel::{Receiver, Sender};
 use russh::Channel;
 use russh::ChannelMsg;
-use tokio::sync::oneshot;
+use std::sync::LazyLock;
+
+use tokio::sync::{oneshot, watch};
 
 use crate::term_emulator::TermEmulator;
+
+/// Whether the window can be seen. While it cannot (minimized, hidden or
+/// fully covered), shell workers keep feeding output to the emulator but stop
+/// copying the screen for the UI, and send one fresh copy when it shows again.
+static IS_WINDOW_VISIBLE: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(true).0);
+
+pub fn set_window_visible(is_visible: bool) {
+    IS_WINDOW_VISIBLE.send_replace(is_visible);
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MouseModeFlags {
@@ -313,6 +324,8 @@ pub async fn handle_shell_commands(
     event_tx: Sender<ShellEvent>,
 ) {
     let mut emulator = TermEmulator::new(initial_rows, initial_cols);
+    let mut window_visibility = IS_WINDOW_VISIBLE.subscribe();
+    let mut is_snapshot_stale = false;
 
     // Send initial empty snapshot so the UI has something to render immediately.
     let _ = event_tx
@@ -390,6 +403,13 @@ pub async fn handle_shell_commands(
                 }
             }
 
+            Ok(()) = window_visibility.changed() => {
+                if *window_visibility.borrow_and_update() && is_snapshot_stale {
+                    is_snapshot_stale = false;
+                    let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                }
+            }
+
             msg = channel.wait() => {
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
@@ -401,7 +421,11 @@ pub async fn handle_shell_commands(
                                 break;
                             }
                         }
-                        let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                        if *window_visibility.borrow() {
+                            let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                        } else {
+                            is_snapshot_stale = true;
+                        }
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         emulator.advance(data.as_ref());
@@ -412,7 +436,11 @@ pub async fn handle_shell_commands(
                                 break;
                             }
                         }
-                        let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                        if *window_visibility.borrow() {
+                            let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                        } else {
+                            is_snapshot_stale = true;
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { .. })
                     | Some(ChannelMsg::Eof)

@@ -1,15 +1,13 @@
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, FocusHandle, Focusable, Window};
+use gpui::{App, Context, Entity, FocusHandle, Focusable, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
-    spinner::Spinner,
-    v_flex, ActiveTheme as _, Sizable as _,
 };
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
-use crate::ui::VaultState;
+use crate::ui::{lock_screen, VaultState};
 
 enum Step {
     Form,
@@ -145,31 +143,15 @@ impl CreateVaultView {
 }
 
 impl Render for CreateVaultView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let inner: gpui::AnyElement = match self.step {
-            Step::Form => v_flex()
-                .gap(px(8.))
-                .child(
-                    v_flex()
-                        .gap(px(2.))
-                        .child(div().text_lg().child("Create vault"))
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    "Choose a master password to protect your hosts and \
-                                     credentials.",
-                                ),
-                        ),
-                )
-                .children(
-                    self.error
-                        .as_ref()
-                        .map(|e| div().text_sm().text_color(theme.danger).child(e.clone())),
-                )
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.step {
+            Step::Form => lock_screen::column()
+                .child(lock_screen::header(
+                    "Create vault",
+                    "Choose a master password to protect your hosts and credentials.",
+                    cx,
+                ))
+                .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
                 .child(Input::new(&self.password).mask_toggle())
                 .child(Input::new(&self.confirm).mask_toggle())
                 .child(
@@ -179,25 +161,9 @@ impl Render for CreateVaultView {
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 )
                 .into_any_element(),
-
-            Step::Working => v_flex()
-                .gap_3()
-                .items_center()
-                .child(Spinner::new().large())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Creating vault…"),
-                )
-                .into_any_element(),
+            Step::Working => lock_screen::working("Creating vault\u{2026}", cx),
         };
 
-        v_flex()
-            .size_full()
-            .bg(theme.background)
-            .items_center()
-            .justify_center()
-            .child(v_flex().w(px(300.)).gap(px(8.)).child(inner))
+        lock_screen::screen(content, window, cx)
     }
 }
