@@ -37,6 +37,7 @@ pub mod terminal_view;
 pub mod transfer_conflict;
 pub mod transfer_rate;
 pub mod unlock_view;
+pub mod update_consent_view;
 pub mod update_service;
 pub mod update_view;
 pub mod window_chrome;

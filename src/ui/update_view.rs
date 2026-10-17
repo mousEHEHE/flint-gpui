@@ -122,7 +122,7 @@ impl Render for UpdateView {
             let service = service.read(cx);
             (service.release.clone(), service.download.clone())
         };
-        // The offer can go away under an open dialog: checks were turned off.
+        // The offer can go away under an open dialog: the build was withdrawn.
         let Some(release) = release else {
             return body
                 .child(

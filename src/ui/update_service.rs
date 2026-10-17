@@ -2,8 +2,8 @@
 //! the whole run of the app, so the title bar and Settings show one state.
 //!
 //! The requests themselves are in `crate::update`. This file decides when
-//! they are made: never on an OS without builds, and never while the
-//! "Check for updates" preference is off.
+//! they are made: never on an OS without builds, on a timer only when the
+//! user chose checks on start, and otherwise only when Check now is pressed.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use gpui::{App, AppContext as _, Context, Entity, Global};
 
 use crate::account::api::base_url;
-use crate::preferences::Preferences;
+use crate::preferences::{Preferences, UpdateChecks};
 use crate::update::{self, Release, UpdateError};
 use crate::version;
 
@@ -44,6 +44,9 @@ pub struct UpdateService {
     /// Counts cancels and resets, so an answer to work nobody waits for any
     /// more is ignored.
     generation: u64,
+    /// The "Check for updates?" question was put this run. Asked once per
+    /// run at most, even when it was closed without an answer.
+    is_question_asked: bool,
 }
 
 struct GlobalUpdateService(Entity<UpdateService>);
@@ -89,22 +92,40 @@ impl UpdateService {
             download: Download::Idle,
             is_cancelled: Arc::new(AtomicBool::new(false)),
             generation: 0,
+            is_question_asked: false,
         }
     }
 
+    /// Whether the "Check for updates?" question should be put now. Marks it
+    /// as asked, so the caller must show it when this says yes.
+    pub fn take_question(&mut self, cx: &App) -> bool {
+        let is_due = !self.is_question_asked
+            && update::platform().is_some()
+            && Preferences::update_checks(cx).is_none();
+        if is_due {
+            self.is_question_asked = true;
+        }
+        is_due
+    }
+
+    /// The timer's check. Only in automatic mode: with no answer yet, or
+    /// with manual checks, the app makes no request on its own.
     fn check_if_due(&mut self, cx: &mut Context<Self>) {
+        if Preferences::update_checks(cx) != Some(UpdateChecks::OnStart) {
+            return;
+        }
         if is_check_due(&self.last_check, SystemTime::now()) {
             self.check(cx);
         }
     }
 
-    /// Ask the server which build is current. Does nothing when checks are
-    /// off or this OS has no builds.
+    /// Ask the server which build is current. Does nothing when this OS has
+    /// no builds.
     pub fn check(&mut self, cx: &mut Context<Self>) {
         let Some(platform) = update::platform() else {
             return;
         };
-        if self.is_checking || !Preferences::is_update_check_enabled(cx) {
+        if self.is_checking {
             return;
         }
         self.is_checking = true;
@@ -165,17 +186,13 @@ impl UpdateService {
         self.download = Download::Idle;
     }
 
-    /// Turn the "Check for updates" preference on or off. Off also drops
-    /// what was already known, so nothing about updates stays on screen.
-    pub fn set_enabled(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
-        Preferences::update(cx, |prefs| prefs.is_update_check_enabled = is_enabled);
-        if is_enabled {
-            self.check(cx);
-            return;
-        }
-        self.stop_work();
-        self.last_check = None;
-        self.release = None;
+    /// Save the user's answer. Checks on start begin right away, unless a
+    /// check went well within the last six hours. Manual keeps what is known and a
+    /// download the user started: it only stops the timer's requests.
+    pub fn set_update_checks(&mut self, answer: UpdateChecks, cx: &mut Context<Self>) {
+        tracing::info!(?answer, "update checks set");
+        Preferences::update(cx, |prefs| prefs.update_checks = Some(answer));
+        self.check_if_due(cx);
         cx.notify();
     }
 
@@ -312,11 +329,8 @@ impl UpdateService {
         true
     }
 
-    /// The line under "Check for updates" on the About page.
-    pub fn result_line(&self, is_enabled: bool) -> String {
-        if !is_enabled {
-            return "Checks are off".into();
-        }
+    /// The line beside Check now on the About page.
+    pub fn result_line(&self, is_automatic: bool) -> String {
         if self.is_checking {
             return "Checking\u{2026}".into();
         }
@@ -324,7 +338,8 @@ impl UpdateService {
             (Some(Err(problem)), _) => format!("Could not check: {problem}"),
             (_, Some(release)) => format!("{} is available", release.version),
             (Some(Ok(_)), None) => "Up to date".into(),
-            (None, None) => "Not checked yet".into(),
+            (None, None) if is_automatic => "Not checked yet".into(),
+            (None, None) => "Checks only when you press Check now".into(),
         }
     }
 }
@@ -369,6 +384,7 @@ mod tests {
             download: Download::Idle,
             is_cancelled: Arc::new(AtomicBool::new(false)),
             generation: 0,
+            is_question_asked: false,
         }
     }
 
@@ -386,7 +402,10 @@ mod tests {
     fn the_result_line_says_how_the_last_check_ended() {
         let mut service = service();
         assert_eq!(service.result_line(true), "Not checked yet");
-        assert_eq!(service.result_line(false), "Checks are off");
+        assert_eq!(
+            service.result_line(false),
+            "Checks only when you press Check now"
+        );
 
         service.is_checking = true;
         assert_eq!(service.result_line(true), "Checking\u{2026}");
@@ -395,15 +414,18 @@ mod tests {
         service.last_check = Some(Ok(SystemTime::now()));
         assert_eq!(service.result_line(true), "Up to date");
 
+        assert_eq!(service.result_line(false), "Up to date");
+
         service.release = Some(release("0.2.0"));
         assert_eq!(service.result_line(true), "0.2.0 is available");
+        // A manual check that found a build says so.
+        assert_eq!(service.result_line(false), "0.2.0 is available");
 
         service.last_check = Some(Err("could not reach the server: timed out".into()));
         assert_eq!(
             service.result_line(true),
             "Could not check: could not reach the server: timed out"
         );
-        assert_eq!(service.result_line(false), "Checks are off");
     }
 
     #[test]

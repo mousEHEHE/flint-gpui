@@ -151,6 +151,16 @@ impl TerminalScheme {
     }
 }
 
+/// When flint asks the flint server whether a newer build is out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChecks {
+    /// On every start and every six hours while the app runs.
+    OnStart,
+    /// Only when the user presses Check now.
+    Manual,
+}
+
 /// Every field carries a serde default so a file written by an older build
 /// still loads.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -174,18 +184,25 @@ pub struct Preferences {
     pub terminal_font: TerminalFont,
     #[serde(default)]
     pub terminal_scheme: TerminalScheme,
-    /// Ask the server now and then whether a newer build is out. Off means
-    /// the app makes no such request at all.
-    #[serde(default = "default_true")]
-    pub is_update_check_enabled: bool,
+    /// `None` until the user answers the question, and until then the app
+    /// makes no update request on its own. Set by `load_from` from the raw
+    /// file, see `update_checks_in`.
+    #[serde(default)]
+    pub update_checks: Option<UpdateChecks>,
 }
 
-/// Whether a preferences file that does not load as a whole still says that
-/// the update check is off. One value this build does not know must not turn
-/// back on a request the user turned off.
-fn is_update_check_off(data: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(data)
-        .is_ok_and(|file| file["is_update_check_enabled"] == false)
+/// The update answer the raw file holds. Read on its own so that a file that
+/// does not load as a whole keeps it: one value this build does not know must
+/// not undo the answer.
+///
+/// Files from 0.1.x have `is_update_check_enabled` instead. Its `true` was
+/// only the default, so just `false` counts as an answer.
+fn update_checks_in(data: &[u8]) -> Option<UpdateChecks> {
+    let file = serde_json::from_slice::<serde_json::Value>(data).ok()?;
+    if let Ok(answer) = UpdateChecks::deserialize(&file["update_checks"]) {
+        return Some(answer);
+    }
+    (file["is_update_check_enabled"] == false).then_some(UpdateChecks::Manual)
 }
 
 fn default_true() -> bool {
@@ -214,7 +231,7 @@ impl Default for Preferences {
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             terminal_font: TerminalFont::default(),
             terminal_scheme: TerminalScheme::default(),
-            is_update_check_enabled: true,
+            update_checks: None,
         }
     }
 }
@@ -236,11 +253,11 @@ impl Preferences {
             .is_some_and(|prefs| prefs.is_option_meta)
     }
 
-    /// Whether the app may ask for updates. True when the preferences were
-    /// never loaded, which matches the default.
-    pub fn is_update_check_enabled(cx: &gpui::App) -> bool {
+    /// `None` when the user has not answered, or the preferences were never
+    /// loaded.
+    pub fn update_checks(cx: &gpui::App) -> Option<UpdateChecks> {
         cx.try_global::<Self>()
-            .is_none_or(|prefs| prefs.is_update_check_enabled)
+            .and_then(|prefs| prefs.update_checks)
     }
 
     pub fn terminal_font_size(cx: &gpui::App) -> f32 {
@@ -326,15 +343,13 @@ impl Preferences {
                 return Self::default();
             }
         };
-        match serde_json::from_slice::<Self>(&data) {
-            Ok(prefs) => prefs,
-            Err(e) => {
-                tracing::warn!(?e, "invalid preferences.json, using defaults");
-                Self {
-                    is_update_check_enabled: !is_update_check_off(&data),
-                    ..Self::default()
-                }
-            }
+        let prefs = serde_json::from_slice::<Self>(&data).unwrap_or_else(|e| {
+            tracing::warn!(?e, "invalid preferences.json, using defaults");
+            Self::default()
+        });
+        Self {
+            update_checks: update_checks_in(&data),
+            ..prefs
         }
     }
 
@@ -409,23 +424,56 @@ mod tests {
     }
 
     #[test]
-    fn the_update_check_defaults_to_on_and_round_trips() {
-        assert!(Preferences::default().is_update_check_enabled);
-        // A file from before the field existed must not turn the check off.
+    fn the_update_answer_starts_unset_and_round_trips() {
+        assert_eq!(Preferences::default().update_checks, None);
         let old: Preferences = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
-        assert!(old.is_update_check_enabled);
+        assert_eq!(old.update_checks, None);
 
-        let off = Preferences {
-            is_update_check_enabled: false,
-            ..Preferences::default()
-        };
-        let json = serde_json::to_string(&off).unwrap();
-        let back: Preferences = serde_json::from_str(&json).unwrap();
-        assert!(!back.is_update_check_enabled);
+        for answer in [UpdateChecks::OnStart, UpdateChecks::Manual] {
+            let prefs = Preferences {
+                update_checks: Some(answer),
+                ..Preferences::default()
+            };
+            let json = serde_json::to_string(&prefs).unwrap();
+            assert_eq!(update_checks_in(json.as_bytes()), Some(answer), "{json}");
+        }
+        assert_eq!(
+            serde_json::to_string(&UpdateChecks::OnStart).unwrap(),
+            r#""on_start""#
+        );
+        assert_eq!(
+            serde_json::to_string(&UpdateChecks::Manual).unwrap(),
+            r#""manual""#
+        );
     }
 
     #[test]
-    fn the_update_check_stays_off_when_the_rest_of_the_file_does_not_load() {
+    fn a_file_from_0_1_counts_only_a_turned_off_check_as_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            Preferences::load_from(&path).update_checks
+        };
+
+        assert_eq!(
+            load(r#"{"theme":"light","is_update_check_enabled":false}"#),
+            Some(UpdateChecks::Manual)
+        );
+        assert_eq!(
+            load(r#"{"theme":"light","is_update_check_enabled":true}"#),
+            None
+        );
+        assert_eq!(load(r#"{"theme":"light"}"#), None);
+        // An answer given in this build wins over the old key.
+        assert_eq!(
+            load(r#"{"update_checks":"on_start","is_update_check_enabled":false}"#),
+            Some(UpdateChecks::OnStart)
+        );
+    }
+
+    #[test]
+    fn the_update_answer_stays_when_the_rest_of_the_file_does_not_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("preferences.json");
         let load = |text: &str| {
@@ -434,30 +482,41 @@ mod tests {
         };
 
         // A value written by a newer build.
-        let off = load(r#"{"terminal_scheme":"from-the-future","is_update_check_enabled":false}"#);
-        assert!(!off.is_update_check_enabled);
-        assert_eq!(off.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
+        let manual = load(r#"{"terminal_scheme":"from-the-future","update_checks":"manual"}"#);
+        assert_eq!(manual.update_checks, Some(UpdateChecks::Manual));
+        assert_eq!(manual.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
 
-        assert!(load(r#"{"terminal_scheme":"from-the-future"}"#).is_update_check_enabled);
-        assert!(
-            load(r#"{"terminal_scheme":7,"is_update_check_enabled":true}"#).is_update_check_enabled
+        assert_eq!(
+            load(r#"{"terminal_scheme":7,"is_update_check_enabled":false}"#).update_checks,
+            Some(UpdateChecks::Manual)
         );
-        assert!(load("not json").is_update_check_enabled);
+        assert_eq!(
+            load(r#"{"terminal_scheme":7,"update_checks":"on_start"}"#).update_checks,
+            Some(UpdateChecks::OnStart)
+        );
+        assert_eq!(
+            load(r#"{"terminal_scheme":"from-the-future"}"#).update_checks,
+            None
+        );
+        assert_eq!(load("not json").update_checks, None);
     }
 
     #[test]
     fn saving_replaces_the_file_and_leaves_nothing_beside_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Flint").join("preferences.json");
-        let off = Preferences {
-            is_update_check_enabled: false,
+        let manual = Preferences {
+            update_checks: Some(UpdateChecks::Manual),
             ..Preferences::default()
         };
 
         Preferences::default().save_to(&path).unwrap();
-        off.save_to(&path).unwrap();
+        manual.save_to(&path).unwrap();
 
-        assert!(!Preferences::load_from(&path).is_update_check_enabled);
+        assert_eq!(
+            Preferences::load_from(&path).update_checks,
+            Some(UpdateChecks::Manual)
+        );
         let left: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(left.len(), 1, "{left:?}");
     }

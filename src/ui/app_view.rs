@@ -32,6 +32,7 @@ use crate::ui::settings::{SettingsView, SettingsViewEvent};
 use crate::ui::sftp_browser::{RestorePaths, TransferKind};
 use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
+use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
 use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
@@ -133,6 +134,9 @@ pub fn init(cx: &mut App) {
 const PALETTE_SHORTCUT: &str = "\u{2318}P";
 #[cfg(not(target_os = "macos"))]
 const PALETTE_SHORTCUT: &str = "Ctrl+Shift+P";
+
+/// How long after an unlock the "Check for updates?" question waits.
+const UPDATE_QUESTION_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// Shown next to "Lock now" and the palette command. Must track the binding above.
 #[cfg(target_os = "macos")]
@@ -369,6 +373,46 @@ impl AppView {
         if let Some((extension, local)) = self.picker_owed_after_unlock.take() {
             self.show_picker_for(extension, local, cx);
         }
+        self.ask_about_update_checks_soon(window, cx);
+    }
+
+    /// Put the "Check for updates?" question if it is still open. It waits a
+    /// moment: the dialogs an unlock brings back open on a later tick, and
+    /// the question must not end up stacked with them.
+    fn ask_about_update_checks_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(UPDATE_QUESTION_DELAY).await;
+            this.update_in(cx, |this, window, cx| {
+                this.ask_about_update_checks(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Never over the lock screen or another overlay: that one is waiting
+    /// for the user, and the question can wait for the next unlock or start.
+    fn ask_about_update_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_vault_locked(cx) || self.is_overlay_open(window, cx) {
+            return;
+        }
+        let service = UpdateService::global(cx);
+        if !service.update(cx, |service, cx| service.take_question(cx)) {
+            return;
+        }
+        let view = cx.new(|_| UpdateConsentView);
+        cx.subscribe_in(
+            &view,
+            window,
+            |_, _, event: &UpdateConsentEvent, window, cx| match event {
+                // close_dialog puts focus back where it was, often a terminal
+                UpdateConsentEvent::Answered => window.close_dialog(cx),
+            },
+        )
+        .detach();
+        window.open_dialog(&mut *cx, move |dialog, _, _| {
+            dialog_chrome(dialog).w(px(400.)).child(view.clone())
+        });
     }
 
     fn set_status(&mut self, msg: String, cx: &mut Context<Self>) {
@@ -2017,38 +2061,47 @@ impl AppView {
         });
     }
 
-    /// The title bar's mark for a newer build: an arrow and the version, or
-    /// the percent while it downloads. `None` when there is nothing newer.
+    /// The title bar's mark for a newer build: a filled accent pill with the
+    /// version, or the percent while it downloads. `None` when there is
+    /// nothing newer.
     fn render_update_mark(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let service = UpdateService::global(cx);
         let service = service.read(cx);
-        let version = service.release.as_ref()?.version.clone();
+        let version = &service.release.as_ref()?.version;
         let text = match service.download {
-            Download::Running { percent } => format!("{percent}%"),
-            _ => version,
+            Download::Running { percent } => format!("Downloading {percent}%"),
+            _ => format!("Update {version}"),
         };
         let theme = cx.theme();
-        let (text_color, hover_text, hover_bg) = (
-            theme.muted_foreground,
-            theme.foreground,
-            theme.secondary_hover,
+        let (bg, fg, hover_bg, active_bg) = (
+            theme.primary,
+            theme.primary_foreground,
+            theme.primary_hover,
+            theme.primary_active,
         );
 
         Some(
             h_flex()
                 .id("titlebar-update")
                 .flex_none()
-                .h(px(22.))
-                .px(px(6.))
-                .gap(px(4.))
+                .h(px(20.))
+                .px(px(8.))
+                .gap(px(5.))
                 .items_center()
-                .rounded(px(3.))
+                .rounded_full()
+                .bg(bg)
                 .text_size(px(11.))
-                .text_color(text_color)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(fg)
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg).text_color(hover_text))
-                .active(|s| s.bg(crate::theme::element_active()))
-                .child(Icon::empty().path("icons/download.svg").size(px(11.)))
+                .hover(move |s| s.bg(hover_bg))
+                .active(move |s| s.bg(active_bg))
+                .child(
+                    Icon::empty()
+                        .path("icons/download.svg")
+                        .size(px(11.))
+                        .text_color(fg),
+                )
                 .child(text)
                 .on_click(cx.listener(|this, _, window, cx| this.show_update_dialog(window, cx))),
         )

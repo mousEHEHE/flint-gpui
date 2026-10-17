@@ -17,7 +17,8 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::preferences::{
-    Preferences, TerminalFont, TerminalScheme, ThemePreference, DEFAULT_TERMINAL_FONT_SIZE,
+    Preferences, TerminalFont, TerminalScheme, ThemePreference, UpdateChecks,
+    DEFAULT_TERMINAL_FONT_SIZE,
 };
 use crate::ui::server_form::read_key_file;
 use crate::ui::terminal_palette::TerminalColors;
@@ -1513,27 +1514,31 @@ impl SettingsView {
             ))
     }
 
-    /// The "Check for updates" preference, with a button to check right now
-    /// and how the last check ended.
+    /// The "Check for updates on start" preference, with a button to check
+    /// right now and how the last check ended.
     fn render_update_check(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_fg = cx.theme().muted_foreground;
-        let is_enabled = Preferences::is_update_check_enabled(cx);
+        let is_automatic = Preferences::update_checks(cx) == Some(UpdateChecks::OnStart);
         let service = UpdateService::global(cx);
         let (is_checking, result) = {
             let service = service.read(cx);
-            (service.is_checking, service.result_line(is_enabled))
+            (service.is_checking, service.result_line(is_automatic))
         };
 
         v_flex()
             .gap(px(4.))
             .child(
                 Checkbox::new("about-check-for-updates")
-                    .checked(is_enabled)
-                    .label("Check for updates")
+                    .checked(is_automatic)
+                    .label("Check for updates on start")
                     .on_click(|checked: &bool, _, cx| {
-                        let is_enabled = *checked;
+                        let answer = if *checked {
+                            UpdateChecks::OnStart
+                        } else {
+                            UpdateChecks::Manual
+                        };
                         UpdateService::global(cx)
-                            .update(cx, |service, cx| service.set_enabled(is_enabled, cx));
+                            .update(cx, |service, cx| service.set_update_checks(answer, cx));
                     }),
             )
             .child(
@@ -1542,8 +1547,9 @@ impl SettingsView {
                     .text_size(px(10.5))
                     .text_color(muted_fg)
                     .child(
-                    "Asks the flint server for the newest version when the app starts and every \
-                     six hours after. The request says macOS or Windows and nothing else.",
+                    "When on, flint asks the flint server for the newest version when it starts \
+                     and every six hours after. When off, it asks only when you press Check now. \
+                     The request says macOS or Windows and nothing else.",
                 ),
             )
             .child(
@@ -1556,7 +1562,7 @@ impl SettingsView {
                             .small()
                             .child("Check now")
                             .loading(is_checking)
-                            .disabled(!is_enabled || is_checking)
+                            .disabled(is_checking)
                             .on_click(|_, _, cx| {
                                 UpdateService::global(cx)
                                     .update(cx, |service, cx| service.check(cx));

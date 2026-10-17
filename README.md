@@ -11,7 +11,7 @@ It is written in Rust with [GPUI](https://www.gpui.rs/), the UI framework from Z
 
 ![file manager and terminal](docs/session.png)
 
-This is version 0.1.1 and I work on it alone. It works for me, but there are bugs for sure and many things are not done yet. Please don't expect too much.
+I work on it with my friend Opus. It works for me, but there are bugs for sure and many things are not done yet. Please don't expect too much.
 
 ## Download
 
@@ -36,11 +36,11 @@ For Linux and Intel Mac you need to build it yourself for now.
 
 ## Sync and teams
 
-This part is optional. The app works without any account.
+This part is optional. The app is local-first and works without any account.
 
 If you sign in with GitHub, your hosts sync between your devices. The data is encrypted on your machine before upload, so the server can't read it. Teams let you share hosts with other people by invite link.
 
-I made the server for myself and my friends, so it is easier for us to keep hosts on all devices. The server code is not open and I run it myself. So here you have to trust me, or just don't use sync. What the server can see is described in [SECURITY.md](SECURITY.md).
+I made the server for myself and my friends, so it is easier for us to keep hosts on all devices. The server code is not open and I run it myself. So here you have to trust me, or just don't use sync. If people start to use the app, I will make a self-hosted version of the server. What the server can see is described in [SECURITY.md](SECURITY.md).
 
 Sync of your own hosts is free. Teams are free now too. But if a lot of people start to use the app, Teams will become paid. Only the owner of a team will pay, and only for the team itself. Members will not pay anything.
 
@@ -79,7 +79,7 @@ Probably a lot of other things too. If something is broken, please open an [issu
 
 ## Network
 
-flint connects to `flint.mouse.pw` to check for updates (you can turn it off in settings) and for sync, if you use it. There is no telemetry.
+flint connects to `flint.mouse.pw` to check for updates, if you allow it when it asks (you can change it in settings), and for sync, if you use it. There is no telemetry.
 
 ## License
 
