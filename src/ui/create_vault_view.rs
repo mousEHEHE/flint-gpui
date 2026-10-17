@@ -148,12 +148,12 @@ impl Render for CreateVaultView {
             Step::Form => lock_screen::column()
                 .child(lock_screen::header(
                     "Create vault",
-                    "Choose a master password to protect your hosts and credentials.",
+                    Some("Choose a master password to protect your hosts and credentials."),
                     cx,
                 ))
-                .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
                 .child(Input::new(&self.password).mask_toggle())
                 .child(Input::new(&self.confirm).mask_toggle())
+                .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
                 .child(
                     Button::new("create-vault")
                         .primary()

@@ -81,6 +81,7 @@ fn menu_panel(
     let border_c = crate::theme::border_focused();
     let hover_bg = cx.theme().list_hover;
     let active_bg = cx.theme().list_active;
+    let has_icons = items.iter().any(|item| item.icon.is_some());
 
     div()
         .id(id)
@@ -103,23 +104,27 @@ fn menu_panel(
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .text_size(px(11.5))
+                .text_size(px(12.))
                 .text_color(item_fg)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover_bg))
                 .active(move |s| s.bg(active_bg))
                 .on_click(item.on_click)
-                .children(item.icon.map(|path| {
-                    Icon::new(IconName::File)
-                        .path(path)
-                        .xsmall()
-                        .text_color(item_fg)
-                }))
+                .map(|el| match item.icon {
+                    Some(path) => el.child(
+                        Icon::new(IconName::File)
+                            .path(path)
+                            .xsmall()
+                            .text_color(item_fg),
+                    ),
+                    // Keep labels on one edge when only some items have icons.
+                    None => el.when(has_icons, |el| el.child(div().size(px(12.)).flex_none())),
+                })
                 .child(item.label)
                 .children(item.shortcut.map(|shortcut| {
                     div()
                         .ml_auto()
-                        .pl(px(14.))
+                        .pl(px(16.))
                         .text_size(px(10.5))
                         .text_color(muted)
                         .child(shortcut)

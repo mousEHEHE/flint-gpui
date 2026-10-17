@@ -9,7 +9,7 @@ use gpui_component::{
 use crate::ui::window_chrome::{self, TITLE_BAR_HEIGHT};
 
 const COLUMN_WIDTH: Pixels = px(300.);
-const NOTE_TEXT_SIZE: Pixels = px(11.5);
+const NOTE_TEXT_SIZE: Pixels = px(11.);
 
 /// The whole window while the vault is locked: a bare title bar, and the
 /// content centred below it.
@@ -35,12 +35,19 @@ pub fn column() -> Div {
     v_flex().w(COLUMN_WIDTH).gap(px(8.))
 }
 
-pub fn header(title: &'static str, subtitle: &'static str, cx: &App) -> Div {
+pub fn header(title: &'static str, subtitle: Option<&'static str>, cx: &App) -> Div {
     v_flex()
         .gap(px(4.))
         .pb(px(4.))
-        .child(div().text_lg().child(title))
-        .child(note(subtitle, cx.theme().muted_foreground))
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(title),
+        )
+        .when_some(subtitle, |el, subtitle| {
+            el.child(note(subtitle, cx.theme().muted_foreground))
+        })
 }
 
 /// Small text under or between the fields: hints, counters and errors.
@@ -67,9 +74,9 @@ pub fn link(id: impl Into<ElementId>, label: &'static str) -> Button {
 /// What shows while the vault is being created or opened.
 pub fn working(label: &'static str, cx: &App) -> AnyElement {
     v_flex()
-        .gap_3()
+        .gap(px(8.))
         .items_center()
-        .child(Spinner::new().large())
+        .child(Spinner::new())
         .child(note(label, cx.theme().muted_foreground))
         .into_any_element()
 }

@@ -247,24 +247,14 @@ fn ago(since: std::time::Instant) -> String {
 impl SyncPane {
     fn render_devices(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (fg, muted_fg, danger, border) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.danger,
-            theme.title_bar_border,
+        let (fg, muted_fg, danger) = (theme.foreground, theme.muted_foreground, theme.danger);
+        let mut section = v_flex().gap(px(6.)).mt(px(6.)).child(
+            div()
+                .text_size(px(12.))
+                .font_semibold()
+                .text_color(fg)
+                .child("Devices"),
         );
-        let mut section = v_flex()
-            .gap(px(6.))
-            .pt(px(8.))
-            .border_t_1()
-            .border_color(border)
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_semibold()
-                    .text_color(fg)
-                    .child("Devices"),
-            );
 
         let Some(devices) = &self.devices else {
             let Some(error) = self.device_error.clone() else {
@@ -276,7 +266,7 @@ impl SyncPane {
                 );
             };
             return section
-                .child(div().text_size(px(11.5)).text_color(danger).child(error))
+                .child(div().text_size(px(11.)).text_color(danger).child(error))
                 .child(
                     h_flex().child(
                         Button::new("devices-retry")
@@ -291,6 +281,7 @@ impl SyncPane {
             // "2026-10-11T08:15:00Z": the day is enough here.
             let day: String = device.last_seen_at.chars().take(10).collect();
             let mut row = h_flex()
+                .h(px(24.))
                 .gap(px(8.))
                 .items_center()
                 .child(
@@ -304,12 +295,15 @@ impl SyncPane {
                         .text_color(fg)
                         .child(format!("{} · {}", device.device_name, device.platform)),
                 )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(muted_fg)
-                        .child(format!("last seen {day}")),
-                );
+                .when(!device.is_current, |row| {
+                    row.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(muted_fg)
+                            .child(format!("last seen {day}")),
+                    )
+                })
+                .child(div().flex_1());
             row = if device.is_current {
                 row.child(
                     div()
@@ -321,7 +315,7 @@ impl SyncPane {
                 row.child(
                     Button::new(SharedString::from(format!("device-{id}")))
                         .xsmall()
-                        .icon(IconName::Close)
+                        .ghost()
                         .child("Sign out")
                         .loading(self.signing_out == Some(id))
                         .disabled(self.signing_out.is_some())
@@ -335,19 +329,14 @@ impl SyncPane {
         section.children(
             self.device_error
                 .clone()
-                .map(|e| div().text_size(px(11.5)).text_color(danger).child(e)),
+                .map(|e| div().text_size(px(11.)).text_color(danger).child(e)),
         )
     }
 
     fn render_delete(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted_fg, danger, border) =
-            (theme.muted_foreground, theme.danger, theme.title_bar_border);
-        let section = v_flex()
-            .gap(px(6.))
-            .pt(px(8.))
-            .border_t_1()
-            .border_color(border);
+        let (muted_fg, danger) = (theme.muted_foreground, theme.danger);
+        let section = v_flex().gap(px(6.)).mt(px(6.));
         let trash = || Icon::empty().path("icons/trash.svg");
 
         if !self.is_confirming_delete {
@@ -356,7 +345,7 @@ impl SyncPane {
                     Button::new("account-delete")
                         .small()
                         .danger()
-                        .icon(trash())
+                        .outline()
                         .child("Delete account…")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.is_confirming_delete = true;
@@ -378,7 +367,7 @@ impl SyncPane {
             .children(
                 self.delete_error
                     .clone()
-                    .map(|e| div().text_size(px(11.5)).text_color(danger).child(e)),
+                    .map(|e| div().text_size(px(11.)).text_color(danger).child(e)),
             )
             .child(
                 h_flex()
@@ -427,7 +416,7 @@ impl Render for SyncPane {
                 .child(text)
         };
         let caption = |text: String| div().text_size(px(10.5)).text_color(muted_fg).child(text);
-        let problem = |text: String| div().text_size(px(11.5)).text_color(danger).child(text);
+        let problem = |text: String| div().text_size(px(11.)).text_color(danger).child(text);
 
         let account = self.vault_state.read(cx).manager().and_then(|vault| {
             let state = vault.sync_state()?;
@@ -500,7 +489,7 @@ impl Render for SyncPane {
                     .child(
                         div()
                             .w(px(300.))
-                            .child(Input::new(&self.password).mask_toggle()),
+                            .child(Input::new(&self.password).small().mask_toggle()),
                     )
                     .children(sign_in_error)
                     .child(

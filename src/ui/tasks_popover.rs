@@ -8,10 +8,13 @@
 //! that file stays about the connection lifecycle.
 
 use gpui::prelude::*;
-use gpui::{div, linear_color_stop, linear_gradient, px, AnyElement, Context, Hsla, SharedString};
+use gpui::{div, px, AnyElement, Context, Hsla, SharedString};
 use gpui_component::{
-    h_flex, progress::ProgressCircle, spinner::Spinner, v_flex, ActiveTheme as _, Sizable as _,
-    StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    progress::ProgressCircle,
+    spinner::Spinner,
+    v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
 };
 
 use crate::ssh::TransferOutcome;
@@ -19,6 +22,7 @@ use crate::theme;
 use crate::ui::file_pane::fmt_size;
 use crate::ui::server_session::{ServerSession, TransferTask};
 use crate::ui::sftp_browser::TransferKind;
+use crate::ui::terminal_tabs::header_button;
 
 const POPOVER_W: f32 = 340.0;
 
@@ -77,12 +81,12 @@ impl ServerSession {
         }
         let extra = self.transfers.len().saturating_sub(3);
         if extra > 0 {
-            pills.push(self.render_glyph_pill(format!("+{extra}"), theme::accent(), cx));
+            pills.push(self.render_glyph_pill(format!("+{extra}"), cx));
         }
 
         Some(
             h_flex()
-                .gap(px(7.))
+                .gap(px(6.))
                 .items_center()
                 .children(pills)
                 .into_any_element(),
@@ -108,62 +112,30 @@ impl ServerSession {
                 .into_any_element()
         };
         let value = transfer_value_text(t);
-        let arrow = t.kind.arrow();
 
-        div()
-            .id(("tr-pill", id))
-            .flex()
-            .items_center()
+        header_button(("tr-pill", id), cx)
             .gap(px(5.))
-            .h(px(19.))
-            .pl(px(4.))
-            .pr(px(7.))
-            .rounded(px(3.))
-            .border_1()
-            .border_color(theme::accent_line())
-            .bg(theme::accent_soft())
-            .text_size(px(10.5))
             .text_color(cx.theme().foreground)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::element_hover()))
-            .active(|s| s.bg(theme::element_active()))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_tasks(cx)))
             .child(indicator)
-            .child(div().text_color(accent).child(arrow))
+            .child(direction_icon(t.kind))
             .child(
                 div()
                     .max_w(px(96.))
                     .truncate()
                     .text_ellipsis_middle()
-                    .font_semibold()
                     .child(t.name.clone()),
             )
             .child(
                 div()
-                    .text_color(accent)
-                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(value)),
             )
             .into_any_element()
     }
 
-    fn render_glyph_pill(&self, label: String, color: Hsla, cx: &Context<Self>) -> AnyElement {
-        div()
-            .id(SharedString::from(format!("task-glyph-{label}")))
-            .flex()
-            .items_center()
-            .h(px(19.))
-            .px(px(8.))
-            .rounded(px(3.))
-            .border_1()
-            .border_color(theme::border_focused())
-            .bg(theme::element())
-            .text_size(px(10.5))
-            .font_semibold()
-            .text_color(color)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::element_hover()))
-            .active(|s| s.bg(theme::element_active()))
+    fn render_glyph_pill(&self, label: String, cx: &Context<Self>) -> AnyElement {
+        header_button(SharedString::from(format!("task-glyph-{label}")), cx)
             .on_click(cx.listener(|this, _, _, cx| this.toggle_tasks(cx)))
             .child(SharedString::from(label))
             .into_any_element()
@@ -194,14 +166,10 @@ impl ServerSession {
             .right(px(12.))
             .bottom(px(12.))
             .w(px(POPOVER_W))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(theme::pop_grad_top(), 0.),
-                linear_color_stop(theme::pop_grad_bottom(), 1.),
-            ))
+            .bg(theme::pop_surface())
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded(px(4.))
+            .border_color(theme::border_focused())
+            .rounded(px(6.))
             .shadow_lg()
             .overflow_hidden()
             .child(self.render_popover_head(cx))
@@ -232,65 +200,27 @@ impl ServerSession {
             .child(
                 div()
                     .text_size(px(10.))
-                    .font_bold()
+                    .font_semibold()
                     .text_color(theme::muted_gray())
                     .child("TASKS"),
             )
             .when(active > 0, |el| {
                 el.child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .h(px(15.))
-                        .pl(px(5.))
-                        .pr(px(6.))
-                        .rounded(px(3.))
-                        .bg(theme::accent_soft())
-                        .border_1()
-                        .border_color(theme::accent_line())
-                        .text_size(px(9.5))
-                        .font_semibold()
-                        .text_color(theme::accent())
-                        .child(
-                            div()
-                                .w(px(4.))
-                                .h(px(4.))
-                                .rounded(px(999.))
-                                .bg(theme::accent()),
-                        )
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme::text_dim())
                         .child(SharedString::from(active.to_string())),
                 )
             })
             .child(div().flex_1())
-            .child(self.head_icon_btn(
-                "tasks-close",
-                "✕",
-                cx.listener(|this, _, _, cx| this.close_tasks(cx)),
-            ))
+            .child(
+                Button::new("tasks-close")
+                    .ghost()
+                    .icon(IconName::Close)
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.close_tasks(cx))),
+            )
             .into_any_element()
-    }
-
-    fn head_icon_btn(
-        &self,
-        id: &'static str,
-        glyph: &'static str,
-        on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .w(px(19.))
-            .h(px(19.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.))
-            .text_size(px(11.))
-            .text_color(theme::text_dim())
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::element_hover()).text_color(theme::text()))
-            .active(|s| s.bg(theme::element_active()).text_color(theme::text()))
-            .on_click(on_click)
-            .child(glyph)
     }
 
     fn render_section(
@@ -307,30 +237,29 @@ impl ServerSession {
             .pb(px(3.))
             .child(
                 div()
-                    .text_size(px(8.5))
-                    .font_bold()
+                    .text_size(px(10.))
+                    .font_semibold()
                     .text_color(theme::text_dim())
                     .child(label),
             )
-            .child(div().flex_1().h(px(1.)).bg(cx.theme().border))
+            .child(div().flex_1())
             .when(with_clear, |el| {
                 el.child(
                     div()
                         .id("tasks-clear")
                         .flex_none()
-                        .h(px(15.))
-                        .px(px(5.))
+                        .h(px(18.))
+                        .px(px(6.))
                         .flex()
                         .items_center()
                         .rounded(px(3.))
-                        .text_size(px(8.5))
-                        .font_bold()
+                        .text_size(px(10.5))
                         .text_color(theme::text_dim())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::element_hover()).text_color(theme::text()))
                         .active(|s| s.bg(theme::element_active()))
                         .on_click(cx.listener(|this, _, _, cx| this.clear_finished_tasks(cx)))
-                        .child("CLEAR"),
+                        .child("Clear"),
                 )
             })
             .into_any_element()
@@ -340,7 +269,6 @@ impl ServerSession {
         let determinate = t.total > 0;
         let accent = theme::status_online();
         let id = t.id;
-        let arrow = t.kind.arrow();
         let value = transfer_value_text(t);
         let pace = if t.is_queued {
             String::new()
@@ -369,10 +297,9 @@ impl ServerSession {
         let row = h_flex()
             .h(px(26.))
             .px(px(7.))
-            .gap(px(9.))
+            .gap(px(8.))
             .items_center()
             .rounded(px(3.))
-            .bg(theme::accent().opacity(0.055))
             .child(expand_chevron(
                 ("tr-row-chev", id as usize),
                 t.expanded,
@@ -392,7 +319,7 @@ impl ServerSession {
                     .min_w(px(0.))
                     .gap(px(4.))
                     .items_center()
-                    .child(div().text_size(px(11.)).text_color(accent).child(arrow))
+                    .child(direction_icon(t.kind))
                     .child(
                         div()
                             .min_w(px(0.))
@@ -412,7 +339,7 @@ impl ServerSession {
                     .whitespace_nowrap()
                     .text_size(px(10.5))
                     .font_semibold()
-                    .text_color(accent)
+                    .text_color(cx.theme().foreground)
                     .child(SharedString::from(value)),
             )
             .child(
@@ -426,19 +353,18 @@ impl ServerSession {
             .child(
                 div()
                     .id(("tr-stop", id as usize))
-                    .w(px(16.))
-                    .h(px(16.))
+                    .w(px(18.))
+                    .h(px(18.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded(px(3.))
-                    .text_size(px(9.))
                     .text_color(theme::text_dim())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::element_hover()).text_color(theme::run_red()))
                     .active(|s| s.bg(theme::element_active()).text_color(theme::run_red()))
                     .on_click(cx.listener(move |this, _, _, cx| this.cancel_transfer(id, cx)))
-                    .child("■"),
+                    .child(Icon::new(IconName::Close).size(px(12.))),
             );
 
         v_flex()
@@ -449,18 +375,25 @@ impl ServerSession {
     }
 
     fn render_transfer_history_row(&self, t: &TransferTask, cx: &Context<Self>) -> AnyElement {
-        let (glyph, color, meta) = match &t.outcome {
+        let (icon, color, meta) = match &t.outcome {
             Some(TransferOutcome::Done { skipped_links }) => (
-                "✓",
+                Some(IconName::Check),
                 theme::status_online(),
                 done_text(t.done, *skipped_links),
             ),
-            Some(TransferOutcome::Canceled) => ("✕", theme::text_dim(), "canceled".to_string()),
+            Some(TransferOutcome::Canceled) => (
+                Some(IconName::Close),
+                theme::text_dim(),
+                "canceled".to_string(),
+            ),
             // The reason is too long for this cell; the expanded row shows it.
-            Some(TransferOutcome::Failed(_)) => ("⚠", theme::run_red(), "failed".to_string()),
-            None => ("?", theme::text_dim(), String::new()),
+            Some(TransferOutcome::Failed(_)) => (
+                Some(IconName::TriangleAlert),
+                theme::run_red(),
+                "failed".to_string(),
+            ),
+            None => (None, theme::text_dim(), String::new()),
         };
-        let arrow = t.kind.arrow();
         let when = t
             .finished_at
             .map(|at| format!("{} ago", elapsed_compact(at.elapsed().as_secs())))
@@ -473,7 +406,7 @@ impl ServerSession {
             .id(("tr-hrow", id as usize))
             .h(px(26.))
             .px(px(7.))
-            .gap(px(9.))
+            .gap(px(8.))
             .items_center()
             .rounded(px(3.))
             .cursor_pointer()
@@ -487,9 +420,8 @@ impl ServerSession {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.))
                     .text_color(color)
-                    .child(glyph),
+                    .children(icon.map(|icon| Icon::new(icon).size(px(12.)))),
             )
             .child(
                 h_flex()
@@ -497,12 +429,7 @@ impl ServerSession {
                     .min_w(px(0.))
                     .gap(px(4.))
                     .items_center()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme::text_dim())
-                            .child(arrow),
-                    )
+                    .child(direction_icon(t.kind))
                     .child(
                         div()
                             .min_w(px(0.))
@@ -558,12 +485,11 @@ fn expand_chevron(
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(9.))
         .text_color(theme::text_dim())
         .cursor_pointer()
         .hover(|s| s.text_color(theme::text()))
         .on_click(move |ev, window, cx| on_click(ev, window, cx))
-        .child(if expanded { "▾" } else { "▸" })
+        .child(chevron_icon(expanded))
 }
 
 /// Non-interactive chevron for rows whose whole body already toggles.
@@ -573,9 +499,26 @@ fn chevron_glyph(expanded: bool) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(9.))
         .text_color(theme::text_dim())
-        .child(if expanded { "▾" } else { "▸" })
+        .child(chevron_icon(expanded))
+}
+
+fn direction_icon(kind: TransferKind) -> Icon {
+    let icon = match kind {
+        TransferKind::Upload => IconName::ArrowUp,
+        TransferKind::Download => IconName::ArrowDown,
+        TransferKind::Copy => IconName::ArrowRight,
+    };
+    Icon::new(icon).size(px(12.)).text_color(theme::text_dim())
+}
+
+fn chevron_icon(expanded: bool) -> Icon {
+    let icon = if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    };
+    Icon::new(icon).size(px(10.))
 }
 
 /// Expanded detail for a single SFTP transfer: direction, size, %, speed, time.
@@ -598,7 +541,6 @@ fn transfer_detail_panel(t: &TransferTask, cx: &Context<ServerSession>) -> impl 
     } else {
         None
     };
-    let speed = speed.unwrap_or_else(|| "—".to_string());
     let time_left = if is_running {
         seconds_left(t, now)
     } else {
@@ -649,15 +591,12 @@ fn transfer_detail_panel(t: &TransferTask, cx: &Context<ServerSession>) -> impl 
         .p(px(7.))
         .rounded(px(3.))
         .bg(theme::sunken())
-        .border_1()
-        .border_color(cx.theme().border)
         .child(
             v_flex()
                 .gap(px(3.))
-                .child(kv("File", t.name.clone()))
                 .child(kv("Direction", direction))
                 .child(kv("Transferred", size))
-                .child(kv("Speed", speed))
+                .children(speed.map(|speed| kv("Speed", speed)))
                 .child(kv("Elapsed", elapsed))
                 .children(time_left.map(|secs| kv("Time left", elapsed_compact(secs))))
                 .children(error.map(|error| error_row(error, dim))),
@@ -695,13 +634,13 @@ fn speed_text(bytes_per_sec: u64) -> String {
 /// upload or a download names the left server when it is the one in use.
 fn direction_text(kind: TransferKind, route: Option<&str>) -> String {
     let verb = match kind {
-        TransferKind::Copy => "copy",
-        TransferKind::Upload => "upload \u{2191}",
-        TransferKind::Download => "download \u{2193}",
+        TransferKind::Copy => "Copy",
+        TransferKind::Upload => "Upload",
+        TransferKind::Download => "Download",
     };
     match (kind, route) {
-        (_, Some(route)) => format!("{verb} {route}"),
-        (TransferKind::Copy, None) => "copy \u{2192}".to_string(),
+        (TransferKind::Copy, Some(route)) => format!("{verb} {route}"),
+        (_, Some(route)) => format!("{verb} via {route}"),
         (_, None) => verb.to_string(),
     }
 }
@@ -763,17 +702,12 @@ mod tests {
 
     #[test]
     fn direction_text_names_both_servers_of_a_copy() {
+        assert_eq!(direction_text(TransferKind::Upload, None), "Upload");
+        assert_eq!(direction_text(TransferKind::Download, None), "Download");
+        assert_eq!(direction_text(TransferKind::Copy, None), "Copy");
         assert_eq!(
-            direction_text(TransferKind::Upload, None),
-            "upload \u{2191}"
-        );
-        assert_eq!(
-            direction_text(TransferKind::Download, None),
-            "download \u{2193}"
-        );
-        assert_eq!(
-            direction_text(TransferKind::Copy, Some("web-02 \u{2192} web-01")),
-            "copy web-02 \u{2192} web-01"
+            direction_text(TransferKind::Copy, Some("from web-02 to web-01")),
+            "Copy from web-02 to web-01"
         );
     }
 
@@ -781,11 +715,11 @@ mod tests {
     fn direction_text_names_the_left_server_of_an_upload_or_download() {
         assert_eq!(
             direction_text(TransferKind::Upload, Some("web-02")),
-            "upload \u{2191} web-02"
+            "Upload via web-02"
         );
         assert_eq!(
             direction_text(TransferKind::Download, Some("web-02")),
-            "download \u{2193} web-02"
+            "Download via web-02"
         );
     }
 

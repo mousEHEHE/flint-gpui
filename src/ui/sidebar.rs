@@ -110,7 +110,6 @@ impl Sidebar {
         let text_dim = flint_theme::text_dim();
         let accent_soft = flint_theme::accent_soft();
         let status_online = flint_theme::status_online();
-        let status_off = flint_theme::status_off();
         let status_connecting = theme.warning;
         let status_down = theme.danger;
 
@@ -133,7 +132,8 @@ impl Sidebar {
             HostStatus::Connected => status_online,
             HostStatus::Connecting => status_connecting,
             HostStatus::Disconnected => status_down,
-            HostStatus::Offline => status_off,
+            // Recent rows have no live state; the empty slot keeps labels aligned.
+            HostStatus::Offline => gpui::transparent_black(),
         };
         let dot = div().size(px(5.)).flex_none().rounded_full().bg(dot_color);
 
@@ -142,7 +142,7 @@ impl Sidebar {
             .group(group_id.clone())
             .relative()
             .h(px(24.))
-            .gap(px(7.))
+            .gap(px(6.))
             .px(px(6.))
             .rounded(px(4.))
             .items_center()
@@ -161,7 +161,7 @@ impl Sidebar {
                 h_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(5.))
+                    .gap(px(4.))
                     .items_center()
                     .child(
                         div()
@@ -216,11 +216,13 @@ impl Sidebar {
                                 .invisible()
                                 .when(is_active, |el| el.visible())
                                 .group_hover(group_id.clone(), |s| s.visible())
-                                .hover(|s| s.bg(bg_element_active).text_color(text))
+                                .hover(|s| s.bg(bg_element_hover).text_color(text))
                                 .active(|s| {
                                     s.bg(bg_element_active).text_color(flint_theme::red_error())
                                 })
-                                .tooltip(|window, cx| Tooltip::new("Disconnect").build(window, cx))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Close session").build(window, cx)
+                                })
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |_, _: &MouseDownEvent, _, cx| {
@@ -254,7 +256,6 @@ impl Sidebar {
         let bg_element_active = theme.list_active;
         let text = theme.foreground;
         let text_dim = flint_theme::text_dim();
-        let border_focused = flint_theme::border_focused();
 
         let is_menu_open = self.open_menu_for == Some(entry_id);
         let is_active = self.active_server_id.as_deref() == Some(entry_id.to_string().as_str());
@@ -269,14 +270,8 @@ impl Sidebar {
             .items_center()
             .justify_center()
             .rounded(px(3.))
-            .border_1()
-            .border_color(gpui::transparent_black())
             .text_color(if is_menu_open { text } else { text_dim })
-            .when(is_menu_open, |el| {
-                el.bg(bg_element_active)
-                    .border_color(border_focused)
-                    .visible()
-            })
+            .when(is_menu_open, |el| el.bg(bg_element_active).visible())
             .when(!is_menu_open, |el| {
                 el.invisible()
                     .when(is_active, |el| el.visible())
@@ -390,9 +385,6 @@ impl Render for Sidebar {
         let text = theme.foreground;
         let text_muted = theme.muted_foreground;
         let text_dim = flint_theme::text_dim();
-        let accent = theme.primary;
-        let accent_soft = flint_theme::accent_soft();
-        let accent_line = flint_theme::accent_line();
 
         let entries = self
             .vault_state
@@ -400,7 +392,6 @@ impl Render for Sidebar {
             .manager()
             .and_then(|vm| vm.list_entries().ok())
             .unwrap_or_default();
-        let host_count = entries.len();
         let now = unix_now();
 
         let by_id: HashMap<String, &ServerEntrySummary> =
@@ -424,7 +415,7 @@ impl Render for Sidebar {
         for (id, status) in &self.sessions {
             let Some(e) = by_id.get(id) else { continue };
             let sub: SharedString = match status {
-                HostStatus::Connected => "connected",
+                HostStatus::Connected => "",
                 HostStatus::Connecting => "connecting…",
                 HostStatus::Disconnected => "disconnected",
                 HostStatus::Offline => "offline",
@@ -438,10 +429,13 @@ impl Render for Sidebar {
             content.push(
                 div()
                     .flex_none()
-                    .h(px(1.))
-                    .mx(px(6.))
-                    .my(px(4.))
-                    .bg(border)
+                    .h(px(24.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.))
+                    .text_color(text_dim)
+                    .child("RECENT")
                     .into_any_element(),
             );
         }
@@ -459,24 +453,14 @@ impl Render for Sidebar {
         // Nothing open and nothing recent: a quiet hint, never the full catalog.
         if content.is_empty() {
             content.push(
-                v_flex()
-                    .flex_1()
+                div()
+                    .h(px(24.))
+                    .px(px(6.))
+                    .flex()
                     .items_center()
-                    .justify_center()
-                    .gap(px(3.))
-                    .px(px(12.))
-                    .child(
-                        div()
-                            .text_color(text_dim)
-                            .text_size(px(11.5))
-                            .child("No active hosts"),
-                    )
-                    .child(
-                        div()
-                            .text_color(text_dim)
-                            .text_size(px(10.5))
-                            .child("Open one from All hosts"),
-                    )
+                    .text_size(px(11.))
+                    .text_color(text_dim)
+                    .child("No recent hosts")
                     .into_any_element(),
             );
         }
@@ -494,13 +478,7 @@ impl Render for Sidebar {
                     .justify_between()
                     .h(px(24.))
                     .px(px(10.))
-                    .child(div().text_color(text_dim).text_size(px(10.)).child("HOSTS"))
-                    .child(
-                        div()
-                            .text_color(text_dim)
-                            .text_size(px(10.))
-                            .child(format!("{host_count}")),
-                    ),
+                    .child(div().text_color(text_dim).text_size(px(10.)).child("HOSTS")),
             )
             .child(
                 v_flex()
@@ -515,7 +493,8 @@ impl Render for Sidebar {
                 h_flex()
                     .border_t_1()
                     .border_color(border)
-                    .p(px(6.))
+                    .h(px(32.))
+                    .px(px(4.))
                     .gap(px(6.))
                     .items_center()
                     .child(
@@ -529,14 +508,14 @@ impl Render for Sidebar {
                             .justify_center()
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(accent_line)
-                            .bg(accent_soft)
+                            .border_color(border_focused)
+                            .bg(bg_element)
                             .text_size(px(11.5))
-                            .text_color(accent)
+                            .text_color(text_muted)
                             .cursor_pointer()
-                            .hover(|s| s.border_color(accent))
-                            .active(|s| s.bg(flint_theme::accent_soft_press()).border_color(accent))
-                            .child(Icon::new(IconName::Plus).size(px(12.)).text_color(accent))
+                            .hover(|s| s.bg(bg_element_hover).text_color(text))
+                            .active(|s| s.bg(flint_theme::element_active()))
+                            .child(Icon::new(IconName::Plus).size(px(12.)))
                             .child(div().child("New host"))
                             .on_click(
                                 cx.listener(|_, _, _, cx| {

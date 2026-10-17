@@ -8,7 +8,7 @@ use gpui_component::{
     dialog::{DialogHeader, DialogTitle},
     h_flex,
     input::{Textarea, TextareaState},
-    v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
+    v_flex, ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
 };
 
 use crate::account::api::FeedbackKind;
@@ -131,12 +131,18 @@ fn send_problem(error: &ApiError) -> String {
 impl Render for FeedbackView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted_fg, danger, success) = (theme.muted_foreground, theme.danger, theme.success);
+        let (fg, muted_fg, danger, success) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.danger,
+            theme.success,
+        );
         let caption =
             move |text: &'static str| div().text_size(px(11.)).text_color(muted_fg).child(text);
         let close = |label: &'static str, cx: &mut Context<Self>| {
             Button::new("feedback-close")
                 .small()
+                .ghost()
                 .child(label)
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(FeedbackEvent::Closed)))
         };
@@ -148,9 +154,8 @@ impl Render for FeedbackView {
 
         if self.session_token(cx).is_none() {
             return body
-                .child(caption(
-                    "Feedback is sent from your sync account, which keeps spam out. Sign in \
-                     under Settings, Sync first (it is free).",
+                .child(div().text_size(px(12.)).text_color(fg).child(
+                    "Messages are sent from your sync account. Sign in under Settings, Sync first.",
                 ))
                 .child(h_flex().justify_end().child(close("Close", cx)));
         }
@@ -169,21 +174,18 @@ impl Render for FeedbackView {
         let kinds = [
             (FeedbackKind::Bug, "Bug"),
             (FeedbackKind::Idea, "Idea"),
-            (FeedbackKind::Other, "Something else"),
+            (FeedbackKind::Other, "Other"),
         ];
         let kind_buttons = kinds.into_iter().map(|(kind, label)| {
-            let button = Button::new(SharedString::from(format!("feedback-kind-{label}")))
+            Button::new(SharedString::from(format!("feedback-kind-{label}")))
                 .xsmall()
+                .ghost()
+                .selected(self.kind == kind)
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.kind = kind;
                     cx.notify();
-                }));
-            if self.kind == kind {
-                button.primary()
-            } else {
-                button.ghost()
-            }
+                }))
         });
 
         body.child(h_flex().gap(px(6.)).children(kind_buttons))

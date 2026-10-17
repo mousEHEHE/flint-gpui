@@ -171,7 +171,7 @@ const COMMANDS: [CommandSpec; 13] = [
         command: PaletteCommand::ChooseLeftSource,
         label: "Left pane: choose source\u{2026}",
         keywords: "files another server local computer copy between",
-        note: "this computer or another saved host",
+        note: "",
         shortcut: None,
         needs_session: true,
     },
@@ -268,7 +268,7 @@ impl CommandPalette {
         Self::with_mode(
             vault_state,
             Mode::Main,
-            "search hosts, snippets and commands, or type user@host\u{2026}",
+            "Search hosts, snippets, commands, or type user@host\u{2026}",
             has_active_server,
             active_server_id,
             connected_server_ids,
@@ -289,7 +289,7 @@ impl CommandPalette {
         Self::with_mode(
             vault_state,
             Mode::PickLeftSource { session_server_id },
-            "search hosts\u{2026}",
+            "Search hosts\u{2026}",
             true,
             Some(session_server_id),
             connected_server_ids,
@@ -450,51 +450,38 @@ impl CommandPalette {
                     row => (row, None),
                 };
                 if let Some(row) = connect_first {
-                    sections.push((SharedString::from("Connect"), items.len()));
+                    sections.push((SharedString::from("CONNECT"), items.len()));
                     items.push(PaletteItem::Connect(row));
                 }
                 if !recent.is_empty() {
-                    sections.push((
-                        SharedString::from(format!("Recent · {}", recent.len())),
-                        items.len(),
-                    ));
+                    sections.push((SharedString::from("RECENT"), items.len()));
                     items.extend(recent.into_iter().map(snippet_to_item));
                 }
                 if !hosts.is_empty() {
-                    sections.push((
-                        SharedString::from(format!("Hosts · {}", hosts.len())),
-                        items.len(),
-                    ));
+                    sections.push((SharedString::from("HOSTS"), items.len()));
                     items.extend(hosts.into_iter().map(PaletteItem::Host));
                 }
                 if !others.is_empty() {
-                    sections.push((
-                        SharedString::from(format!("Snippets · {}", others.len())),
-                        items.len(),
-                    ));
+                    sections.push((SharedString::from("SNIPPETS"), items.len()));
                     items.extend(others.into_iter().map(snippet_to_item));
                 }
                 let commands = matching_commands(&self.query(cx), self.active_server_id.is_some());
                 if !commands.is_empty() {
-                    sections.push((
-                        SharedString::from(format!("Commands · {}", commands.len())),
-                        items.len(),
-                    ));
+                    sections.push((SharedString::from("COMMANDS"), items.len()));
                     items.extend(commands.into_iter().map(PaletteItem::Command));
                 }
                 if let Some(row) = connect_last {
-                    sections.push((SharedString::from("Connect"), items.len()));
+                    sections.push((SharedString::from("CONNECT"), items.len()));
                     items.push(PaletteItem::Connect(row));
                 }
                 (items, sections)
             }
             Mode::PickServerForSnippet { .. } => {
                 let hosts = self.host_rows(cx);
-                let label = SharedString::from(format!("Pick host · {}", hosts.len()));
                 let sections = if hosts.is_empty() {
                     vec![]
                 } else {
-                    vec![(label, 0)]
+                    vec![(SharedString::from("HOSTS"), 0)]
                 };
                 let items = hosts.into_iter().map(PaletteItem::Host).collect();
                 (items, sections)
@@ -502,11 +489,10 @@ impl CommandPalette {
             Mode::PickLeftSource { session_server_id } => {
                 let items =
                     left_source_items(self.host_rows(cx), *session_server_id, &self.query(cx));
-                let label = SharedString::from(format!("Left pane \u{00B7} {}", items.len()));
                 let sections = if items.is_empty() {
                     vec![]
                 } else {
-                    vec![(label, 0)]
+                    vec![(SharedString::from("LEFT PANE"), 0)]
                 };
                 (items, sections)
             }
@@ -627,13 +613,12 @@ impl Focusable for CommandPalette {
 impl Render for CommandPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let bg_elevated = theme.title_bar;
+        let bg_float = flint_theme::pop_surface();
         let bg_element_hover = theme.list_hover;
         let border = theme.title_bar_border;
         let border_focused = flint_theme::border_focused();
         let text = theme.foreground;
         let text_muted = theme.muted_foreground;
-        let text_placeholder = flint_theme::text_placeholder();
         let accent = theme.primary;
         let green = flint_theme::status_online();
         let scrim_bg = theme.overlay;
@@ -643,40 +628,31 @@ impl Render for CommandPalette {
         let selected = self.selected_ix.min(total.saturating_sub(1));
 
         // Banner shown above the input in the picking modes.
-        let banner_text = match &self.mode {
+        let banner_text: Option<(String, Option<&'static str>)> = match &self.mode {
             Mode::PickServerForSnippet { snippet_name, .. } => Some((
                 format!("Choose a host to run \u{201C}{}\u{201D}", snippet_name),
-                "esc to go back",
+                Some("esc to go back"),
             )),
-            Mode::PickLeftSource { .. } => Some((
-                "Choose what the left file pane shows".to_string(),
-                "esc to close",
-            )),
+            Mode::PickLeftSource { .. } => {
+                Some(("Choose what the left file pane shows".to_string(), None))
+            }
             Mode::Main => None,
         };
         let banner: Option<AnyElement> = banner_text.map(|(text, escape_hint)| {
             h_flex()
                 .items_center()
                 .gap(px(6.))
-                .px(px(10.))
-                .py(px(6.))
+                .h(px(24.))
+                .px(px(12.))
                 .border_b_1()
                 .border_color(border)
                 .text_size(px(11.))
                 .text_color(text_muted)
-                .child(
-                    Icon::new(IconName::ArrowRight)
-                        .size(px(12.))
-                        .text_color(accent),
-                )
                 .child(div().child(text))
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(text_muted)
-                        .child(escape_hint),
-                )
+                .when_some(escape_hint, |el, hint| {
+                    el.child(div().text_color(flint_theme::text_dim()).child(hint))
+                })
                 .into_any_element()
         });
 
@@ -687,11 +663,12 @@ impl Render for CommandPalette {
                 let label = sections[next_section].0.clone();
                 body_rows.push(
                     div()
-                        .px(px(10.))
-                        .pt(px(6.))
-                        .pb(px(4.))
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
                         .text_size(px(10.))
-                        .text_color(text_muted)
+                        .text_color(flint_theme::text_dim())
                         .child(label)
                         .into_any_element(),
                 );
@@ -715,16 +692,16 @@ impl Render for CommandPalette {
         let body: AnyElement = if empty {
             let q = self.search.read(cx).value().to_string();
             div()
-                .py(px(14.))
-                .px(px(10.))
+                .h(px(32.))
                 .flex()
-                .justify_center()
+                .items_center()
+                .px(px(12.))
                 .text_size(px(12.))
-                .text_color(text_muted)
+                .text_color(flint_theme::text_dim())
                 .child(if q.is_empty() {
-                    "no items".to_string()
+                    "No saved hosts".to_string()
                 } else {
-                    format!("no matches for \u{201C}{}\u{201D}", q)
+                    format!("No matches for \u{201C}{}\u{201D}", q)
                 })
                 .into_any_element()
         } else {
@@ -739,21 +716,6 @@ impl Render for CommandPalette {
                 .children(body_rows)
                 .into_any_element()
         };
-
-        let foot = h_flex()
-            .items_center()
-            .gap(px(10.))
-            .px(px(10.))
-            .py(px(6.))
-            .border_t_1()
-            .border_color(border)
-            .text_size(px(11.))
-            .text_color(text_muted)
-            .child(div().child("\u{2191}\u{2193} navigate"))
-            .child(div().child("\u{23CE} open"))
-            .child(div().child("esc close"))
-            .child(div().flex_1())
-            .child(div().child(item_count_label(total)));
 
         div()
             .key_context("CommandPalette")
@@ -780,7 +742,7 @@ impl Render for CommandPalette {
                 v_flex()
                     .w(px(560.))
                     .max_w(px(560.))
-                    .bg(bg_elevated)
+                    .bg(bg_float)
                     .border_1()
                     .border_color(border_focused)
                     .rounded(px(6.))
@@ -793,7 +755,7 @@ impl Render for CommandPalette {
                             .items_center()
                             .h(px(32.))
                             .gap(px(8.))
-                            .px(px(10.))
+                            .px(px(12.))
                             .border_b_1()
                             .border_color(border)
                             .child(
@@ -806,24 +768,11 @@ impl Render for CommandPalette {
                                     .flex_1()
                                     .child(Input::new(&self.search).appearance(false)),
                             )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .px(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .border_color(border)
-                                    .text_size(px(10.))
-                                    .text_color(text_muted)
-                                    .child("esc"),
-                            )
-                            // The input draws typed text in the inherited text color.
-                            .text_color(text_placeholder),
+                            // Input paints typed text in the inherited colour; the
+                            // placeholder uses muted_foreground.
+                            .text_color(text),
                     )
-                    .child(body)
-                    .child(foot),
+                    .child(body),
             )
     }
 }
@@ -958,13 +907,6 @@ fn list_child_index(selected_ix: usize, sections: &[(SharedString, usize)]) -> u
     selected_ix + headers_before
 }
 
-fn item_count_label(total: usize) -> String {
-    if total == 1 {
-        return "1 item".to_string();
-    }
-    format!("{total} items")
-}
-
 fn command_icon(command: PaletteCommand) -> Icon {
     let name = match command {
         PaletteCommand::NewHost => IconName::Plus,
@@ -976,7 +918,8 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
         | PaletteCommand::ChooseLeftSource => IconName::FolderOpen,
-        PaletteCommand::ImportHosts | PaletteCommand::ReconnectSession => IconName::ArrowRight,
+        PaletteCommand::ReconnectSession => return Icon::empty().path("icons/rotate-cw.svg"),
+        PaletteCommand::ImportHosts => return Icon::empty().path("icons/download.svg"),
     };
     Icon::new(name)
 }
@@ -1024,7 +967,7 @@ fn render_palette_row(
         .px(px(8.))
         .rounded(px(4.))
         .cursor_pointer()
-        .when(is_selected, |el| el.bg(bg_element_hover))
+        .when(is_selected, |el| el.bg(crate::theme::accent_soft()))
         .when(!is_selected, |el| el.hover(|s| s.bg(bg_element_hover)))
         .active(|s| s.bg(crate::theme::element_active()))
         .on_mouse_down(
@@ -1075,7 +1018,11 @@ fn render_palette_row(
         PaletteItem::Host(h) => {
             let label: SharedString = h.label.into();
             let sub: SharedString = h.sub.into();
-            let icon_color = if h.is_connected { green } else { accent };
+            let icon_color = if h.is_connected {
+                green
+            } else {
+                crate::theme::text_dim()
+            };
             row.child(
                 Icon::empty()
                     .path("icons/server.svg")
@@ -1115,7 +1062,7 @@ fn render_palette_row(
             row.child(
                 Icon::new(IconName::SquareTerminal)
                     .size(px(12.))
-                    .text_color(green),
+                    .text_color(crate::theme::cyan()),
             )
             .child(
                 h_flex()
@@ -1150,7 +1097,7 @@ fn render_palette_row(
             .child(
                 Icon::new(IconName::FolderOpen)
                     .size(px(12.))
-                    .text_color(accent),
+                    .text_color(crate::theme::text_dim()),
             )
             .child(
                 h_flex()
@@ -1183,7 +1130,7 @@ fn render_palette_row(
             row.child(
                 command_icon(spec.command)
                     .size(px(12.))
-                    .text_color(text_muted),
+                    .text_color(crate::theme::text_dim()),
             )
             .child(
                 h_flex()
@@ -1420,13 +1367,6 @@ mod tests {
         assert_eq!(list_child_index(2, &sections), 3);
         assert_eq!(list_child_index(3, &sections), 5);
         assert_eq!(list_child_index(4, &sections), 6);
-    }
-
-    #[test]
-    fn the_footer_counts_one_item_in_the_singular() {
-        assert_eq!(item_count_label(0), "0 items");
-        assert_eq!(item_count_label(1), "1 item");
-        assert_eq!(item_count_label(2), "2 items");
     }
 
     #[test]

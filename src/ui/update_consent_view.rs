@@ -49,9 +49,8 @@ impl Render for UpdateConsentView {
             .gap(px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child("Check for updates?")))
             .child(div().text_size(px(12.)).text_color(fg).child(
-                "flint can ask the flint server for the newest version each time it starts, \
-                 and every six hours while it runs. The request says macOS or Windows and \
-                 nothing else.",
+                "flint can ask its server for the newest version when it starts and every six \
+                 hours while it runs. The request sends only your OS name.",
             ))
             .child(
                 div()
@@ -72,7 +71,7 @@ impl Render for UpdateConsentView {
                     .child(
                         Self::answer_button(
                             "update-consent-on-start",
-                            "Check on start",
+                            "Check automatically",
                             UpdateChecks::OnStart,
                             cx,
                         )

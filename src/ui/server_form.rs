@@ -11,10 +11,11 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    dialog::{DialogHeader, DialogTitle},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     radio::{Radio, RadioGroup},
-    v_flex, ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
+    v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
 };
 use uuid::Uuid;
 
@@ -210,24 +211,23 @@ impl ServerFormView {
 
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Display name")
+                .placeholder("web-01")
                 .default_value(SharedString::from(label))
         });
         let host_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("hostname or IP")
+                .placeholder("example.com or 10.0.0.5")
                 .default_value(SharedString::from(host))
         });
         let port_input =
             cx.new(|cx| InputState::new(window, cx).default_value(SharedString::from(port)));
         let user_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("username")
+                .placeholder("root")
                 .default_value(SharedString::from(user))
         });
         let pass_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("password")
                 .masked(true)
                 .default_value(SharedString::from(password))
         });
@@ -876,7 +876,6 @@ impl Render for ServerFormView {
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
         let danger = theme.danger;
-        let popover_bg = theme.popover;
         let list_hover = theme.list_hover;
         let muted = theme.muted;
         let radius = theme.radius;
@@ -884,6 +883,11 @@ impl Render for ServerFormView {
 
         let is_edit = matches!(self.mode, FormMode::Edit { .. });
         let is_valid = self.is_valid(cx);
+        let footer_message = self
+            .error
+            .clone()
+            .map(|msg| (msg, danger))
+            .or_else(|| self.warning.clone().map(|msg| (msg, theme.warning)));
 
         let keys = self
             .vault_state
@@ -964,21 +968,21 @@ impl Render for ServerFormView {
                 el.child(
                     v_flex()
                         .mt(px(2.))
-                        .p_1()
+                        .p(px(2.))
                         .rounded(px(6.))
                         .border_1()
-                        .border_color(border)
-                        .bg(popover_bg)
+                        .border_color(crate::theme::border_focused())
+                        .bg(crate::theme::pop_surface())
                         .children(group_suggestions.into_iter().enumerate().map(|(ix, path)| {
                             let value = path.clone();
                             h_flex()
                                 .id(("group-suggestion", ix))
-                                .px_2()
-                                .py(px(3.))
+                                .h(px(22.))
+                                .px(px(6.))
                                 .gap(px(6.))
                                 .items_center()
                                 .rounded(inner_radius)
-                                .text_sm()
+                                .text_size(px(12.))
                                 .text_color(fg)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(list_hover))
@@ -994,7 +998,7 @@ impl Render for ServerFormView {
                                 .child(
                                     svg()
                                         .path("icons/folder.svg")
-                                        .size(px(12.))
+                                        .size(px(10.))
                                         .text_color(muted_fg),
                                 )
                                 .child(path)
@@ -1020,7 +1024,7 @@ impl Render for ServerFormView {
                     h_flex()
                         .h(px(20.))
                         .pl(px(7.))
-                        .pr(px(4.))
+                        .pr(px(3.))
                         .gap(px(4.))
                         .items_center()
                         .rounded(px(3.))
@@ -1033,16 +1037,19 @@ impl Render for ServerFormView {
                         .child(
                             div()
                                 .id(("tag-remove", ix))
-                                .px(px(2.))
-                                .text_size(px(11.))
+                                .size(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(2.))
                                 .text_color(muted_fg)
                                 .cursor_pointer()
-                                .hover(move |s| s.text_color(fg))
+                                .hover(move |s| s.bg(list_hover).text_color(fg))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.tag_names.remove(ix);
                                     cx.notify();
                                 }))
-                                .child("×"),
+                                .child(Icon::new(IconName::Close).size(px(10.))),
                         )
                 }));
 
@@ -1059,20 +1066,21 @@ impl Render for ServerFormView {
                     el.child(
                         v_flex()
                             .mt(px(2.))
-                            .p_1()
+                            .p(px(2.))
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(border)
-                            .bg(popover_bg)
+                            .border_color(crate::theme::border_focused())
+                            .bg(crate::theme::pop_surface())
                             // "Create" row first when the text is a new tag.
                             .when(!tag_text.is_empty() && !exact_match, |el| {
                                 el.child(
                                     h_flex()
                                         .id("tag-create")
-                                        .px_2()
-                                        .py(px(3.))
+                                        .h(px(22.))
+                                        .px(px(6.))
+                                        .items_center()
                                         .rounded(inner_radius)
-                                        .text_sm()
+                                        .text_size(px(12.))
                                         .text_color(fg)
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(list_hover))
@@ -1089,10 +1097,11 @@ impl Render for ServerFormView {
                                 let value = name.clone();
                                 h_flex()
                                     .id(("tag-suggestion", ix))
-                                    .px_2()
-                                    .py(px(3.))
+                                    .h(px(22.))
+                                    .px(px(6.))
+                                    .items_center()
                                     .rounded(inner_radius)
-                                    .text_sm()
+                                    .text_size(px(12.))
                                     .text_color(fg)
                                     .cursor_pointer()
                                     .hover(move |s| s.bg(list_hover))
@@ -1159,17 +1168,12 @@ impl Render for ServerFormView {
                                 .child("This host's key was deleted. Pick another one."),
                         )
                     })
-                    .when(keys_empty, |el| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_fg)
-                                .child("No keys yet. Click '+ Add new key…' to add one."),
-                        )
-                    })
                     .child(
                         div()
                             .id("add-new-key-link")
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
                             .text_xs()
                             .text_color(muted_fg)
                             .cursor_pointer()
@@ -1180,7 +1184,7 @@ impl Render for ServerFormView {
                                 this.addkey_error = None;
                                 cx.notify();
                             }))
-                            .child("+ Add new key…"),
+                            .child("Add key…"),
                     )
                     .into_any_element()
             }
@@ -1201,16 +1205,13 @@ impl Render for ServerFormView {
 
         v_flex()
             .max_h(dialog_max_height(window))
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(12.))
-                    .pt(px(12.))
-                    .pb(px(8.))
-                    .text_sm()
-                    .font_semibold()
-                    .child(if is_edit { "Edit host" } else { "Add host" }),
-            )
+            .child(div().flex_none().px(px(12.)).pt(px(12.)).pb(px(8.)).child(
+                DialogHeader::new().child(DialogTitle::new().child(if is_edit {
+                    "Edit host"
+                } else {
+                    "Add host"
+                })),
+            ))
             .child(
                 v_flex()
                     .id("server-form-fields")
@@ -1250,11 +1251,6 @@ impl Render for ServerFormView {
                                     .child(Input::new(&self.user_input)),
                             ),
                     )
-                    .child(jump_field)
-                    .child(group_field)
-                    .child(tags_field)
-                    .child(self.render_forwards_section(cx))
-                    .child(startup_field)
                     .child(
                         v_flex()
                             .gap(px(8.))
@@ -1283,42 +1279,50 @@ impl Render for ServerFormView {
                             )
                             .child(auth_body),
                     )
-                    .children(
-                        self.error
-                            .as_ref()
-                            .map(|msg| div().text_xs().text_color(danger).child(msg.clone())),
-                    )
-                    .children(self.warning.as_ref().map(|msg| {
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .child(msg.clone())
-                    })),
+                    .child(jump_field)
+                    .child(group_field)
+                    .child(tags_field)
+                    .child(self.render_forwards_section(cx))
+                    .child(startup_field),
             )
             .child(
                 // TODO security: input widget internals not zeroizable, see SECURITY.md
                 h_flex()
                     .flex_none()
                     .gap_2()
-                    .justify_end()
+                    .justify_between()
+                    .items_center()
                     .px(px(12.))
                     .pt(px(8.))
                     .pb(px(12.))
                     .border_t_1()
                     .border_color(border)
-                    .child(Button::new("form-cancel").ghost().child("Cancel").on_click(
-                        cx.listener(|_, _, _, cx| {
-                            cx.emit(FormEvent::Cancelled);
-                        }),
-                    ))
                     .child(
-                        Button::new("form-submit")
-                            .primary()
-                            .child(if is_edit { "Save" } else { "Add" })
-                            .disabled(!is_valid)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.submit(cx);
-                            })),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .when_some(footer_message, |el, (msg, color)| {
+                                el.text_color(color).child(msg)
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Button::new("form-cancel").ghost().child("Cancel").on_click(
+                                cx.listener(|_, _, _, cx| {
+                                    cx.emit(FormEvent::Cancelled);
+                                }),
+                            ))
+                            .child(
+                                Button::new("form-submit")
+                                    .primary()
+                                    .child(if is_edit { "Save" } else { "Add" })
+                                    .disabled(!is_valid)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit(cx);
+                                    })),
+                            ),
                     ),
             )
             .children(popup)
@@ -1336,7 +1340,6 @@ impl ServerFormView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
 
         let is_file = self.addkey_pem_source == PemSource::File;
@@ -1402,28 +1405,16 @@ impl ServerFormView {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .id("addkey-back")
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .hover(move |s| s.text_color(fg))
-                            .active(|s| s.text_color(crate::theme::accent()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.form_state = FormState::Main;
-                                this.addkey_error = None;
-                                cx.notify();
-                            }))
-                            .child("← Back"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(fg)
-                            .child("Add SSH key"),
-                    ),
+                    .child(crate::ui::settings::view::back_button(
+                        "addkey-back",
+                        cx.listener(|this, _, _, cx| {
+                            this.form_state = FormState::Main;
+                            this.addkey_error = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    ))
+                    .child(DialogTitle::new().child("Add SSH key")),
             )
             .child(
                 v_flex()
@@ -1433,43 +1424,25 @@ impl ServerFormView {
             )
             .child(
                 v_flex().gap_1().child(field_label("Key source", cx)).child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            h_flex()
-                                .id("addkey-src-file")
-                                .gap_1()
-                                .items_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    if this.addkey_pem_source != PemSource::File {
-                                        this.addkey_pem_source = PemSource::File;
-                                        this.addkey_paste
-                                            .update(cx, |s, cx| s.set_value("", window, cx));
-                                        this.refresh_addkey_encrypted(cx);
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(radio_dot(source_idx == 0, cx))
-                                .child(div().text_sm().child("From file")),
-                        )
-                        .child(
-                            h_flex()
-                                .id("addkey-src-paste")
-                                .gap_1()
-                                .items_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.addkey_pem_source != PemSource::Paste {
-                                        this.addkey_pem_source = PemSource::Paste;
-                                        this.addkey_file_path = None;
-                                        this.refresh_addkey_encrypted(cx);
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(radio_dot(source_idx == 1, cx))
-                                .child(div().text_sm().child("Paste")),
-                        ),
+                    RadioGroup::horizontal("addkey-source")
+                        .selected_index(Some(source_idx))
+                        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                            if *ix == 0 && this.addkey_pem_source != PemSource::File {
+                                this.addkey_pem_source = PemSource::File;
+                                this.addkey_paste
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.refresh_addkey_encrypted(cx);
+                                cx.notify();
+                            }
+                            if *ix == 1 && this.addkey_pem_source != PemSource::Paste {
+                                this.addkey_pem_source = PemSource::Paste;
+                                this.addkey_file_path = None;
+                                this.refresh_addkey_encrypted(cx);
+                                cx.notify();
+                            }
+                        }))
+                        .child(Radio::new("addkey-src-file").label("From file"))
+                        .child(Radio::new("addkey-src-paste").label("Paste")),
                 ),
             )
             .child(pem_section)
@@ -1799,7 +1772,7 @@ impl ServerFormView {
             .selected_startup_snippet
             .map(|id| snippets.iter().find(|s| s.id == id));
         let label = match selected {
-            None => "Nothing".to_string(),
+            None => "None".to_string(),
             Some(Some(snippet)) => snippet.name.clone(),
             Some(None) => "(missing snippet)".to_string(),
         };
@@ -1812,7 +1785,7 @@ impl ServerFormView {
             muted_fg
         };
         // A dead link must stay clearable even when the vault holds nothing
-        // else: the panel always carries its "Nothing" row.
+        // else: the panel always carries its "None" row.
         let can_pick = !snippets.is_empty() || self.selected_startup_snippet.is_some();
 
         let anchor: Rc<Cell<Point<Pixels>>> = Rc::new(Cell::new(Point::default()));
@@ -1867,7 +1840,7 @@ impl ServerFormView {
         let popup = if self.startup_dropdown_open {
             let nothing = dropdown_option(
                 "startup-option-none".into(),
-                "Nothing".to_string(),
+                "None".to_string(),
                 muted_fg,
                 cx,
                 |this, cx| {
@@ -1917,19 +1890,16 @@ impl ServerFormView {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let border = theme.border;
 
         let rows = self.forwards.iter().enumerate().map(|(index, forward)| {
             let route = forward.spec().route_label();
             h_flex()
                 .id(("forward-row", index))
+                .h(px(36.))
                 .items_center()
                 .gap(px(6.))
                 .px(px(6.))
-                .py(px(4.))
                 .rounded(px(4.))
-                .border_1()
-                .border_color(border)
                 .child(forward_kind_pill(forward.kind, cx))
                 .child(
                     v_flex()
@@ -1950,19 +1920,14 @@ impl ServerFormView {
                                 .when(!is_loopback_bind(&forward.bind_address), |el| {
                                     el.child(
                                         div()
-                                            .text_size(px(9.))
-                                            .font_bold()
+                                            .text_size(px(10.))
                                             .text_color(crate::theme::warning())
-                                            .child("PUBLIC"),
+                                            .child("public"),
                                     )
                                 })
                                 .when(forward.auto_start, |el| {
                                     el.child(
-                                        div()
-                                            .text_size(px(9.))
-                                            .font_bold()
-                                            .text_color(muted_fg)
-                                            .child("AUTO"),
+                                        div().text_size(px(10.)).text_color(muted_fg).child("auto"),
                                     )
                                 }),
                         )
@@ -1997,18 +1962,13 @@ impl ServerFormView {
         v_flex()
             .gap_1()
             .child(field_label("Port forwarding", cx))
-            .when(self.forwards.is_empty(), |el| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_fg)
-                        .child("No forwards yet. Add one to tunnel a port over this connection."),
-                )
-            })
-            .child(v_flex().gap(px(5.)).children(rows))
+            .child(v_flex().gap(px(2.)).children(rows))
             .child(
                 div()
                     .id("forward-add-link")
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
                     .text_xs()
                     .text_color(muted_fg)
                     .cursor_pointer()
@@ -2017,7 +1977,7 @@ impl ServerFormView {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.enter_add_forward(window, cx);
                     }))
-                    .child("+ Add forward…"),
+                    .child("Add forward…"),
             )
             .into_any_element()
     }
@@ -2029,7 +1989,6 @@ impl ServerFormView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
         let danger = theme.danger;
 
@@ -2045,9 +2004,9 @@ impl ServerFormView {
 
         let (private_label, public_label, public_warning) = if is_remote {
             (
-                "Server loopback only (localhost)",
-                "All server interfaces (0.0.0.0)",
-                "Most servers refuse this unless GatewayPorts is enabled in sshd_config.",
+                "Host loopback only (localhost)",
+                "All host interfaces (0.0.0.0)",
+                "Most hosts refuse this unless GatewayPorts is on in sshd_config.",
             )
         } else {
             (
@@ -2057,46 +2016,31 @@ impl ServerFormView {
             )
         };
 
-        let kind_row = h_flex().gap_3().children(
-            [
-                (ForwardKind::Local, "forward-kind-local", "Local (-L)"),
-                (ForwardKind::Remote, "forward-kind-remote", "Remote (-R)"),
-                (ForwardKind::Dynamic, "forward-kind-dynamic", "SOCKS5 (-D)"),
-            ]
-            .map(|(option, id, label)| {
-                h_flex()
-                    .id(id)
-                    .gap_1()
-                    .items_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.forward_kind = option;
-                        cx.notify();
-                    }))
-                    .child(radio_dot(kind == option, cx))
-                    .child(div().text_sm().child(label))
-            }),
-        );
+        const KINDS: [ForwardKind; 3] = [
+            ForwardKind::Local,
+            ForwardKind::Remote,
+            ForwardKind::Dynamic,
+        ];
+        let kind_row = RadioGroup::horizontal("forward-kind")
+            .selected_index(KINDS.iter().position(|option| *option == kind))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                if let Some(option) = KINDS.get(*ix) {
+                    this.forward_kind = *option;
+                    cx.notify();
+                }
+            }))
+            .child(Radio::new("forward-kind-local").label("Local (-L)"))
+            .child(Radio::new("forward-kind-remote").label("Remote (-R)"))
+            .child(Radio::new("forward-kind-dynamic").label("SOCKS5 (-D)"));
 
-        let bind_row = h_flex()
-            .gap(px(6.))
-            .flex_wrap()
-            .child(
-                select_chip("forward-bind-private", private_label, !is_public, cx).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.forward_bind_public = false;
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                select_chip("forward-bind-public", public_label, is_public, cx).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.forward_bind_public = true;
-                        cx.notify();
-                    }),
-                ),
-            );
+        let bind_row = RadioGroup::vertical("forward-bind")
+            .selected_index(Some(is_public as usize))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.forward_bind_public = *ix == 1;
+                cx.notify();
+            }))
+            .child(Radio::new("forward-bind-private").label(private_label))
+            .child(Radio::new("forward-bind-public").label(public_label));
 
         v_flex()
             .id("forward-form")
@@ -2108,22 +2052,16 @@ impl ServerFormView {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .id("forward-back")
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(muted_fg)
-                            .hover(move |s| s.text_color(fg))
-                            .active(|s| s.text_color(crate::theme::accent()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.form_state = FormState::Main;
-                                this.forward_error = None;
-                                cx.notify();
-                            }))
-                            .child("← Back"),
-                    )
-                    .child(div().text_sm().font_semibold().text_color(fg).child(title)),
+                    .child(crate::ui::settings::view::back_button(
+                        "forward-back",
+                        cx.listener(|this, _, _, cx| {
+                            this.form_state = FormState::Main;
+                            this.forward_error = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    ))
+                    .child(DialogTitle::new().child(title)),
             )
             .child(
                 v_flex()
@@ -2142,7 +2080,7 @@ impl ServerFormView {
                     .gap_1()
                     .child(field_label(
                         if is_remote {
-                            "Server listens on"
+                            "Host listens on"
                         } else {
                             "Listen on"
                         },
@@ -2160,7 +2098,7 @@ impl ServerFormView {
             )
             .child(
                 v_flex()
-                    .w(px(120.))
+                    .w(px(80.))
                     .gap_1()
                     .child(field_label("Port", cx))
                     .child(Input::new(&self.forward_bind_port)),
@@ -2177,7 +2115,7 @@ impl ServerFormView {
                                     if is_remote {
                                         "Forward to (on this computer)"
                                     } else {
-                                        "Forward to (from the server)"
+                                        "Forward to (from the host)"
                                     },
                                     cx,
                                 ))
@@ -2185,7 +2123,7 @@ impl ServerFormView {
                         )
                         .child(
                             v_flex()
-                                .w(px(90.))
+                                .w(px(80.))
                                 .gap_1()
                                 .child(field_label("Port", cx))
                                 .child(Input::new(&self.forward_target_port)),
@@ -2195,7 +2133,7 @@ impl ServerFormView {
             .when(is_dynamic, |el| {
                 el.child(div().text_xs().text_color(muted_fg).child(
                     "A SOCKS5 proxy has no fixed target: every client picks its own, \
-                             and names are resolved on the server.",
+                             and names are resolved on the host.",
                 ))
             })
             .child(
@@ -2310,52 +2248,17 @@ fn forward_kind_pill(kind: ForwardKind, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .flex_none()
-        .h(px(18.))
-        .px(px(6.))
+        .h(px(16.))
+        .px(px(5.))
         .flex()
         .items_center()
         .rounded(px(3.))
         .bg(theme.input)
         .border_1()
         .border_color(theme.title_bar_border)
-        .text_size(px(9.5))
+        .text_size(px(10.))
         .text_color(theme.foreground)
         .child(kind.display_label())
-}
-
-/// A clickable option chip. Mirrors the settings screen's `select_chip`.
-fn select_chip(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    active: bool,
-    cx: &App,
-) -> gpui::Stateful<gpui::Div> {
-    let theme = cx.theme();
-    h_flex()
-        .id(id)
-        .h(px(24.))
-        .px(px(10.))
-        .items_center()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(if active {
-            theme.primary
-        } else {
-            theme.title_bar_border
-        })
-        .bg(if active {
-            crate::theme::accent_soft()
-        } else {
-            theme.input
-        })
-        .text_size(px(11.))
-        .text_color(if active {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        })
-        .cursor_pointer()
-        .child(label.into())
 }
 
 /// One row of the jump-host picker. An imported host can carry an empty
@@ -2382,20 +2285,6 @@ fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text)
-}
-
-fn radio_dot(selected: bool, cx: &App) -> impl IntoElement {
-    div()
-        .size(px(14.))
-        .rounded_full()
-        .border_1()
-        .border_color(cx.theme().border)
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(selected, |el| {
-            el.child(div().size(px(8.)).rounded_full().bg(cx.theme().primary))
-        })
 }
 
 /// How many characters one edit put in, going from `before` to `after`.
@@ -2458,8 +2347,10 @@ fn dropdown_trigger(
         .id(id)
         .relative()
         .w_full()
+        .h_8()
+        .flex()
+        .items_center()
         .px_3()
-        .py(px(6.))
         .rounded(px(6.))
         .border_1()
         .border_color(theme.border)
@@ -2478,7 +2369,11 @@ fn dropdown_trigger(
                 .justify_between()
                 .items_center()
                 .child(div().child(label))
-                .child(div().text_xs().text_color(muted_fg).child("▾")),
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(muted_fg),
+                ),
         )
         .into_any_element()
 }
@@ -2541,9 +2436,9 @@ fn dropdown_panel(
                 }
                 on_close(this, cx);
             }))
-            .bg(theme.popover)
+            .bg(crate::theme::pop_surface())
             .border_1()
-            .border_color(theme.border)
+            .border_color(crate::theme::border_focused())
             .rounded(theme.radius)
             .shadow_md()
             .p(px(2.))

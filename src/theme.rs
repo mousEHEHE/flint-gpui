@@ -100,8 +100,6 @@ struct Palette {
     /// Two depths of "pressed into the surface" wash.
     sunken_soft: Hsla,
     sunken: Hsla,
-    pop_grad_top: Hsla,
-    pop_grad_bottom: Hsla,
     search_hit: Hsla,
     search_hit_active: Hsla,
 
@@ -123,7 +121,7 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     border_focused:        gpui::rgb(0x746F77).into(),
     text:                  gpui::rgb(0xE1DDE4).into(),
     text_muted:            gpui::rgb(0xADADAD).into(),
-    text_dim:              gpui::rgb(0x8A8A8F).into(),
+    text_dim:              gpui::rgb(0x9A9AA0).into(),
     text_placeholder:      gpui::rgb(0x69696A).into(),
     text_editor:           gpui::rgb(0xD5CED9).into(),
 
@@ -174,8 +172,6 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     overlay:               gpui::rgba(0x00000099).into(),
     sunken_soft:           gpui::rgba(0x0000002E).into(),
     sunken:                gpui::rgba(0x00000038).into(),
-    pop_grad_top:          gpui::rgba(0x2B303BFB).into(),
-    pop_grad_bottom:       gpui::rgba(0x252933FB).into(),
     search_hit:            gpui::rgba(0xFFE66D3C).into(),
     search_hit_active:     gpui::rgba(0xFFE66D8C).into(),
 
@@ -197,7 +193,7 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     border:                gpui::rgb(0xD8DCE4).into(),
     border_focused:        gpui::rgb(0xB4BAC6).into(),
     text:                  gpui::rgb(0x1C1F26).into(),
-    text_muted:            gpui::rgb(0x5A606C).into(),
+    text_muted:            gpui::rgb(0x474D58).into(),
     text_dim:              gpui::rgb(0x5F6572).into(),
     text_placeholder:      gpui::rgb(0x8A909C).into(),
     text_editor:           gpui::rgb(0x2A2F3A).into(),
@@ -252,8 +248,6 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     overlay:               gpui::rgba(0x1C1F2659).into(),
     sunken_soft:           gpui::rgba(0x1C1F260A).into(),
     sunken:                gpui::rgba(0x1C1F260F).into(),
-    pop_grad_top:          gpui::rgba(0xFFFFFFFB).into(),
-    pop_grad_bottom:       gpui::rgba(0xF7F8FBFB).into(),
     // Andromeda's yellow at 24% is invisible over white, so light uses amber.
     search_hit:            gpui::rgba(0xFFC53D66).into(),
     search_hit_active:     gpui::rgba(0xFFC53DB8).into(),
@@ -410,11 +404,6 @@ pub fn yellow() -> Hsla {
     active().yellow
 }
 
-/// Window-control "maximize" accent, and the "in use" badge.
-pub fn green_vc() -> Hsla {
-    active().green_vc
-}
-
 /// Window-control "close" accent, and the danger red.
 pub fn red_error() -> Hsla {
     active().danger
@@ -444,16 +433,6 @@ pub fn sunken_soft() -> Hsla {
 /// Recessed wash: inset detail panels, key chips.
 pub fn sunken() -> Hsla {
     active().sunken
-}
-
-/// Tasks-popover gradient, top stop.
-pub fn pop_grad_top() -> Hsla {
-    active().pop_grad_top
-}
-
-/// Tasks-popover gradient, bottom stop.
-pub fn pop_grad_bottom() -> Hsla {
-    active().pop_grad_bottom
 }
 
 /// Terminal default background. Kept equal to `background`.
@@ -753,6 +732,27 @@ mod tests {
             ("conflict", p.conflict),
             ("yellow", p.yellow),
             ("cyan", p.cyan),
+        ];
+
+        for (role_name, role) in roles {
+            for (ground_name, ground) in grounds {
+                let ratio = contrast(role, ground);
+                assert!(
+                    ratio >= 4.5,
+                    "{role_name} on {ground_name} is {ratio:.2}:1, below AA"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dark_text_roles_meet_wcag_aa() {
+        let p = &*DARK;
+        let grounds = [("background", p.background), ("surface", p.surface)];
+        let roles = [
+            ("text", p.text),
+            ("text_muted", p.text_muted),
+            ("text_dim", p.text_dim),
         ];
 
         for (role_name, role) in roles {

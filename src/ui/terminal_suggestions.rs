@@ -713,6 +713,7 @@ impl SuggestionState {
             return None;
         }
         let fg = cx.theme().foreground;
+        let selected_bg = cx.theme().list_hover;
         let typed_chars = self.typed.chars().count();
         // The rows complete the line above them, so they use its font and size.
         let font_family = terminal_font_family(cx);
@@ -728,7 +729,7 @@ impl SuggestionState {
             let head: String = cmd.chars().take(split).collect();
             let tail: String = cmd.chars().skip(split).collect();
 
-            let head_color = if is_sel { flint_theme::accent() } else { fg };
+            let head_color = fg;
             let tail_color = if is_sel {
                 fg
             } else {
@@ -769,18 +770,8 @@ impl SuggestionState {
                 .rounded(px(4.))
                 .text_size(px(font_size))
                 .font_family(font_family)
-                .when(is_sel, |r| r.bg(flint_theme::accent_soft()))
+                .when(is_sel, |r| r.bg(selected_bg))
                 .child(text)
-                // Only the highlighted row shows the Enter mark.
-                .when(is_sel, |r| {
-                    r.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(flint_theme::accent())
-                            .child("⏎"),
-                    )
-                })
         });
 
         let panel = v_flex()

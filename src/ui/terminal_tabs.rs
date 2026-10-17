@@ -9,7 +9,9 @@ use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, Context, Entity, Focusable as _, MouseButton, SharedString, Window,
 };
-use gpui_component::{h_flex, tooltip::Tooltip, ActiveTheme as _, StyledExt as _, WindowExt as _};
+use gpui_component::{
+    h_flex, tooltip::Tooltip, ActiveTheme as _, Icon, IconName, StyledExt as _, WindowExt as _,
+};
 
 use crate::shell::ShellHandle;
 use crate::theme;
@@ -116,7 +118,7 @@ impl ServerSession {
                     // The usual cause is the server's MaxSessions limit.
                     cx.emit(ServerSessionEvent::StatusChanged(format!(
                         "Error: could not open another terminal ({error}). \
-                         The server may limit sessions per connection."
+                         The host may limit sessions per connection."
                     )));
                 }
             })
@@ -202,7 +204,7 @@ impl ServerSession {
         if self.can_open_terminal() {
             strip = strip.child(
                 header_button("terminal-tab-add", cx)
-                    .child("+")
+                    .child(Icon::new(IconName::Plus).size(px(12.)))
                     .tooltip(|window, cx| {
                         Tooltip::new(format!("New terminal ({NEW_TERMINAL_SHORTCUT})"))
                             .build(window, cx)
@@ -215,12 +217,13 @@ impl ServerSession {
 
     fn render_terminal_tab(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let is_active = ix == self.active_terminal;
+        let fg = cx.theme().foreground;
         let close = div()
             .id(("terminal-tab-close", ix))
             .px(px(2.))
-            .rounded(px(2.))
+            .rounded(px(3.))
             .text_color(theme::text_dim())
-            .hover(|s| s.text_color(theme::red_error()))
+            .hover(move |s| s.bg(theme::element_hover()).text_color(fg))
             // Mouse-down, not click: it must not reach the tab under it, which
             // would activate the tab being closed.
             .on_mouse_down(
@@ -264,8 +267,8 @@ impl ServerSession {
     }
 }
 
-/// A small flat button sized for the 22px terminal header.
-fn header_button(
+/// A small flat button sized for the 28px terminal header.
+pub(crate) fn header_button(
     id: impl Into<gpui::ElementId>,
     cx: &Context<ServerSession>,
 ) -> gpui::Stateful<gpui::Div> {
@@ -273,10 +276,10 @@ fn header_button(
         .id(id)
         .flex()
         .items_center()
-        .h(px(17.))
+        .h(px(22.))
         .px(px(6.))
         .rounded(px(3.))
-        .text_size(px(10.5))
+        .text_size(px(11.))
         .text_color(cx.theme().muted_foreground)
         .cursor_pointer()
         .hover(|s| s.bg(theme::element_hover()))

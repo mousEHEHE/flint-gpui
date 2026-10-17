@@ -10,6 +10,7 @@ use crate::ssh::{
     AuthCredential, AuthError, AuthPromptField, CancelFlag, ForwardState, SshConnection,
     SshConnectionEvent, SshRoute, TransferOutcome,
 };
+use crate::theme as flint_theme;
 use crate::ui::peer_link::{Link, PeerLink};
 use crate::ui::sftp_browser::{
     BrowserEvent, PreservedFiles, RestorePaths, SftpBrowser, TransferKind,
@@ -334,7 +335,7 @@ enum SessionOutcome {
     Gone,
 }
 
-pub(crate) const CONNECTION_CLOSED: &str = "The server closed the connection.";
+pub(crate) const CONNECTION_CLOSED: &str = "The host closed the connection.";
 
 fn capitalize_first(text: &str) -> String {
     let mut chars = text.chars();
@@ -1621,10 +1622,11 @@ impl ServerSession {
             .px(px(12.))
             .py(px(10.))
             .w(px(380.))
-            .bg(theme.background)
+            .bg(flint_theme::pop_surface())
             .rounded(px(6.))
             .border_1()
-            .border_color(theme.border)
+            .border_color(flint_theme::border_focused())
+            .shadow_lg()
             .gap(px(8.))
             .child(
                 div()
@@ -1638,7 +1640,7 @@ impl ServerSession {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(12.))
                     .text_color(theme.muted_foreground)
                     .child(message.clone()),
             );
@@ -1772,10 +1774,15 @@ impl ServerSession {
             .px(px(12.))
             .py(px(10.))
             .w(px(480.))
-            .bg(theme.background)
+            .bg(flint_theme::pop_surface())
             .rounded(px(6.))
             .border_1()
-            .border_color(if mismatch { theme.danger } else { theme.border })
+            .border_color(if mismatch {
+                theme.danger
+            } else {
+                flint_theme::border_focused()
+            })
+            .shadow_lg()
             .gap(px(8.));
 
         if mismatch {
@@ -1785,19 +1792,14 @@ impl ServerSession {
                         .text_color(theme.danger)
                         .text_size(px(13.))
                         .font_semibold()
-                        .child(format!("Host key for {host} has changed!")),
+                        .child(format!("Host key for {host} changed")),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(theme.foreground)
-                        .child(
-                            "The server presented a different key than the one you trusted \
-                             before. This can mean the server was reinstalled, or that \
-                             someone is intercepting the connection (man-in-the-middle). \
-                             Do not trust the new key unless you know why it changed.",
-                        ),
-                )
+                .child(div().text_size(px(12.)).text_color(theme.foreground).child(
+                    "The host presented a different key than the one you trusted \
+                             before. It may have been reinstalled, or someone may be \
+                             intercepting the connection. Do not trust the new key unless \
+                             you know why it changed.",
+                ))
                 .child(fingerprint_row(
                     "Previously trusted",
                     prompt.stored_fingerprint.clone().unwrap_or_default(),
@@ -1842,12 +1844,11 @@ impl ServerSession {
                 )
                 .child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .child(
-                            "This is the first connection to this host. Compare the \
-                             fingerprint below with the one reported by your server \
-                             before trusting it.",
+                            "First connection to this host. Compare this fingerprint \
+                             with the one the host reports before you trust it.",
                         ),
                 )
                 .child(fingerprint_row(
@@ -1872,7 +1873,7 @@ impl ServerSession {
                             Button::new("hostkey-accept")
                                 .small()
                                 .primary()
-                                .child("Trust & connect")
+                                .child("Trust and connect")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond_host_key(link, true, cx);
                                 })),
@@ -1908,12 +1909,12 @@ impl ServerSession {
         let username = hop.username.clone();
 
         let title = if prompt.name.trim().is_empty() {
-            format!("Verify it's you: {host}")
+            format!("Authentication for {host}")
         } else {
             prompt.name.trim().to_string()
         };
         let subtitle = if prompt.instructions.trim().is_empty() {
-            format!("The server requests additional authentication for {username}@{host}.")
+            format!("{username}@{host} asks for another sign-in step.")
         } else {
             prompt.instructions.trim().to_string()
         };
@@ -1924,10 +1925,11 @@ impl ServerSession {
             .px(px(12.))
             .py(px(10.))
             .w(px(380.))
-            .bg(theme.background)
+            .bg(flint_theme::pop_surface())
             .rounded(px(6.))
             .border_1()
-            .border_color(theme.border)
+            .border_color(flint_theme::border_focused())
+            .shadow_lg()
             .gap(px(8.))
             .child(
                 div()
@@ -1938,7 +1940,7 @@ impl ServerSession {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(12.))
                     .text_color(theme.muted_foreground)
                     .child(subtitle),
             );
@@ -1947,13 +1949,18 @@ impl ServerSession {
         // challenge reads exactly like the target's. Say which machine is
         // asking before the user types a one-time code into it.
         if hop.is_jump {
-            card = card.child(div().text_xs().text_color(theme.warning).child(format!(
-                "Asked by jump host {} ({}@{}) on the way to {}.",
-                hop.name,
-                username,
-                host,
-                target.display_name(),
-            )));
+            card = card.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.warning)
+                    .child(format!(
+                        "Asked by jump host {} ({}@{}) on the way to {}.",
+                        hop.name,
+                        username,
+                        host,
+                        target.display_name(),
+                    )),
+            );
         }
 
         for (ix, field) in prompt.fields.iter().enumerate() {
@@ -2059,14 +2066,13 @@ impl Render for ServerSession {
             (&self.browser, self.active_terminal())
         {
             let term_header = h_flex()
-                .h(px(22.))
-                .pl(px(14.))
-                .pr(px(8.))
-                .gap(px(8.))
+                .h(px(28.))
+                .px(px(8.))
+                .gap(px(6.))
                 .items_center()
                 .border_b_1()
-                .border_color(theme.title_bar_border)
-                .bg(theme.title_bar)
+                .border_color(theme.border)
+                .bg(theme.tab_bar)
                 .text_size(px(11.))
                 .text_color(theme.muted_foreground)
                 .child(div().child("Terminal"))
@@ -2134,10 +2140,12 @@ impl Render for ServerSession {
                                 v_flex()
                                     .px(px(12.))
                                     .py(px(10.))
-                                    .bg(theme.background)
+                                    .w(px(380.))
+                                    .bg(flint_theme::pop_surface())
                                     .rounded(px(6.))
                                     .border_1()
-                                    .border_color(theme.border)
+                                    .border_color(flint_theme::border_focused())
+                                    .shadow_lg()
                                     .gap(px(8.))
                                     .child(
                                         div()
@@ -2148,14 +2156,14 @@ impl Render for ServerSession {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(11.5))
+                                            .text_size(px(12.))
                                             .text_color(theme.muted_foreground)
                                             .child(reason),
                                     )
                                     .when(preserved_count > 0, |el| {
                                         el.child(
                                             div()
-                                                .text_size(px(11.5))
+                                                .text_size(px(12.))
                                                 .text_color(theme.warning)
                                                 .child(preserved_files_note(
                                                     preserved_count,
@@ -2170,6 +2178,7 @@ impl Render for ServerSession {
                                             .child(
                                                 Button::new("close-disconnect")
                                                     .small()
+                                                    .ghost()
                                                     .child("Close")
                                                     .on_click(cx.listener(|_, _, _, cx| {
                                                         cx.emit(ServerSessionEvent::CloseRequested);
@@ -2212,23 +2221,29 @@ impl Render for ServerSession {
                                 v_flex()
                                     .px(px(12.))
                                     .py(px(10.))
-                                    .items_center()
-                                    .bg(theme.background)
+                                    .w(px(380.))
+                                    .bg(flint_theme::pop_surface())
                                     .rounded(px(6.))
                                     .border_1()
-                                    .border_color(theme.border)
+                                    .border_color(flint_theme::border_focused())
+                                    .shadow_lg()
                                     .gap(px(8.))
-                                    .child(Spinner::new().large())
                                     .child(
-                                        div()
-                                            .text_color(theme.warning)
-                                            .text_size(px(13.))
-                                            .font_semibold()
-                                            .child(format!("Reconnecting to {host}…")),
+                                        h_flex()
+                                            .gap(px(8.))
+                                            .items_center()
+                                            .child(Spinner::new())
+                                            .child(
+                                                div()
+                                                    .text_color(theme.foreground)
+                                                    .text_size(px(13.))
+                                                    .font_semibold()
+                                                    .child(format!("Reconnecting to {host}…")),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(11.5))
+                                            .text_size(px(12.))
                                             .text_color(theme.muted_foreground)
                                             .child(format!(
                                                 "Attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}"

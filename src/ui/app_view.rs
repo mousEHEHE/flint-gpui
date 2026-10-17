@@ -8,7 +8,9 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
+    h_flex,
+    tooltip::Tooltip,
+    v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -36,7 +38,7 @@ use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
 use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
-use crate::ui::{dialog_chrome, VaultState};
+use crate::ui::{dialog_chrome, VaultState, DIALOG_NARROW, DIALOG_WIDE};
 use crate::vault::{AuthMethod, ProxyKind, ServerEntry, SnippetBody};
 
 actions!(
@@ -411,7 +413,7 @@ impl AppView {
         )
         .detach();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(px(400.)).child(view.clone())
+            dialog_chrome(dialog).w(DIALOG_NARROW).child(view.clone())
         });
     }
 
@@ -1192,7 +1194,7 @@ impl AppView {
         let view_for_dialog = view.clone();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
             dialog_chrome(dialog)
-                .w(px(400.))
+                .w(DIALOG_NARROW)
                 .child(view_for_dialog.clone())
         });
     }
@@ -1673,18 +1675,18 @@ impl AppView {
                     let (lc, wb_c, ws_c) = (local.clone(), wb.clone(), weak_session.clone());
                     let (lr, wb_r, ws_r) = (local.clone(), wb.clone(), weak_session.clone());
                     let (lo, wb_o, ws_o) = (local.clone(), wb.clone(), weak_session.clone());
-                    dialog_chrome(dialog).w(px(480.)).child(
+                    dialog_chrome(dialog).w(DIALOG_WIDE).child(
                         v_flex()
                             .p(px(12.))
                             .gap(px(8.))
                             .child(
                                 DialogHeader::new().child(
                                     DialogTitle::new()
-                                        .child(format!("Conflict: {filename}")),
+                                        .child(format!("{filename} changed on the host")),
                                 ),
                             )
-                            .child(div().text_sm().child(format!(
-                                "\"{filename}\" was modified on the server while you were editing locally.",
+                            .child(div().text_size(px(12.5)).child(format!(
+                                "\"{filename}\" changed on the host while you were editing it here.",
                             )))
                             .child(
                                 DialogFooter::new().child(
@@ -1709,7 +1711,7 @@ impl AppView {
                                             )
                                             .child(
                                                 Button::new("conflict-reload")
-                                                    .child("Reload from server")
+                                                    .child("Reload from host")
                                                     .on_click(move |_, window, cx| {
                                                         wb_r.update(cx, |b, cx| {
                                                             b.resolve_conflict_reload(
@@ -1728,7 +1730,7 @@ impl AppView {
                                             .child(
                                                 Button::new("conflict-overwrite")
                                                     .primary()
-                                                    .child("Overwrite on server")
+                                                    .child("Overwrite on host")
                                                     .on_click(move |_, window, cx| {
                                                         wb_o.update(cx, |b, cx| {
                                                             b.resolve_conflict_overwrite(
@@ -1776,7 +1778,7 @@ impl AppView {
         cx.spawn(async move |_, cx| {
             cx.update_window(wh, |_, window, cx| {
                 window.open_dialog(cx, move |dialog, _, _| {
-                    dialog_chrome(dialog).w(px(480.)).child(picker.clone())
+                    dialog_chrome(dialog).w(DIALOG_WIDE).child(picker.clone())
                 });
             })
             .ok();
@@ -1818,21 +1820,21 @@ impl AppView {
             let (weak2, label2) = (weak.clone(), label.clone());
             let jump_warning = jump_warning.clone();
             let warning_color = cx.theme().warning;
-            dialog_chrome(dialog).w(px(360.)).child(
+            dialog_chrome(dialog).w(DIALOG_NARROW).child(
                 v_flex()
                     .p(px(12.))
                     .gap(px(8.))
                     .child(
                         DialogHeader::new()
-                            .child(DialogTitle::new().child("Remove host")),
+                            .child(DialogTitle::new().child("Delete host")),
                     )
                     .child(
                         div()
-                            .text_sm()
-                            .child(format!("Remove \"{}\"? This cannot be undone.", label2)),
+                            .text_size(px(12.5))
+                            .child(format!("Delete \"{}\"? This cannot be undone.", label2)),
                     )
                     .when_some(jump_warning, |el, warning| {
-                        el.child(div().text_sm().text_color(warning_color).child(warning))
+                        el.child(div().text_size(px(12.5)).text_color(warning_color).child(warning))
                     })
                     .child(
                         DialogFooter::new().child(
@@ -1849,8 +1851,8 @@ impl AppView {
                                     )
                                     .child(
                                         Button::new("confirm-remove")
-                                            .primary()
-                                            .child("Remove")
+                                            .danger()
+                                            .child("Delete")
                                             .on_click(move |_, window, cx| {
                                                 weak2
                                                     .update(cx, |this, inner_cx| {
@@ -1876,10 +1878,10 @@ impl AppView {
                                                         if let Some(Err(e)) = result {
                                                             tracing::error!(
                                                                 ?e,
-                                                                "failed to remove entry"
+                                                                "failed to delete entry"
                                                             );
                                                             this.set_status(
-                                                                format!("Could not remove the host: {e}"),
+                                                                format!("Could not delete the host: {e}"),
                                                                 inner_cx,
                                                             );
                                                         }
@@ -1948,7 +1950,7 @@ impl AppView {
         let view_for_dialog = view.clone();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
             dialog_chrome(dialog)
-                .w(px(480.))
+                .w(DIALOG_WIDE)
                 .child(view_for_dialog.clone())
         });
     }
@@ -2057,11 +2059,11 @@ impl AppView {
         )
         .detach();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(px(420.)).child(view.clone())
+            dialog_chrome(dialog).w(DIALOG_WIDE).child(view.clone())
         });
     }
 
-    /// The title bar's mark for a newer build: a filled accent pill with the
+    /// The title bar's mark for a newer build: a soft accent chip with the
     /// version, or the percent while it downloads. `None` when there is
     /// nothing newer.
     fn render_update_mark(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -2074,24 +2076,23 @@ impl AppView {
         };
         let theme = cx.theme();
         let (bg, fg, hover_bg, active_bg) = (
+            crate::theme::accent_soft(),
             theme.primary,
-            theme.primary_foreground,
-            theme.primary_hover,
-            theme.primary_active,
+            crate::theme::accent_soft_press(),
+            crate::theme::accent_soft_press(),
         );
 
         Some(
             h_flex()
                 .id("titlebar-update")
                 .flex_none()
-                .h(px(20.))
+                .h(px(22.))
                 .px(px(8.))
-                .gap(px(5.))
+                .gap(px(4.))
                 .items_center()
-                .rounded_full()
+                .rounded(px(4.))
                 .bg(bg)
                 .text_size(px(11.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(fg)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover_bg))
@@ -2122,7 +2123,7 @@ impl AppView {
         )
         .detach();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(px(460.)).child(view.clone())
+            dialog_chrome(dialog).w(DIALOG_WIDE).child(view.clone())
         });
     }
 
@@ -2228,7 +2229,7 @@ impl AppView {
         let form_for_dialog = form.clone();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
             dialog_chrome(dialog)
-                .w(px(460.))
+                .w(DIALOG_WIDE)
                 .child(form_for_dialog.clone())
         });
     }
@@ -2348,7 +2349,6 @@ impl AppView {
         let bg = theme.background;
         let border = theme.title_bar_border;
         let border_focused = crate::theme::border_focused();
-        let text = theme.foreground;
         let text_muted = theme.muted_foreground;
         let text_placeholder = crate::theme::text_placeholder();
 
@@ -2379,28 +2379,21 @@ impl AppView {
             .child(
                 Icon::new(IconName::Search)
                     .size(px(11.))
-                    .text_color(text_muted),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .gap(px(4.))
-                    .items_baseline()
-                    .child(div().text_color(text).child("go to"))
-                    .child(div().child("host, snippet, command\u{2026}")),
+                    .text_color(text_placeholder),
             )
             .child(
                 div()
-                    .h(px(16.))
-                    .px(px(5.))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child("Go to host, snippet or command"),
+            )
+            .child(
+                div()
                     .flex()
                     .items_center()
                     .text_size(px(10.))
-                    .text_color(text_muted)
-                    .bg(bg_elevated)
-                    .border_1()
-                    .border_color(border)
-                    .rounded(px(3.))
+                    .text_color(text_placeholder)
                     .child(PALETTE_SHORTCUT),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)));
@@ -2472,7 +2465,9 @@ impl Render for AppView {
         // Status bar: transient message wins; otherwise derive from active session.
         let status_left: AnyElement = if !self.status.is_empty() {
             div()
-                .text_xs()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.))
                 .text_color(muted_fg)
                 .child(self.status.clone())
                 .into_any_element()
@@ -2486,27 +2481,21 @@ impl Render for AppView {
                             s.conn_info.username, s.conn_info.host, s.conn_info.port
                         );
                         h_flex()
-                            .gap_3()
+                            .gap(px(6.))
                             .items_center()
                             .child(
-                                h_flex()
-                                    .gap(px(5.))
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .size(px(6.))
-                                            .rounded_full()
-                                            .flex_none()
-                                            .bg(cx.theme().success),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().success)
-                                            .child("ssh · connected"),
-                                    ),
+                                div()
+                                    .size(px(5.))
+                                    .rounded_full()
+                                    .flex_none()
+                                    .bg(cx.theme().success),
                             )
-                            .child(div().text_xs().text_color(muted_fg).child(host_text))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(muted_fg)
+                                    .child(host_text),
+                            )
                             .into_any_element()
                     } else if s.disconnected.is_some() || s.has_connect_failure() {
                         let label = if s.has_connect_failure() {
@@ -2519,12 +2508,12 @@ impl Render for AppView {
                             .items_center()
                             .child(
                                 div()
-                                    .size(px(6.))
+                                    .size(px(5.))
                                     .rounded_full()
                                     .flex_none()
                                     .bg(cx.theme().danger),
                             )
-                            .child(div().text_xs().text_color(cx.theme().danger).child(label))
+                            .child(div().text_size(px(11.)).text_color(muted_fg).child(label))
                             .into_any_element()
                     } else {
                         h_flex()
@@ -2532,12 +2521,17 @@ impl Render for AppView {
                             .items_center()
                             .child(
                                 div()
-                                    .size(px(6.))
+                                    .size(px(5.))
                                     .rounded_full()
                                     .flex_none()
                                     .bg(cx.theme().warning),
                             )
-                            .child(div().text_xs().text_color(muted_fg).child("connecting…"))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(muted_fg)
+                                    .child("connecting…"),
+                            )
                             .into_any_element()
                     }
                 }
@@ -2637,10 +2631,17 @@ impl Render for AppView {
                     .bg(tab_bar_bg)
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(status_left))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(status_left),
+                    )
                     .child(
                         div()
                             .id("feedback-footer-btn")
+                            .tooltip(|window, cx| Tooltip::new("Send feedback").build(window, cx))
                             .size(px(18.))
                             .flex()
                             .items_center()
@@ -2662,6 +2663,11 @@ impl Render for AppView {
                     .child(
                         div()
                             .id("settings-footer-btn")
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Settings")
+                                    .action(&ToggleSettings, None)
+                                    .build(window, cx)
+                            })
                             .size(px(18.))
                             .flex()
                             .items_center()

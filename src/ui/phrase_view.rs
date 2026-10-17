@@ -185,9 +185,9 @@ impl Render for PhraseView {
         let theme = cx.theme();
 
         let subtitle: &'static str = if is_rotation {
-            "Your previous recovery phrase is no longer valid. The new one is shown only once: save it before continuing."
+            "Your previous phrase no longer works. This one is shown only once."
         } else {
-            "These 24 words are shown only once. Save them in order: if you forget your password, they are the only way to recover your vault."
+            "Shown only once. If you forget your password, these 24 words are the only way back into this vault."
         };
 
         let save_message = self.save_result.as_ref().map(|result| match result {
@@ -197,32 +197,41 @@ impl Render for PhraseView {
 
         lock_screen::screen(
             v_flex()
-                    .w(px(480.))
-                    .gap_3()
-                    .child(phrase_panel(&words, "Save your recovery phrase", subtitle, theme))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("copy-phrase")
-                                    .child(if self.is_copied { "Copied" } else { "Copy" })
-                                    .on_click(cx.listener(|this, _, _, cx| this.copy_phrase(cx))),
-                            )
-                            .child(Button::new("save-phrase").child("Save as text file").on_click(
-                                cx.listener(|this, _, window, cx| this.save_phrase(window, cx)),
-                            )),
-                    )
-                    .children(save_message)
-                    .child(lock_screen::note(
-                        "Nobody can reset these words for you. Copy leaves them on the clipboard and Save as text file writes them unencrypted: clear the clipboard after pasting and keep the file somewhere safe.",
-                        theme.muted_foreground,
-                    ))
-                    .child(
-                        Button::new("confirm-phrase")
-                            .primary()
-                            .child("I have saved this phrase")
-                            .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
-                    ),
+                .w(px(480.))
+                .gap_3()
+                .child(phrase_panel(
+                    &words,
+                    "Save your recovery phrase",
+                    subtitle,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("copy-phrase")
+                                .child(if self.is_copied { "Copied" } else { "Copy" })
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_phrase(cx))),
+                        )
+                        .child(
+                            Button::new("save-phrase")
+                                .child("Save as text file")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.save_phrase(window, cx)),
+                                ),
+                        ),
+                )
+                .children(save_message)
+                .child(lock_screen::note(
+                    "Copied words stay on the clipboard, and the text file is not encrypted.",
+                    theme.muted_foreground,
+                ))
+                .child(
+                    Button::new("confirm-phrase")
+                        .primary()
+                        .child("I have saved this phrase")
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
+                ),
             window,
             cx,
         )

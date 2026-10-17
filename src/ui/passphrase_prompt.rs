@@ -7,9 +7,10 @@ use gpui::prelude::*;
 use gpui::{div, px, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
+    dialog::{DialogHeader, DialogTitle},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex, ActiveTheme as _, StyledExt as _,
+    v_flex, ActiveTheme as _, Sizable as _,
 };
 use zeroize::Zeroizing;
 
@@ -81,11 +82,11 @@ impl Render for PassphrasePromptView {
 
         v_flex()
             .p(px(12.))
-            .gap_3()
-            .child(div().text_sm().font_semibold().child("Key passphrase"))
+            .gap(px(8.))
+            .child(DialogHeader::new().child(DialogTitle::new().child("Key passphrase")))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(12.))
                     .text_color(theme.muted_foreground)
                     .child(format!(
                         "The key \"{}\" for {} is encrypted.",
@@ -93,17 +94,19 @@ impl Render for PassphrasePromptView {
                     )),
             )
             .child(Input::new(&self.input).mask_toggle())
-            .children(
-                self.error
-                    .as_ref()
-                    .map(|msg| div().text_xs().text_color(theme.danger).child(msg.clone())),
-            )
+            .children(self.error.as_ref().map(|msg| {
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.danger)
+                    .child(msg.clone())
+            }))
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap(px(8.))
                     .justify_end()
                     .child(
                         Button::new("passphrase-cancel")
+                            .small()
                             .ghost()
                             .child("Cancel")
                             .on_click(cx.listener(|_, _, _, cx| {
@@ -112,6 +115,7 @@ impl Render for PassphrasePromptView {
                     )
                     .child(
                         Button::new("passphrase-connect")
+                            .small()
                             .primary()
                             .child("Connect")
                             .on_click(cx.listener(|this, _, _, cx| {

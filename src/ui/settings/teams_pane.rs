@@ -552,7 +552,7 @@ impl TeamsPane {
         let shared: Vec<&HostRow> = vault.hosts.iter().filter(|row| row.is_shared).collect();
         let is_choosing = self.open == Some(Open::Hosts(vault_id));
 
-        let mut row = h_flex().gap(px(8.)).items_center().flex_wrap();
+        let mut row = h_flex().h(px(24.)).gap(px(8.)).items_center();
         row = if team.is_plain {
             row.child(line_text(cx, shared_summary(&shared)).min_w_0().truncate())
         } else {
@@ -564,14 +564,10 @@ impl TeamsPane {
             row.child(line_text(cx, vault.name.clone()))
                 .child(caption_text(cx, about))
         };
-        row = row.child(
+        row = row.child(div().flex_1()).child(
             Button::new(SharedString::from(format!("hosts-toggle-{vault_id}")))
+                .ghost()
                 .xsmall()
-                .icon(if is_choosing {
-                    IconName::Check
-                } else {
-                    IconName::Search
-                })
                 .child(if is_choosing {
                     "Done"
                 } else {
@@ -598,8 +594,8 @@ impl TeamsPane {
         row = row
             .child(
                 Button::new(access_id.clone())
+                    .ghost()
                     .xsmall()
-                    .icon(IconName::User)
                     .child("Who sees it…")
                     .loading(self.is_spinning(&access_id, cx))
                     .disabled(is_busy)
@@ -610,6 +606,7 @@ impl TeamsPane {
             )
             .child(
                 Button::new(rename_id.clone())
+                    .ghost()
                     .xsmall()
                     .child("Rename")
                     .loading(self.is_spinning(&rename_id, cx))
@@ -628,8 +625,8 @@ impl TeamsPane {
         {
             row = row.child(
                 Button::new(delete_id)
+                    .ghost()
                     .xsmall()
-                    .icon(trash_icon())
                     .child("Delete")
                     .disabled(is_busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -848,7 +845,7 @@ impl TeamsPane {
                  could see them, as personal copies. Enter your master password to confirm.",
             ))
             .child(Input::new(&self.confirm_password).small().mask_toggle())
-            .children(error.map(|text| div().text_size(px(11.5)).text_color(danger).child(text)))
+            .children(error.map(|text| div().text_size(px(11.)).text_color(danger).child(text)))
             .child(
                 h_flex()
                     .gap(px(8.))
@@ -933,7 +930,6 @@ impl Render for TeamsPane {
         let muted_fg = theme.muted_foreground;
         let danger = theme.danger;
         let success = theme.success;
-        let border = theme.title_bar_border;
         let accent = theme.primary;
 
         let heading = move |text: String| {
@@ -945,6 +941,7 @@ impl Render for TeamsPane {
         };
         let caption =
             move |text: String| div().text_size(px(10.5)).text_color(muted_fg).child(text);
+        let note = move |text: String| caption(text).max_w(px(520.));
         let line = move |text: String| div().text_size(px(11.5)).text_color(fg).child(text);
 
         let pane = v_flex()
@@ -983,20 +980,18 @@ impl Render for TeamsPane {
 
         let mut pane = pane
             .child(heading("Teams".into()))
-            .child(caption(
-                "A team shares hosts, and the keys they log in with, between accounts. The hosts \
-                 and keys are encrypted for the members only; the server cannot read them or add \
-                 anyone."
+            .child(note(
+                "Share hosts, and the keys they log in with, with other accounts. They are \
+                 encrypted for members only; the sync service cannot read them or add anyone."
                     .into(),
             ))
-            .child(caption(
-                "Teams are free for now. Later they will be paid: about $5 a month for up to \
-                 3 teams, paid by the owner. Members never pay, and syncing your own hosts \
-                 stays free."
+            .child(note(
+                "Teams are free for now. Later the owner pays about $5 a month for up to 3 \
+                 teams; members never pay."
                     .into(),
             ))
-            .children(error.map(|text| div().text_size(px(11.5)).text_color(danger).child(text)))
-            .children(notice.map(|text| div().text_size(px(11.5)).text_color(success).child(text)));
+            .children(error.map(|text| div().text_size(px(11.)).text_color(danger).child(text)))
+            .children(notice.map(|text| div().text_size(px(11.)).text_color(success).child(text)));
         if waiting > 0 {
             pane = pane.child(caption(
                 "You asked to join a team. You are in once the person who sent the link opens \
@@ -1005,6 +1000,7 @@ impl Render for TeamsPane {
             ));
         }
 
+        let mono = crate::ui::terminal_element::terminal_font_family(cx);
         for team in teams {
             let team_id = team.id;
             let role = match (team.is_owner, team.is_manager) {
@@ -1012,24 +1008,28 @@ impl Render for TeamsPane {
                 (false, true) => "admin",
                 (false, false) => "member",
             };
-            let mut card = v_flex()
-                .gap(px(6.))
-                .pt(px(8.))
-                .border_t_1()
-                .border_color(border)
-                .child(heading(format!("{} · {role}", team.name)));
+            let mut card = v_flex().gap(px(6.)).mt(px(6.)).child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(heading(team.name.clone()))
+                    .child(caption(role.into())),
+            );
 
             for (user_id, login, member_role) in team.members.clone() {
                 let is_me = user_id == team.me;
                 let is_owner_row = member_role == "owner";
                 let mut row = h_flex()
+                    .h(px(24.))
                     .gap(px(8.))
                     .items_center()
                     .child(Icon::new(IconName::User).size(px(12.)).text_color(muted_fg))
-                    .child(line(format!("{login} · {member_role}")));
+                    .child(line(login))
+                    .child(caption(member_role.clone()));
                 if is_me {
                     row = row.child(caption("you".into()));
                 }
+                row = row.child(div().flex_1());
 
                 // Roles and ownership are the owner's to give.
                 if team.is_owner && !is_me && self.handing_over == Some((team_id, user_id)) {
@@ -1074,6 +1074,7 @@ impl Render for TeamsPane {
                     row = row
                         .child(
                             Button::new(role_id.clone())
+                                .ghost()
                                 .xsmall()
                                 .child(role_label)
                                 .loading(is_spinning(&role_id))
@@ -1089,6 +1090,7 @@ impl Render for TeamsPane {
                         )
                         .child(
                             Button::new(SharedString::from(format!("owner-{team_id}-{user_id}")))
+                                .ghost()
                                 .xsmall()
                                 .child("Make owner…")
                                 .disabled(is_busy)
@@ -1102,8 +1104,8 @@ impl Render for TeamsPane {
                     let id = SharedString::from(format!("remove-{team_id}-{user_id}"));
                     row = row.child(
                         Button::new(id.clone())
+                            .ghost()
                             .xsmall()
-                            .icon(IconName::Close)
                             .child("Remove")
                             .loading(is_spinning(&id))
                             .disabled(is_busy)
@@ -1152,16 +1154,23 @@ impl Render for TeamsPane {
                 let id = SharedString::from(format!("revoke-{invite_id}"));
                 card = card.child(
                     h_flex()
+                        .h(px(24.))
                         .gap(px(8.))
                         .items_center()
-                        .child(caption(
-                            "Invite link. Anyone with it can ask to join; it expires after 72 hours."
-                                .into(),
-                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(muted_fg)
+                                .font_family(mono)
+                                .child(link.clone()),
+                        )
                         .child(
                             Button::new(SharedString::from(format!("copy-{invite_id}")))
+                                .ghost()
                                 .xsmall()
-                                .icon(IconName::Copy)
                                 .child("Copy link")
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
@@ -1169,8 +1178,8 @@ impl Render for TeamsPane {
                         )
                         .child(
                             Button::new(id.clone())
+                                .ghost()
                                 .xsmall()
-                                .icon(IconName::Close)
                                 .child("Revoke")
                                 .loading(is_spinning(&id))
                                 .disabled(is_busy)
@@ -1180,6 +1189,12 @@ impl Render for TeamsPane {
                                 })),
                         ),
                 );
+            }
+
+            if !team.invite_links.is_empty() {
+                card = card.child(caption(
+                    "Anyone with a link can ask to join. Links expire after 72 hours.".into(),
+                ));
             }
 
             card = card.children(self.vaults_section(&team, cx));
@@ -1264,7 +1279,7 @@ impl Render for TeamsPane {
                     Button::new(leave_id.clone())
                         .small()
                         .danger()
-                        .icon(trash_icon())
+                        .outline()
                         .child(leave_label)
                         .loading(is_spinning(&leave_id))
                         .disabled(is_busy)
@@ -1283,12 +1298,7 @@ impl Render for TeamsPane {
 
         let create_id = SharedString::from("team-create");
         let join_id = SharedString::from("team-join");
-        let mut forms = v_flex()
-            .gap(px(8.))
-            .pt(px(8.))
-            .border_t_1()
-            .border_color(border)
-            .w(px(340.));
+        let mut forms = v_flex().gap(px(8.)).mt(px(6.)).w(px(340.));
         if needs_first_password {
             forms = forms
                 .child(caption(

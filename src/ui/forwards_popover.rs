@@ -9,16 +9,19 @@
 //! that file stays about the connection lifecycle.
 
 use gpui::prelude::*;
-use gpui::{div, linear_color_stop, linear_gradient, px, AnyElement, Context, Hsla, SharedString};
+use gpui::{div, px, AnyElement, Context, Hsla, SharedString};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
+    h_flex,
+    tooltip::Tooltip,
+    v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _,
 };
 
 use crate::connection::{is_loopback_bind, ForwardKind};
 use crate::ssh::ForwardState;
 use crate::theme;
 use crate::ui::server_session::{ForwardRuntime, ServerSession};
+use crate::ui::terminal_tabs::header_button;
 
 const POPOVER_W: f32 = 340.0;
 
@@ -62,40 +65,24 @@ impl ServerSession {
         }
 
         let bound = self.forwards.iter().filter(|f| f.is_bound()).count();
-        let failed = self.forwards.iter().any(|f| f.failure().is_some());
-        // `status_off` is the idle grey of the sidebar capsules: a fill, not
-        // a text colour. On the chip's own background it reads at ~1.9:1, so
-        // the idle count uses the dim text colour of the popover rows.
-        let color = if failed {
+        let has_failed = self.forwards.iter().any(|f| f.failure().is_some());
+        let count_color = if has_failed {
             theme::run_red()
-        } else if bound > 0 {
-            theme::status_online()
         } else {
             theme::text_dim()
         };
-        let label = format!("{bound}/{}", self.forwards.len());
+        let count = format!("{bound}/{}", self.forwards.len());
 
         Some(
-            div()
-                .id("forward-chip")
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .h(px(19.))
-                .px(px(8.))
-                .rounded(px(3.))
-                .border_1()
-                .border_color(theme::border_focused())
-                .bg(theme::element())
-                .text_size(px(10.5))
-                .font_semibold()
-                .text_color(color)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::element_hover()))
-                .active(|s| s.bg(theme::element_active()))
+            header_button("forward-chip", cx)
+                .gap(px(4.))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_forwards(cx)))
-                .child("⇄")
-                .child(SharedString::from(label))
+                .child("Forwards")
+                .child(
+                    div()
+                        .text_color(count_color)
+                        .child(SharedString::from(count)),
+                )
                 .into_any_element(),
         )
     }
@@ -118,14 +105,10 @@ impl ServerSession {
             .right(px(12.))
             .bottom(px(12.))
             .w(px(POPOVER_W))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(theme::pop_grad_top(), 0.),
-                linear_color_stop(theme::pop_grad_bottom(), 1.),
-            ))
+            .bg(theme::pop_surface())
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded(px(4.))
+            .border_color(theme::border_focused())
+            .rounded(px(6.))
             .shadow_lg()
             .overflow_hidden()
             .child(self.render_forwards_head(cx))
@@ -142,8 +125,6 @@ impl ServerSession {
     }
 
     fn render_forwards_head(&self, cx: &Context<Self>) -> AnyElement {
-        let bound = self.forwards.iter().filter(|f| f.is_bound()).count();
-
         h_flex()
             .h(px(28.))
             .pl(px(11.))
@@ -156,52 +137,17 @@ impl ServerSession {
             .child(
                 div()
                     .text_size(px(10.))
-                    .font_bold()
+                    .font_semibold()
                     .text_color(theme::muted_gray())
                     .child("PORT FORWARDING"),
             )
-            .when(bound > 0, |el| {
-                el.child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .h(px(15.))
-                        .pl(px(5.))
-                        .pr(px(6.))
-                        .rounded(px(3.))
-                        .bg(theme::accent_soft())
-                        .border_1()
-                        .border_color(theme::accent_line())
-                        .text_size(px(9.5))
-                        .font_semibold()
-                        .text_color(theme::accent())
-                        .child(
-                            div()
-                                .w(px(4.))
-                                .h(px(4.))
-                                .rounded(px(999.))
-                                .bg(theme::accent()),
-                        )
-                        .child(SharedString::from(bound.to_string())),
-                )
-            })
             .child(div().flex_1())
             .child(
-                div()
-                    .id("forwards-close")
-                    .w(px(19.))
-                    .h(px(19.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.))
-                    .text_size(px(11.))
-                    .text_color(theme::text_dim())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::element_hover()).text_color(theme::text()))
-                    .active(|s| s.bg(theme::element_active()))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_forwards(cx)))
-                    .child("✕"),
+                Button::new("forwards-close")
+                    .ghost()
+                    .icon(IconName::Close)
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| this.close_forwards(cx))),
             )
             .into_any_element()
     }
@@ -218,12 +164,12 @@ impl ServerSession {
 
         h_flex()
             .id(("forward-row", index))
+            .h(px(40.))
             .items_center()
             .gap(px(8.))
-            .px(px(7.))
-            .py(px(6.))
+            .px(px(8.))
             .rounded(px(3.))
-            .child(forward_kind_pill(forward.spec.kind, cx))
+            .child(forward_kind_pill(forward.spec.kind))
             .child(
                 v_flex()
                     .flex_1()
@@ -235,7 +181,8 @@ impl ServerSession {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .min_w_0()
+                                    .text_size(px(12.))
                                     .font_semibold()
                                     .text_color(cx.theme().foreground)
                                     .truncate()
@@ -244,26 +191,40 @@ impl ServerSession {
                             .when(!is_loopback_bind(&forward.spec.bind_address), |el| {
                                 el.child(
                                     div()
-                                        .text_size(px(9.))
-                                        .font_bold()
+                                        .flex_shrink_0()
+                                        .text_size(px(10.))
+                                        .font_semibold()
                                         .text_color(theme::warning())
                                         .child("PUBLIC"),
                                 )
+                            })
+                            .child(div().flex_1())
+                            .child({
+                                let label = SharedString::from(state_label(
+                                    &forward.state,
+                                    forward.spec.bind_port,
+                                ));
+                                let tooltip_text = label.clone();
+                                // A stop reason can be long; the tooltip keeps it readable.
+                                div()
+                                    .id(("forward-state", index))
+                                    .flex_shrink_0()
+                                    .max_w(px(140.))
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .text_color(state_color(&forward.state))
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(tooltip_text.clone()).build(window, cx)
+                                    })
+                                    .child(label)
                             }),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .truncate()
                             .child(SharedString::from(forward.spec.route_label())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(state_color(&forward.state))
-                            .truncate()
-                            .child(SharedString::from(state_label(&forward.state))),
                     ),
             )
             .child(
@@ -281,25 +242,26 @@ impl ServerSession {
 }
 
 /// What the forward is doing, in one short line.
-fn state_label(state: &ForwardState) -> String {
+fn state_label(state: &ForwardState, bind_port: u16) -> String {
     match state {
-        ForwardState::Bound {
-            bound_port,
-            active: 0,
-        } => format!("bound on {bound_port}"),
-        ForwardState::Bound {
-            bound_port,
-            active: 1,
-        } => {
-            format!("bound on {bound_port} · 1 connection")
+        // A remote forward on port 0 gets its port from the server, so the
+        // route line does not show it.
+        ForwardState::Bound { bound_port, active } if *bound_port != bind_port => {
+            format!("port {bound_port} \u{00b7} {}", activity_label(*active))
         }
-        ForwardState::Bound { bound_port, active } => {
-            format!("bound on {bound_port} · {active} connections")
-        }
+        ForwardState::Bound { active, .. } => activity_label(*active),
         ForwardState::Stopped { reason: None } => "stopped".to_string(),
         ForwardState::Stopped {
             reason: Some(reason),
         } => reason.clone(),
+    }
+}
+
+fn activity_label(active: u32) -> String {
+    match active {
+        0 => "listening".to_string(),
+        1 => "1 connection".to_string(),
+        n => format!("{n} connections"),
     }
 }
 
@@ -312,19 +274,16 @@ fn state_color(state: &ForwardState) -> Hsla {
 }
 
 /// Small neutral pill showing a forward's kind (Local / Remote / SOCKS5).
-fn forward_kind_pill(kind: ForwardKind, cx: &Context<ServerSession>) -> impl IntoElement {
-    let theme = cx.theme();
+fn forward_kind_pill(kind: ForwardKind) -> impl IntoElement {
     div()
         .flex_none()
         .h(px(18.))
-        .px(px(6.))
+        .px(px(4.))
         .flex()
         .items_center()
         .rounded(px(3.))
-        .bg(theme.input)
-        .border_1()
-        .border_color(theme.title_bar_border)
-        .text_size(px(9.5))
-        .text_color(theme.foreground)
+        .bg(theme::element())
+        .text_size(px(10.))
+        .text_color(theme::muted_gray())
         .child(kind.display_label())
 }

@@ -187,14 +187,6 @@ pub enum TransferKind {
 }
 
 impl TransferKind {
-    pub fn arrow(self) -> &'static str {
-        match self {
-            Self::Upload => "\u{2191}",
-            Self::Download => "\u{2193}",
-            Self::Copy => "\u{2192}",
-        }
-    }
-
     fn done_status(self) -> &'static str {
         match self {
             Self::Upload => "Upload complete",
@@ -336,6 +328,8 @@ impl RemoteSide {
             Side::Right => PaneKind::Session,
         };
         let pane = cx.new(|cx| FilePane::new(kind, "/".to_string(), cx));
+        let name = connection.display_name().to_string().into();
+        pane.update(cx, |pane, cx| pane.set_source_label(name, cx));
         let (subscription, poll_tasks) =
             listen_to_side(side, &pane, &primary, prefetch.as_ref(), cx);
 
@@ -658,7 +652,6 @@ impl SftpBrowser {
         start_dir: String,
         cx: &mut Context<Self>,
     ) {
-        let name: gpui::SharedString = connection.display_name().to_string().into();
         let remote = RemoteSide::open(
             Side::Left,
             connection.clone(),
@@ -670,7 +663,6 @@ impl SftpBrowser {
         let (verb, target) =
             transfer_wording(PaneKind::Peer, Some(self.right.connection.display_name()));
         remote.pane.update(cx, |pane, cx| {
-            pane.set_source_label(name, cx);
             pane.set_transfer_label(verb.into(), target.map(Into::into), cx);
         });
         self.set_left(
@@ -1658,9 +1650,7 @@ impl SftpBrowser {
                 // it would write outside the chosen folder.
                 if !crate::ssh::is_single_local_component(name) {
                     tracing::warn!(remote, name, "download refused: the name is a path here");
-                    return cx.emit(BrowserEvent::Error(format!(
-                        "Could not download {name}: this system cannot use that name for a file"
-                    )));
+                    return cx.emit(BrowserEvent::Error(unsafe_name_message(name)));
                 }
                 let local = PathBuf::from(target_dir).join(name);
                 tracing::info!(remote, ?local, ?side, "queuing download");
@@ -2350,7 +2340,7 @@ impl SftpBrowser {
                         }
                         browser.refresh_sync_states(cx);
                         cx.emit(BrowserEvent::StatusChanged(
-                            "Reloaded from server".to_string(),
+                            "Reloaded from host".to_string(),
                         ));
                         match crate::file_open::open_with_association_or_default(
                             &local,
@@ -2640,12 +2630,7 @@ impl SftpBrowser {
             .border_b_1()
             .border_color(theme.title_bar_border)
             .bg(theme.tab_bar)
-            .child(source_pill(
-                name.clone().into(),
-                true,
-                Some(pick_source),
-                cx,
-            ));
+            .child(source_pill(name.clone().into(), Some(pick_source), cx));
 
         let use_local = Button::new("peer-use-local")
             .ghost()
@@ -2805,7 +2790,7 @@ fn transfer_wording(kind: PaneKind, other_server: Option<&str>) -> (&'static str
 
 /// Both ends of a copy between two servers, as the tasks list names it.
 fn copy_route(from: &str, to: &str) -> String {
-    format!("{from} \u{2192} {to}")
+    format!("from {from} to {to}")
 }
 
 fn entry_facts(entry: &FileEntry) -> FileFacts {
@@ -3228,14 +3213,11 @@ mod tests {
 
     #[test]
     fn copy_route_names_the_source_first() {
-        assert_eq!(copy_route("web-02", "web-01"), "web-02 \u{2192} web-01");
+        assert_eq!(copy_route("web-02", "web-01"), "from web-02 to web-01");
     }
 
     #[test]
-    fn every_transfer_kind_has_its_own_arrow_and_status() {
-        assert_eq!(TransferKind::Upload.arrow(), "\u{2191}");
-        assert_eq!(TransferKind::Download.arrow(), "\u{2193}");
-        assert_eq!(TransferKind::Copy.arrow(), "\u{2192}");
+    fn copy_has_its_own_status() {
         assert_eq!(TransferKind::Copy.done_status(), "Copy complete");
     }
 

@@ -6,7 +6,7 @@ use gpui::{div, px, Context, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogHeader, DialogTitle},
-    h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
+    h_flex, v_flex, ActiveTheme as _, Sizable as _,
 };
 
 use crate::ui::file_pane::fmt_size;
@@ -38,17 +38,16 @@ impl UpdateView {
     fn close_button(label: &'static str, cx: &mut Context<Self>) -> Button {
         Button::new("update-close")
             .small()
+            .ghost()
             .child(label)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(UpdateViewEvent::Closed)))
     }
 
-    fn download_button(is_running: bool) -> Button {
+    fn download_button() -> Button {
         Button::new("update-download")
             .small()
             .primary()
             .child("Download")
-            .loading(is_running)
-            .disabled(is_running)
             .on_click(|_, _, cx| {
                 UpdateService::global(cx).update(cx, |service, cx| service.start_download(cx));
             })
@@ -59,18 +58,17 @@ impl UpdateView {
         match download {
             Download::Idle | Download::Failed(_) => buttons
                 .child(Self::close_button("Later", cx))
-                .child(Self::download_button(false)),
-            Download::Running { .. } => buttons
-                .child(
-                    Button::new("update-cancel")
-                        .small()
-                        .child("Cancel")
-                        .on_click(|_, _, cx| {
-                            UpdateService::global(cx)
-                                .update(cx, |service, cx| service.cancel_download(cx));
-                        }),
-                )
-                .child(Self::download_button(true)),
+                .child(Self::download_button()),
+            Download::Running { .. } => buttons.child(
+                Button::new("update-cancel")
+                    .small()
+                    .ghost()
+                    .child("Cancel")
+                    .on_click(|_, _, cx| {
+                        UpdateService::global(cx)
+                            .update(cx, |service, cx| service.cancel_download(cx));
+                    }),
+            ),
             Download::Done(_) => buttons.child(Self::close_button("Close", cx)).child(
                 Button::new("update-reveal")
                     .small()
@@ -115,7 +113,7 @@ impl Render for UpdateView {
         let body = v_flex()
             .p(px(12.))
             .gap(px(8.))
-            .child(DialogHeader::new().child(DialogTitle::new().child("flint update")));
+            .child(DialogHeader::new().child(DialogTitle::new().child("Update")));
 
         let service = UpdateService::global(cx);
         let (release, download) = {
@@ -159,8 +157,8 @@ impl Render for UpdateView {
                     .border_1()
                     .border_color(border)
                     .p(px(8.))
-                    .text_size(px(11.5))
-                    .text_color(muted_fg)
+                    .text_size(px(12.))
+                    .text_color(fg)
                     // Plain text: a string child is never read as markup.
                     .child(notes),
             )

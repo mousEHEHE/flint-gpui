@@ -1,6 +1,8 @@
 use gpui::prelude::*;
-use gpui::{div, px};
-use gpui_component::{h_flex, theme::Theme, v_flex};
+use gpui::{div, px, App};
+use gpui_component::{h_flex, theme::Theme, v_flex, ActiveTheme as _};
+
+use crate::ui::lock_screen;
 
 const GRID_COLUMNS: usize = 4;
 
@@ -60,18 +62,12 @@ pub(crate) fn phrase_panel(
     phrase: &str,
     header: &'static str,
     subtitle: &'static str,
-    theme: &Theme,
+    cx: &App,
 ) -> impl IntoElement {
     v_flex()
-        .gap(px(10.))
-        .child(div().text_lg().child(header))
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(subtitle),
-        )
-        .child(word_grid(phrase, theme))
+        .gap(px(8.))
+        .child(lock_screen::header(header, Some(subtitle), cx))
+        .child(word_grid(phrase, cx.theme()))
 }
 
 #[cfg(test)]

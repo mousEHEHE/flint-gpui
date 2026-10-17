@@ -11,7 +11,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState, Search as InputSearch},
     spinner::Spinner,
-    v_flex, ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    v_flex, ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -266,33 +266,29 @@ enum PaneDialog {
     },
 }
 
-/// Title and question of the delete dialog for these entries.
+/// Title and body text of the delete dialog for these entries.
 fn delete_prompt(entries: &[MenuEntry]) -> (String, String) {
     let folder_count = entries.iter().filter(|e| e.is_dir).count();
     if let [entry] = entries {
-        let kind = if entry.is_dir { "folder" } else { "file" };
         let inside = if entry.is_dir {
-            " and everything inside it"
+            "It and everything inside it will be deleted. "
         } else {
             ""
         };
         return (
-            format!("Delete {kind}"),
-            format!(
-                "Delete \u{201c}{}\u{201d}{inside}? This cannot be undone.",
-                entry.name
-            ),
+            format!("Delete \u{201c}{}\u{201d}?", entry.name),
+            format!("{inside}This cannot be undone."),
         );
     }
     let count = entries.len();
-    let inside = match folder_count {
-        0 => "",
-        1 => ", with everything inside the folder",
-        _ => ", with everything inside the folders",
+    let inside = if folder_count > 0 {
+        "The folders and everything inside them will be deleted. "
+    } else {
+        ""
     };
     (
-        format!("Delete {count} items"),
-        format!("Delete {count} items{inside}? This cannot be undone."),
+        format!("Delete {count} items?"),
+        format!("{inside}This cannot be undone."),
     )
 }
 
@@ -372,7 +368,7 @@ impl Render for DragPreview {
         div()
             .px_2()
             .py(px(2.))
-            .rounded_md()
+            .rounded(px(4.))
             .bg(cx.theme().list_active)
             .border_1()
             .border_color(cx.theme().border)
@@ -390,7 +386,7 @@ const ROW_HEIGHT: Pixels = px(22.);
 pub struct FilePane {
     focus_handle: FocusHandle,
     pub kind: PaneKind,
-    /// Text of the pill in the header: "LOCAL", "REMOTE" or a server's name.
+    /// Name in the header: "Local" or the host's name.
     pub source_label: SharedString,
     /// Verb of the transfer toward the other pane: "Upload", "Download" or "Copy".
     pub transfer_label: SharedString,
@@ -464,8 +460,8 @@ impl Focusable for FilePane {
 impl FilePane {
     pub fn new(kind: PaneKind, path: String, cx: &mut Context<Self>) -> Self {
         let (source_label, transfer_label) = match kind {
-            PaneKind::Local => ("LOCAL", "Upload"),
-            PaneKind::Session | PaneKind::Peer => ("REMOTE", "Download"),
+            PaneKind::Local => ("Local", "Upload"),
+            PaneKind::Session | PaneKind::Peer => ("", "Download"),
         };
         Self {
             focus_handle: cx.focus_handle(),
@@ -1619,7 +1615,7 @@ impl FilePane {
                     false,
                 ),
                 PaneDialog::NewFolder { input } => (
-                    "New Folder".to_string(),
+                    "New folder".to_string(),
                     v_flex()
                         .gap_2()
                         .child(
@@ -1718,15 +1714,21 @@ impl FilePane {
                     v_flex()
                         .occlude()
                         .w(px(300.))
-                        .px(px(12.))
-                        .py(px(10.))
+                        .p(px(12.))
                         .gap(px(8.))
-                        .bg(theme.background)
-                        .rounded_lg()
+                        .bg(crate::theme::pop_surface())
+                        .rounded(px(6.))
                         .border_1()
-                        .border_color(theme.border)
+                        .border_color(crate::theme::border_focused())
+                        .shadow_md()
                         .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                        .child(div().text_sm().text_color(theme.foreground).child(title))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_semibold()
+                                .text_color(theme.foreground)
+                                .child(title),
+                        )
                         .child(body)
                         .child(
                             h_flex()
@@ -1827,7 +1829,7 @@ impl Render for FilePane {
                 cx.emit(FilePaneEvent::SourcePickerRequested);
             })) as SourcePillClick
         });
-        let pill = source_pill(self.source_label.clone(), is_remote, pick_source, cx);
+        let pill = source_pill(self.source_label.clone(), pick_source, cx);
 
         let is_editing = self.is_editing_path;
         let path_input = self.path_input.clone();
@@ -1853,8 +1855,8 @@ impl Render for FilePane {
                 .flex_1()
                 .min_w_0()
                 .px(px(4.))
-                .rounded_sm()
-                .text_xs()
+                .rounded(px(3.))
+                .text_size(px(12.))
                 .text_color(fg)
                 .truncate()
                 .cursor_pointer()
@@ -1977,7 +1979,7 @@ impl Render for FilePane {
                     .border_b_1()
                     .border_color(border)
                     .bg(list_head)
-                    .text_size(px(9.5))
+                    .text_size(px(10.))
                     .text_color(muted_fg)
                     .child(self.sort_header("hdr-name", "NAME", SortKey::Name, None, cx))
                     .when(cols.type_col, |el| {
@@ -2028,12 +2030,14 @@ impl Render for FilePane {
                     .child(
                         div()
                             .max_w_full()
+                            .text_size(px(12.5))
                             .text_color(fg)
                             .child(error.message.clone()),
                     )
                     .child(
                         div()
                             .max_w_full()
+                            .text_xs()
                             .text_color(muted_fg)
                             .child(error.path.clone()),
                     )
@@ -2155,61 +2159,42 @@ impl Render for FilePane {
 
 pub type SourcePillClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
-/// The pill at the start of a pane header that says what the pane shows.
-/// With `on_click` it opens the source picker and shows a small arrow.
+/// The title at the start of a pane header that says what the pane shows.
+/// With `on_click` it works as a dropdown that opens the source picker.
 pub fn source_pill(
     label: SharedString,
-    is_server: bool,
     on_click: Option<SourcePillClick>,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let theme = cx.theme();
-    let text_color = if is_server {
-        theme.primary
-    } else {
-        theme.muted_foreground
-    };
-    let border_color = if is_server {
-        theme.primary
-    } else {
-        theme.title_bar_border
-    };
+    let fg = theme.foreground;
+    let muted_fg = theme.muted_foreground;
     let list_hover = theme.list_hover;
     let is_clickable = on_click.is_some();
 
     h_flex()
         .id("source-pill")
-        .h(px(18.))
-        .max_w(px(160.))
+        .h(px(22.))
+        .max_w(px(180.))
         .flex_shrink_0()
-        .gap(px(5.))
+        .gap(px(4.))
         .items_center()
         .px(px(6.))
-        .border_1()
-        .border_color(border_color)
         .rounded(px(4.))
-        .child(
-            div()
-                .size(px(4.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(text_color),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .text_size(px(9.5))
-                .text_color(text_color)
-                .truncate()
-                .child(label),
-        )
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(div().min_w_0().truncate().child(label))
         .when(is_clickable, |el| {
-            el.cursor_pointer().hover(move |s| s.bg(list_hover)).child(
-                div()
-                    .text_size(px(9.5))
-                    .text_color(text_color)
-                    .child("\u{25BE}"),
-            )
+            el.cursor_pointer()
+                .hover(move |s| s.bg(list_hover))
+                .active(|s| s.bg(crate::theme::element_active()))
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .text_color(muted_fg),
+                )
         })
         .when_some(on_click, |el, on_click| el.on_click(on_click))
 }
@@ -2235,7 +2220,6 @@ fn render_parent_row(
 ) -> gpui::AnyElement {
     let list_hover = cx.theme().list_hover;
     let muted_fg = cx.theme().muted_foreground;
-    let primary = cx.theme().primary;
 
     h_flex()
         .id("entry-parent")
@@ -2246,8 +2230,6 @@ fn render_parent_row(
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .border_l_2()
-        .border_color(gpui::transparent_black())
         .hover(move |s| s.bg(list_hover))
         .active(|s| s.bg(crate::theme::element_active()))
         .when(!is_loading, |s| {
@@ -2255,9 +2237,9 @@ fn render_parent_row(
         })
         .child(
             Icon::new(IconName::FolderOpen)
-                .size(px(13.))
+                .size(px(14.))
                 .flex_shrink_0()
-                .text_color(primary),
+                .text_color(muted_fg),
         )
         .child(
             div()
@@ -2391,7 +2373,7 @@ fn render_entry(
     };
     let icon_color = if opens_as_folder { primary } else { muted_fg };
     let size_str: SharedString = if opens_as_folder {
-        "—".into()
+        "--".into()
     } else {
         fmt_size(entry.size).into()
     };
@@ -2419,11 +2401,11 @@ fn render_entry(
 
     let sync_elem: Option<gpui::AnyElement> = sync.map(|state| {
         let (label, color) = match state {
-            SyncIndicator::Uploading => ("↑ syncing".to_string(), None),
-            SyncIndicator::Downloading => ("↓ reloading".to_string(), None),
-            SyncIndicator::Synced { at } => (format!("✓ {}", fmt_sync_time(at)), None),
-            SyncIndicator::Conflict => ("⚠ conflict".to_string(), Some(crate::theme::conflict())),
-            SyncIndicator::Error => ("⚠ error".to_string(), Some(danger)),
+            SyncIndicator::Uploading => ("syncing".to_string(), None),
+            SyncIndicator::Downloading => ("reloading".to_string(), None),
+            SyncIndicator::Synced { at } => (format!("synced {}", fmt_sync_time(at)), None),
+            SyncIndicator::Conflict => ("conflict".to_string(), Some(crate::theme::conflict())),
+            SyncIndicator::Error => ("sync failed".to_string(), Some(danger)),
         };
         div()
             .text_xs()
@@ -2443,18 +2425,12 @@ fn render_entry(
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .border_l_2()
-        .border_color(if is_selected {
-            primary
-        } else {
-            gpui::transparent_black()
-        })
         .bg(if is_selected {
             crate::theme::accent_soft()
         } else {
             gpui::transparent_black()
         })
-        .hover(move |s| s.bg(list_hover))
+        .when(!is_selected, |s| s.hover(move |s| s.bg(list_hover)))
         .active(|s| s.bg(crate::theme::element_active()))
         .on_drag(drag_value, {
             let pane = pane.clone();
@@ -2492,7 +2468,7 @@ fn render_entry(
         })
         .child(
             Icon::new(icon)
-                .size(px(13.))
+                .size(px(14.))
                 .flex_shrink_0()
                 .text_color(icon_color),
         )
@@ -2551,7 +2527,7 @@ fn render_entry(
             let perms_str: SharedString = entry
                 .permissions
                 .map(|m| unix_mode_string(m, is_dir))
-                .unwrap_or_else(|| "—".to_string())
+                .unwrap_or_else(|| "--".to_string())
                 .into();
             el.child(
                 div()
@@ -2897,31 +2873,26 @@ mod tests {
     #[test]
     fn delete_prompt_names_one_entry_and_counts_several() {
         let (title, question) = delete_prompt(&[menu_entry("a.txt", false, None)]);
-        assert_eq!(title, "Delete file");
-        assert_eq!(
-            question,
-            "Delete \u{201c}a.txt\u{201d}? This cannot be undone."
-        );
+        assert_eq!(title, "Delete \u{201c}a.txt\u{201d}?");
+        assert_eq!(question, "This cannot be undone.");
 
         let (title, question) = delete_prompt(&[menu_entry("logs", true, None)]);
-        assert_eq!(title, "Delete folder");
-        assert!(question.contains("and everything inside it"));
+        assert_eq!(title, "Delete \u{201c}logs\u{201d}?");
+        assert!(question.contains("everything inside it"));
 
         let files = [
             menu_entry("a.txt", false, None),
             menu_entry("b.txt", false, None),
         ];
         let (title, question) = delete_prompt(&files);
-        assert_eq!(title, "Delete 2 items");
-        assert_eq!(question, "Delete 2 items? This cannot be undone.");
+        assert_eq!(title, "Delete 2 items?");
+        assert_eq!(question, "This cannot be undone.");
 
         let mixed = [
             menu_entry("a.txt", false, None),
             menu_entry("logs", true, None),
         ];
-        assert!(delete_prompt(&mixed)
-            .1
-            .contains("with everything inside the folder?"));
+        assert!(delete_prompt(&mixed).1.contains("everything inside them"));
     }
 
     #[test]

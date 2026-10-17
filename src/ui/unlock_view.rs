@@ -1,8 +1,8 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, Window};
+use gpui::{px, AnyElement, App, Context, Entity, FocusHandle, Focusable, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     ActiveTheme as _, Disableable as _,
 };
 use secrecy::SecretString;
@@ -78,7 +78,7 @@ pub struct UnlockView {
     vault_state: Entity<VaultState>,
     step: Step,
     password: Entity<InputState>,
-    phrase_input: Entity<InputState>,
+    phrase_input: Entity<TextareaState>,
     new_password: Entity<InputState>,
     confirm_password: Entity<InputState>,
     delete_word: Entity<InputState>,
@@ -99,11 +99,13 @@ impl UnlockView {
     ) -> Self {
         let password = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Password")
+                .placeholder("Master password")
                 .masked(true)
         });
         let phrase_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("word1 word2 word3 … (all 24 words)")
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("Recovery phrase")
         });
         let new_password = cx.new(|cx| {
             InputState::new(window, cx)
@@ -133,14 +135,20 @@ impl UnlockView {
         )
         .detach();
 
-        cx.subscribe(&phrase_input, Self::on_recovery_input)
-            .detach();
+        cx.subscribe(&phrase_input, |this, _, event: &InputEvent, cx| {
+            this.on_recovery_event(event, cx)
+        })
+        .detach();
 
-        cx.subscribe(&new_password, Self::on_recovery_input)
-            .detach();
+        cx.subscribe(&new_password, |this, _, event: &InputEvent, cx| {
+            this.on_recovery_event(event, cx)
+        })
+        .detach();
 
-        cx.subscribe(&confirm_password, Self::on_recovery_input)
-            .detach();
+        cx.subscribe(&confirm_password, |this, _, event: &InputEvent, cx| {
+            this.on_recovery_event(event, cx)
+        })
+        .detach();
 
         cx.subscribe(&delete_word, Self::on_delete_input).detach();
 
@@ -170,9 +178,10 @@ impl UnlockView {
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::PasswordForm;
         self.error = None;
+        self.phrase_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
         for input in [
             &self.password,
-            &self.phrase_input,
             &self.new_password,
             &self.confirm_password,
             &self.delete_word,
@@ -236,12 +245,7 @@ impl UnlockView {
         .detach();
     }
 
-    fn on_recovery_input(
-        &mut self,
-        _: Entity<InputState>,
-        event: &InputEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_recovery_event(&mut self, event: &InputEvent, cx: &mut Context<Self>) {
         if !matches!(self.step, Step::RecoveryForm) {
             return;
         }
@@ -284,7 +288,8 @@ impl UnlockView {
             Ok(p) => p,
             Err(_) => {
                 self.error = Some(
-                    "Invalid recovery phrase. Check that you have exactly 24 valid BIP39 words."
+                    "This is not a valid recovery phrase. Check the spelling and order of the \
+                     words."
                         .into(),
                 );
                 cx.notify();
@@ -375,13 +380,9 @@ impl UnlockView {
 
     fn render_password_form(&self, cx: &mut Context<Self>) -> AnyElement {
         lock_screen::column()
-            .child(lock_screen::header(
-                "Unlock vault",
-                "Enter your master password to continue.",
-                cx,
-            ))
-            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
+            .child(lock_screen::header("Unlock vault", None, cx))
             .child(Input::new(&self.password).mask_toggle())
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .child(
                 Button::new("unlock-vault")
                     .primary()
@@ -413,23 +414,24 @@ impl UnlockView {
         };
         // The red error line already says it after a blocked Enter.
         let hint = problem
+            .filter(|problem| *problem == RecoveryProblem::PasswordMismatch)
             .map(RecoveryProblem::message)
             .filter(|hint| self.error.as_deref() != Some(*hint));
 
         lock_screen::column()
             .child(lock_screen::header(
                 "Recover vault",
-                "Enter your 24-word recovery phrase and choose a new password.",
+                Some("Enter your 24-word recovery phrase and choose a new password."),
                 cx,
             ))
-            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
-            .child(Input::new(&self.phrase_input))
+            .child(Textarea::new(&self.phrase_input).h(px(72.)))
             .child(lock_screen::note(
                 format!("{word_count} / {RECOVERY_WORD_COUNT} words"),
                 word_count_color,
             ))
             .child(Input::new(&self.new_password).mask_toggle())
             .child(Input::new(&self.confirm_password).mask_toggle())
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .children(hint.map(|hint| lock_screen::note(hint, theme.muted_foreground)))
             .child(
                 Button::new("recover")
@@ -475,20 +477,21 @@ impl UnlockView {
         lock_screen::column()
             .child(lock_screen::header(
                 "Delete vault",
-                "Without the password or the recovery phrase this vault cannot be opened. \
-                 Deleting it removes every host, key and snippet stored in it on this device \
-                 and closes every open session. Then you can create a new vault.",
+                Some(
+                    "Without the password or the recovery phrase this vault cannot be opened. \
+                     Deleting it removes its hosts, keys and snippets from this device and \
+                     closes open sessions.",
+                ),
                 cx,
             ))
             .child(lock_screen::note(
-                "If this vault synced, the account and its data stay on the server, but only \
-                 signing in from a new vault with the same password brings them back. The \
-                 recovery phrase works on this vault file alone and is of no use once it is \
-                 deleted.",
+                "Synced data stays in your account. To get it back, create a new vault with \
+                 the same password and sign in to sync. The recovery phrase only opens this \
+                 vault file, so it is of no use once the vault is deleted.",
                 muted,
             ))
-            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .child(Input::new(&self.delete_word))
+            .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .child(
                 Button::new("delete-vault")
                     .danger()

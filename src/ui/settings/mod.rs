@@ -34,7 +34,7 @@ impl SettingsSection {
             SettingsSection::Teams => "Teams",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Terminal => "Terminal",
-            SettingsSection::Keys => "SSH Keys",
+            SettingsSection::Keys => "SSH keys",
             SettingsSection::Snippets => "Snippets",
             SettingsSection::Network => "Proxy",
             SettingsSection::About => "About",

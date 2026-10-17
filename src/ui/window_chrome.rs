@@ -35,46 +35,38 @@ pub fn drag_region(id: impl Into<ElementId>) -> Stateful<Div> {
 #[cfg(not(target_os = "macos"))]
 pub fn window_controls(window: &Window) -> Div {
     let text_dim = crate::theme::text_dim();
+    let text = crate::theme::text();
+    let hover_bg = crate::theme::element_hover();
+    let active_bg = crate::theme::element_active();
+    let close_bg = crate::theme::red_error();
     let is_max = window.is_maximized();
 
-    let btn = move |id: &'static str,
-                    icon: IconName,
-                    area: WindowControlArea,
-                    tint: gpui::Hsla,
-                    hover_alpha: f32,
-                    border_alpha: f32| {
-        div()
+    let btn = move |id: &'static str, icon: IconName, area: WindowControlArea, is_close: bool| {
+        let button = div()
             .id(id)
             .size(px(22.))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(3.))
-            .border_1()
-            .border_color(gpui::transparent_black())
             .text_color(text_dim)
             .cursor_pointer()
             .window_control_area(area)
-            .hover(move |s| {
-                s.bg(tint.opacity(hover_alpha))
-                    .text_color(tint)
-                    .border_color(tint.opacity(border_alpha))
-            })
-            .active(move |s| {
-                s.bg(tint.opacity(0.25))
-                    .text_color(tint)
-                    .border_color(tint.opacity(0.6))
-            })
-            .child(Icon::new(icon).size(px(12.)))
+            .child(Icon::new(icon).size(px(12.)));
+        if is_close {
+            button.hover(move |s| s.bg(close_bg).text_color(gpui::white()))
+        } else {
+            button
+                .hover(move |s| s.bg(hover_bg).text_color(text))
+                .active(move |s| s.bg(active_bg))
+        }
     };
 
     let minimize = btn(
         "win-minimize",
         IconName::WindowMinimize,
         WindowControlArea::Min,
-        crate::theme::yellow(),
-        0.141,
-        0.400,
+        false,
     );
     let maximize = btn(
         "win-maximize",
@@ -84,17 +76,13 @@ pub fn window_controls(window: &Window) -> Div {
             IconName::WindowMaximize
         },
         WindowControlArea::Max,
-        crate::theme::green_vc(),
-        0.141,
-        0.400,
+        false,
     );
     let close = btn(
         "win-close",
         IconName::WindowClose,
         WindowControlArea::Close,
-        crate::theme::red_error(),
-        0.161,
-        0.451,
+        true,
     );
 
     // Linux: gpui does nothing with the control-area marking, so the
@@ -108,7 +96,7 @@ pub fn window_controls(window: &Window) -> Div {
 
     h_flex()
         .flex_none()
-        .gap(px(5.))
+        .gap(px(4.))
         .child(minimize)
         .child(maximize)
         .child(close)

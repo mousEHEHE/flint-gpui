@@ -5,8 +5,8 @@ use crate::theme as flint_theme;
 use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use gpui::prelude::*;
 use gpui::{
-    div, point, px, svg, Anchor, BoxShadow, ClipboardItem, Context, Entity, EventEmitter,
-    Focusable, MouseButton, MouseDownEvent, Window,
+    div, px, svg, Anchor, ClipboardItem, Context, Entity, EventEmitter, Focusable, MouseButton,
+    MouseDownEvent, Window,
 };
 use gpui_component::{
     h_flex,
@@ -209,18 +209,15 @@ impl ServersView {
 
         PopoverMenu::new(("server-row-more", ix), is_menu_open, trigger)
             .anchor(Anchor::TopRight)
-            .item(
-                ContextMenuItem::new(
-                    "row-menu-edit",
-                    "Edit",
-                    cx.listener(move |this, _, _, cx| {
-                        this.open_menu_for = None;
-                        cx.emit(ServersViewEvent::EditServerRequested(id));
-                        cx.notify();
-                    }),
-                )
-                .icon("icons/pen-line.svg"),
-            )
+            .item(ContextMenuItem::new(
+                "row-menu-edit",
+                "Edit",
+                cx.listener(move |this, _, _, cx| {
+                    this.open_menu_for = None;
+                    cx.emit(ServersViewEvent::EditServerRequested(id));
+                    cx.notify();
+                }),
+            ))
             .item(ContextMenuItem::new(
                 "row-menu-duplicate",
                 "Duplicate",
@@ -250,7 +247,6 @@ impl ServersView {
                         cx.notify();
                     }),
                 )
-                .icon("icons/trash.svg")
                 .danger(),
             )
             .on_dismiss(cx.listener(move |this, _, _, cx| {
@@ -266,8 +262,8 @@ impl ServersView {
         h_flex()
             .w_full()
             .h(px(22.))
+            .mt(px(6.))
             .px(px(8.))
-            .pt(px(6.))
             .gap(px(6.))
             .items_center()
             .child(
@@ -297,7 +293,6 @@ impl ServersView {
         let fg = theme.foreground;
         let text_dim = flint_theme::text_dim();
         let list_hover = theme.list_hover;
-        let accent = theme.primary;
         let status_online = flint_theme::status_online();
         let status_off = flint_theme::status_off();
 
@@ -327,6 +322,7 @@ impl ServersView {
             .rounded(px(4.))
             .cursor_pointer()
             .hover(|s| s.bg(list_hover))
+            .when(is_menu_open, |el| el.bg(list_hover))
             .active(|s| s.bg(flint_theme::element_active()))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(ServersViewEvent::OpenServer(entry.clone()));
@@ -344,8 +340,8 @@ impl ServersView {
             )
             .child(
                 div()
+                    .w(px(200.))
                     .flex_none()
-                    .max_w(px(220.))
                     .text_size(px(12.5))
                     .text_color(fg)
                     .truncate()
@@ -364,7 +360,7 @@ impl ServersView {
                 div()
                     .flex_none()
                     .text_size(px(10.5))
-                    .text_color(accent)
+                    .text_color(text_dim)
                     .child(os)
             }))
             .children(team_name.map(|team| {
@@ -498,8 +494,8 @@ impl Render for ServersView {
                 .on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(ServersViewEvent::AddServerRequested);
                 }))
-                .child(Icon::new(IconName::Plus).size(px(14.)).text_color(accent))
-                .child(div().child("Add host"))
+                .child(Icon::new(IconName::Plus).size(px(12.)).text_color(accent))
+                .child(div().child("New host"))
         };
 
         let search_focused = self
@@ -521,15 +517,6 @@ impl Render for ServersView {
                 accent
             } else {
                 border_focused
-            })
-            .when(search_focused, |el| {
-                el.shadow(vec![BoxShadow {
-                    color: accent_soft,
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(2.),
-                    inset: false,
-                }])
             })
             .child(
                 Icon::new(IconName::Search)
@@ -576,14 +563,14 @@ impl Render for ServersView {
 
         // "All" resets, one group at a time, tags stack.
         let filter_bar = (!all_groups.is_empty() || !all_tags.is_empty()).then(|| {
-            let pill = |active: bool| {
+            let chip = |active: bool| {
                 h_flex()
                     .h(px(20.))
                     .px(px(7.))
                     .gap(px(4.))
                     .items_center()
                     .flex_none()
-                    .rounded(px(4.))
+                    .rounded(px(3.))
                     .border_1()
                     .text_size(px(10.5))
                     .cursor_pointer()
@@ -608,7 +595,7 @@ impl Render for ServersView {
                 .gap(px(4.))
                 .flex_wrap()
                 .child(
-                    pill(!has_filters)
+                    chip(!has_filters)
                         .id("filter-all")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.group_filter = None;
@@ -622,7 +609,7 @@ impl Render for ServersView {
                 let active = self.group_filter.as_deref() == Some(group.as_str());
                 let value = group.clone();
                 bar = bar.child(
-                    pill(active)
+                    chip(active)
                         .id(("filter-group", ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             // Click again to clear; picking a folder is exclusive.
@@ -648,7 +635,7 @@ impl Render for ServersView {
                 let active = self.tag_filter.contains(tag);
                 let value = tag.clone();
                 bar = bar.child(
-                    pill(active)
+                    chip(active)
                         .id(("filter-tag", ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.tag_filter.remove(&value) {
@@ -668,16 +655,22 @@ impl Render for ServersView {
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .gap(px(10.))
-                .text_color(muted_fg)
-                .child(div().text_sm().child("No hosts yet"))
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(fg)
+                        .child("No hosts yet"),
+                )
                 .map(|el| match ssh_config_offer(self.ssh_config_host_count) {
-                    Some(offer) => el.child(div().text_sm().text_color(fg).child(offer)).child(
-                        h_flex()
-                            .gap(px(6.))
-                            .child(import_btn("import-hosts-empty").child("Import them"))
-                            .child(add_server_btn("add-server-empty")),
-                    ),
+                    Some(offer) => el
+                        .child(div().text_size(px(12.)).text_color(muted_fg).child(offer))
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(import_btn("import-hosts-empty").child("Import them"))
+                                .child(add_server_btn("add-server-empty")),
+                        ),
                     None => el.child(add_server_btn("add-server-empty")),
                 })
                 .child(
@@ -693,7 +686,7 @@ impl Render for ServersView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_size(px(12.))
                 .text_color(muted_fg)
                 .child(if is_search_empty {
                     "No hosts match the current filters".to_string()

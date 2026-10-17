@@ -393,7 +393,7 @@ impl VaultPane {
                     Button::new("vault-delete")
                         .small()
                         .danger()
-                        .icon(trash())
+                        .outline()
                         .child("Delete vault…")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.is_confirming_delete = true;
@@ -412,10 +412,10 @@ impl VaultPane {
                     .text_color(theme.muted_foreground)
                     .child("Enter your master password to confirm."),
             )
-            .child(Input::new(&self.delete_password).mask_toggle())
+            .child(Input::new(&self.delete_password).small().mask_toggle())
             .children(self.delete_error.clone().map(|message| {
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(11.))
                     .text_color(theme.danger)
                     .child(message)
             }))
@@ -562,7 +562,6 @@ impl Render for VaultPane {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let border = theme.title_bar_border;
         let is_working = matches!(self.status, ChangeStatus::Working);
 
         let heading = |text: &'static str| {
@@ -572,20 +571,31 @@ impl Render for VaultPane {
                 .text_color(fg)
                 .child(text)
         };
-        let caption =
-            |text: &'static str| div().text_size(px(10.5)).text_color(muted_fg).child(text);
+        let caption = |text: &'static str| {
+            div()
+                .max_w(px(520.))
+                .text_size(px(10.5))
+                .text_color(muted_fg)
+                .child(text)
+        };
+        let labeled = |label: &'static str, input: &Entity<InputState>| {
+            v_flex()
+                .gap(px(4.))
+                .child(caption(label))
+                .child(Input::new(input).small().mask_toggle())
+        };
 
         let status_line = match &self.status {
             ChangeStatus::Idle | ChangeStatus::Working => None,
             ChangeStatus::Changed => Some(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(11.))
                     .text_color(theme.success)
                     .child("Master password changed. Use it the next time you unlock."),
             ),
             ChangeStatus::Failed(message) => Some(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(11.))
                     .text_color(theme.danger)
                     .child(message.clone()),
             ),
@@ -601,9 +611,8 @@ impl Render for VaultPane {
             .gap(px(8.))
             .child(heading("Lock"))
             .child(caption(
-                "Locking wipes the vault key and the decrypted vault from memory and asks for \
-                 the master password again. Open sessions stay connected behind the lock \
-                 screen, and each keeps the credentials it connected with so it can reconnect.",
+                "Clears the vault key from memory. Open sessions stay connected behind the lock \
+                 screen.",
             ))
             .child(
                 h_flex()
@@ -619,21 +628,19 @@ impl Render for VaultPane {
                     )
                     .child(caption(LOCK_SHORTCUT)),
             )
-            .child(div().mt(px(6.)).h(px(1.)).bg(border))
-            .child(heading("Master password"))
+            .child(heading("Master password").mt(px(6.)))
             .child(caption(
-                "Your recovery phrase stays the same and keeps working. Nothing but the \
-                 password changes: hosts, keys and snippets are not re-encrypted. If this \
-                 vault syncs, the account takes the new password too, and your other devices \
-                 are asked to sign in again.",
+                "Hosts, keys and snippets are not re-encrypted, and the recovery phrase keeps \
+                 working. A synced account takes the new password; other devices must sign in \
+                 again.",
             ))
             .child(
                 v_flex()
                     .w(px(300.))
                     .gap(px(8.))
-                    .child(Input::new(&self.current_password).mask_toggle())
-                    .child(Input::new(&self.new_password).mask_toggle())
-                    .child(Input::new(&self.confirm_password).mask_toggle())
+                    .child(labeled("Current password", &self.current_password))
+                    .child(labeled("New password", &self.new_password))
+                    .child(labeled("Confirm new password", &self.confirm_password))
                     .children(status_line)
                     .child(
                         h_flex().child(
@@ -653,21 +660,19 @@ impl Render for VaultPane {
                         ),
                     ),
             )
-            .child(div().mt(px(6.)).h(px(1.)).bg(border))
-            .child(heading("Recovery phrase"))
+            .child(heading("Recovery phrase").mt(px(6.)))
             .child(caption(
-                "Lost the 24 words, or think someone else may have seen them? Make a new \
-                 phrase. It is shown once, and the old one stops working. If this vault syncs, \
-                 the account takes the new phrase too.",
+                "Makes a new 24-word phrase and shows it once. The old phrase stops working, \
+                 on the sync account too.",
             ))
             .child(
                 v_flex()
                     .w(px(300.))
                     .gap(px(8.))
-                    .child(Input::new(&self.phrase_password).mask_toggle())
+                    .child(Input::new(&self.phrase_password).small().mask_toggle())
                     .children(self.phrase_error.clone().map(|message| {
                         div()
-                            .text_size(px(11.5))
+                            .text_size(px(11.))
                             .text_color(theme.danger)
                             .child(message)
                     }))
@@ -684,13 +689,10 @@ impl Render for VaultPane {
                         ),
                     ),
             )
-            .child(div().mt(px(6.)).h(px(1.)).bg(border))
-            .child(heading("Delete vault"))
+            .child(heading("Delete vault").mt(px(6.)))
             .child(caption(
-                "Deletes every host, key and snippet stored in this vault on this device, and \
-                 closes every open session. If this vault syncs, the account and its data on \
-                 the server are not deleted: signing in from a new vault brings the records \
-                 back. Without sync, nothing can bring them back.",
+                "Deletes every host, key and snippet on this device and closes all sessions. A \
+                 synced account keeps its copy. Without sync this cannot be undone.",
             ))
             .child(self.render_delete(cx))
     }

@@ -35,14 +35,6 @@ impl ThemePreference {
             ThemePreference::System => "System",
         }
     }
-
-    pub fn caption(self) -> &'static str {
-        match self {
-            ThemePreference::Dark => "The Andromeda palette.",
-            ThemePreference::Light => "A bright palette for daylight.",
-            ThemePreference::System => "Follow the system appearance.",
-        }
-    }
 }
 
 /// The terminal font. A fixed list keeps `Preferences` a `Copy` value and

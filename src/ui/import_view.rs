@@ -11,6 +11,7 @@ use gpui::{div, px, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    dialog::{DialogHeader, DialogTitle},
     h_flex,
     input::{Input, InputState},
     v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
@@ -21,6 +22,7 @@ use crate::import::{
     parse_termius_export, scan_all, ImportSource, ImportedHost, ImportedJump, ImportedSnippet,
     JumpTarget,
 };
+use crate::theme as flint_theme;
 use crate::ui::{dialog_max_height, VaultState};
 use crate::vault::{AuthMethod, ServerEntry, ServerEntrySummary, SnippetBody, VaultManager};
 
@@ -694,32 +696,30 @@ impl Render for ImportView {
 
         let header = v_flex()
             .gap_1()
+            .child(DialogHeader::new().child(DialogTitle::new().child("Import")))
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(theme.foreground)
-                    .child("Import"),
-            )
-            .child(div().text_sm().text_color(theme.muted_foreground).child(
-                if total == 0 && self.is_scanning {
-                    "Looking for hosts in ~/.ssh/config and PuTTY sessions…".to_string()
-                } else if total == 0 {
-                    "No hosts found in ~/.ssh/config or PuTTY sessions. \
+                    .text_size(px(12.))
+                    .text_color(theme.muted_foreground)
+                    .child(if total == 0 && self.is_scanning {
+                        "Looking for hosts in ~/.ssh/config and PuTTY sessions…".to_string()
+                    } else if total == 0 {
+                        "No hosts found in ~/.ssh/config or PuTTY sessions. \
                          You can still load a termius-export JSON file."
-                        .to_string()
-                } else if snippet_count == 0 {
-                    format!(
-                        "Found {}. Hosts already in the vault are unchecked.",
-                        plural(host_count, "host")
-                    )
-                } else {
-                    format!(
-                        "Found {} and {}. The ones already in the vault are unchecked.",
-                        plural(host_count, "host"),
-                        plural(snippet_count, "snippet")
-                    )
-                },
-            ));
+                            .to_string()
+                    } else if snippet_count == 0 {
+                        format!(
+                            "Found {}. Hosts already in the vault are unchecked.",
+                            plural(host_count, "host")
+                        )
+                    } else {
+                        format!(
+                            "Found {} and {}. The ones already in the vault are unchecked.",
+                            plural(host_count, "host"),
+                            plural(snippet_count, "snippet")
+                        )
+                    }),
+            );
 
         let mut card = v_flex()
             .max_h(dialog_max_height(window))
@@ -730,17 +730,22 @@ impl Render for ImportView {
         if let Some(error) = &self.file_error {
             card = card.child(
                 div()
-                    .text_sm()
+                    .text_size(px(12.))
                     .text_color(theme.danger)
                     .child(error.clone()),
             );
         }
 
         if let Some(summary) = skipped_summary(&self.file_skipped) {
-            card = card.child(div().text_sm().text_color(theme.warning).child(summary));
+            card = card.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.warning)
+                    .child(summary),
+            );
         }
 
-        let mut toolbar = h_flex().px_1().items_center().justify_between();
+        let mut toolbar = h_flex().px(px(6.)).items_center().justify_between();
         toolbar = if total > 0 {
             toolbar.child(
                 Checkbox::new("import-all")
@@ -766,7 +771,13 @@ impl Render for ImportView {
         card = card.child(toolbar);
 
         if total > 0 {
-            let rows = self.candidates.iter().enumerate().map(|(ix, c)| {
+            let mut list_items: Vec<gpui::AnyElement> = Vec::new();
+            let mut previous_source = None;
+            for (ix, c) in self.candidates.iter().enumerate() {
+                if previous_source != Some(c.host.source) {
+                    list_items.push(section_head(c.host.source.display_label()));
+                    previous_source = Some(c.host.source);
+                }
                 let addr = format!(
                     "{}{}:{}",
                     c.host
@@ -804,7 +815,7 @@ impl Render for ImportView {
                     .items_center()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted))
+                    .hover(|s| s.bg(theme.list_hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
                     .child(Checkbox::new(("import-check", ix)).checked(c.is_selected))
                     .child(
@@ -820,7 +831,7 @@ impl Render for ImportView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(10.5))
+                            .text_size(px(11.))
                             .text_color(theme.muted_foreground)
                             .truncate()
                             .child(addr),
@@ -829,14 +840,13 @@ impl Render for ImportView {
                         el.child(badge(
                             &c.host.group_path.join(" / "),
                             theme.muted_foreground,
-                            cx,
                         ))
                     })
                     .children(
                         c.host
                             .tags
                             .iter()
-                            .map(|t| badge(&format!("#{t}"), theme.muted_foreground, cx)),
+                            .map(|t| badge(&format!("#{t}"), theme.muted_foreground)),
                     )
                     .when(
                         c.key_pem.is_some() || c.host.identity_file.is_some(),
@@ -848,30 +858,19 @@ impl Render for ImportView {
                             } else {
                                 "key".to_string()
                             };
-                            el.child(badge(&text, theme.muted_foreground, cx))
+                            el.child(badge(&text, theme.muted_foreground))
                         },
                     )
                     .when(c.key_pem.is_none() && falls_back_to_agent(&c.host), |el| {
-                        el.child(badge("agent", theme.muted_foreground, cx))
+                        el.child(badge("agent", theme.muted_foreground))
                     })
                     .when_some(c.host.startup_snippet.as_deref(), |el, name| {
-                        el.child(badge(
-                            &format!("startup: {name}"),
-                            theme.muted_foreground,
-                            cx,
-                        ))
+                        el.child(badge(&format!("startup: {name}"), theme.muted_foreground))
                     })
                     .when_some(jump_badge, |el, (text, color)| {
-                        el.child(badge(&text, color, cx))
+                        el.child(badge(&text, color))
                     })
-                    .when(c.is_in_vault, |el| {
-                        el.child(badge("exists", theme.warning, cx))
-                    })
-                    .child(badge(
-                        c.host.source.display_label(),
-                        theme.muted_foreground,
-                        cx,
-                    ));
+                    .when(c.is_in_vault, |el| el.child(exists_marker(cx)));
 
                 // The only place this dialog asks for a passphrase: under
                 // the row of an encrypted key whose passphrase is not known.
@@ -881,27 +880,35 @@ impl Render for ImportView {
                         .filter(|_| c.is_selected)
                         .map(|input| {
                             h_flex()
-                                .pl(px(34.))
+                                .pl(px(30.))
                                 .pr_2()
                                 .pb_1()
                                 .gap_2()
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(px(11.))
                                         .text_color(theme.muted_foreground)
-                                        .child("encrypted key:"),
+                                        .child("Passphrase"),
                                 )
                                 .child(div().flex_1().child(Input::new(input).small()))
                         });
 
-                v_flex().child(row).children(passphrase_row)
-            });
+                list_items.push(
+                    v_flex()
+                        .child(row)
+                        .children(passphrase_row)
+                        .into_any_element(),
+                );
+            }
 
-            let snippet_rows = self.snippets.iter().enumerate().map(|(ix, c)| {
+            if snippet_count > 0 {
+                list_items.push(section_head("Snippets"));
+            }
+            for (ix, c) in self.snippets.iter().enumerate() {
                 let preview = c.snippet.script.lines().next().unwrap_or_default().trim();
 
-                h_flex()
+                let row = h_flex()
                     .id(("import-snippet-row", ix))
                     .w_full()
                     .h(px(24.))
@@ -910,7 +917,7 @@ impl Render for ImportView {
                     .items_center()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted))
+                    .hover(|s| s.bg(theme.list_hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_snippet(ix, cx)))
                     .child(Checkbox::new(("import-snippet-check", ix)).checked(c.is_selected))
                     .child(
@@ -926,16 +933,14 @@ impl Render for ImportView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(10.5))
+                            .text_size(px(11.))
                             .text_color(theme.muted_foreground)
                             .truncate()
                             .child(preview.to_string()),
                     )
-                    .when(c.is_in_vault, |el| {
-                        el.child(badge("exists", theme.warning, cx))
-                    })
-                    .child(badge("snippet", theme.muted_foreground, cx))
-            });
+                    .when(c.is_in_vault, |el| el.child(exists_marker(cx)));
+                list_items.push(row.into_any_element());
+            }
 
             card = card.child(
                 v_flex()
@@ -946,8 +951,7 @@ impl Render for ImportView {
                     .max_h((dialog_max_height(window) - px(140.)).max(px(120.)))
                     .overflow_y_scroll()
                     .gap_0p5()
-                    .children(rows)
-                    .children(snippet_rows),
+                    .children(list_items),
             );
         }
 
@@ -975,18 +979,43 @@ impl Render for ImportView {
     }
 }
 
-/// Small dim chip ("key", "exists", "#tag", group path, source name).
-fn badge(text: &str, color: gpui::Hsla, cx: &Context<ImportView>) -> gpui::AnyElement {
-    let theme = cx.theme();
+/// Small row metadata ("key", "#tag", group path) as plain coloured text.
+fn badge(text: &str, color: gpui::Hsla) -> gpui::AnyElement {
     div()
         .flex_none()
-        .px(px(6.))
-        .py(px(1.))
-        .rounded(px(3.))
-        .bg(theme.muted)
-        .text_size(px(10.))
+        .text_size(px(10.5))
         .text_color(color)
         .child(text.to_string())
+        .into_any_element()
+}
+
+/// Outlined so a row that is already in the vault stands out from its metadata.
+fn exists_marker(cx: &Context<ImportView>) -> gpui::AnyElement {
+    let warning = cx.theme().warning;
+    div()
+        .flex_none()
+        .h(px(16.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .rounded(px(3.))
+        .border_1()
+        .border_color(warning)
+        .text_size(px(10.5))
+        .text_color(warning)
+        .child("exists")
+        .into_any_element()
+}
+
+fn section_head(label: &str) -> gpui::AnyElement {
+    div()
+        .h(px(22.))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .text_size(px(10.))
+        .text_color(flint_theme::text_dim())
+        .child(label.to_uppercase())
         .into_any_element()
 }
 

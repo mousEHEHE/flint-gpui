@@ -52,6 +52,18 @@ pub mod window_chrome;
 pub fn dialog_chrome(dialog: gpui_component::dialog::Dialog) -> gpui_component::dialog::Dialog {
     use gpui::prelude::*;
 
+    dialog
+        .bg(crate::theme::pop_surface())
+        .border_color(crate::theme::border_focused())
+        .shadow(modal_shadow())
+}
+
+pub const DIALOG_NARROW: gpui::Pixels = gpui::px(400.);
+pub const DIALOG_WIDE: gpui::Pixels = gpui::px(480.);
+
+/// The four-layer shadow Zed gives its modals, shared by dialogs, the palette
+/// and the settings card so they all sit at the same height.
+pub fn modal_shadow() -> Vec<gpui::BoxShadow> {
     let is_light = crate::theme::is_light();
     let layer = |y: f32, blur: f32, alpha: f32| gpui::BoxShadow {
         color: gpui::hsla(0., 0., 0., alpha),
@@ -60,17 +72,13 @@ pub fn dialog_chrome(dialog: gpui_component::dialog::Dialog) -> gpui_component::
         spread_radius: gpui::px(0.),
         inset: false,
     };
-
-    dialog
-        .bg(crate::theme::pop_surface())
-        .border_color(crate::theme::border_focused())
-        .shadow(vec![
-            layer(2., 3., if is_light { 0.06 } else { 0.12 }),
-            layer(3., 6., if is_light { 0.06 } else { 0.08 }),
-            layer(6., 12., 0.04),
-            // Contact shadow: unblurred, it draws the panel's own edge.
-            layer(1., 0., if is_light { 0.04 } else { 0.12 }),
-        ])
+    vec![
+        layer(2., 3., if is_light { 0.06 } else { 0.12 }),
+        layer(3., 6., if is_light { 0.06 } else { 0.08 }),
+        layer(6., 12., 0.04),
+        // Contact shadow: unblurred, it draws the panel's own edge.
+        layer(1., 0., if is_light { 0.04 } else { 0.12 }),
+    ]
 }
 
 /// How tall a dialog's content may grow before it has to scroll.

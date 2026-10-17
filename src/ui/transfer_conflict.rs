@@ -140,10 +140,7 @@ fn explanation(conflict: &TransferConflict) -> Option<&'static str> {
 }
 
 fn place_line(conflict: &TransferConflict) -> String {
-    format!(
-        "{} already has an item with this name on {}.",
-        conflict.target_dir, conflict.target_label
-    )
+    format!("In {} on {}.", conflict.target_dir, conflict.target_label)
 }
 
 fn resolve(browser: &WeakEntity<SftpBrowser>, id: u64, choice: ConflictChoice, cx: &mut App) {
@@ -354,10 +351,7 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_place_the_transfer_lands_in() {
-        assert_eq!(
-            place_line(&conflict(false, false)),
-            "/srv already has an item with this name on web-01."
-        );
+        assert_eq!(place_line(&conflict(false, false)), "In /srv on web-01.");
     }
 
     #[test]

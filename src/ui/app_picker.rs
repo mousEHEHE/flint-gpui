@@ -150,14 +150,14 @@ impl Render for AppPicker {
         // the bare name (Dockerfile, Makefile) since `extension` would just be
         // the lowercased file name.
         let title = match self.file_to_open.extension().and_then(|s| s.to_str()) {
-            Some(ext) if !ext.is_empty() => format!("Open .{ext} With\u{2026}"),
+            Some(ext) if !ext.is_empty() => format!("Open .{ext} files with"),
             _ => {
                 let name = self
                     .file_to_open
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("file");
-                format!("Open {name} With\u{2026}")
+                format!("Open {name} with")
             }
         };
 
@@ -165,10 +165,8 @@ impl Render for AppPicker {
         let radius = cx.theme().radius;
 
         v_flex()
-            .px_2()
-            .pt_1()
-            .pb_0()
-            .gap_2()
+            .p(px(12.))
+            .gap(px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child(title)))
             .child(Input::new(&filter_input).small())
             .child(if filtered.is_empty() {
@@ -218,7 +216,6 @@ impl Render for AppPicker {
                             )
                             .child(
                                 Button::new("picker-choose-another")
-                                    .ghost()
                                     .child("Choose another\u{2026}")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.choose_another(cx)),
