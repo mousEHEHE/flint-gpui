@@ -13,6 +13,8 @@ use uuid::Uuid;
 use crate::preferences::{Preferences, ThemePreference};
 use crate::ssh_target::{find_saved_host, find_saved_host_by_name, parse_ssh_target, SshTarget};
 use crate::theme as flint_theme;
+use crate::ui::file_pane::{self, PaneKind};
+use crate::ui::host_icon::host_icon;
 use crate::ui::terminal_tabs::{NEW_TERMINAL_SHORTCUT, TOGGLE_FILES_SHORTCUT};
 use crate::ui::VaultState;
 use crate::vault::{ServerEntrySummary, Snippet};
@@ -232,6 +234,8 @@ struct HostRow {
     id: Uuid,
     label: String,
     sub: String,
+    /// What the connection probe found, for the system's mark.
+    os: Option<String>,
     is_connected: bool,
 }
 
@@ -372,12 +376,18 @@ impl CommandPalette {
                 } else {
                     e.label
                 };
-                let sub = format!("{}@{}:{}", e.username, e.host, e.port);
+                // Port 22 is implied, as in the host list.
+                let sub = if e.port == 22 {
+                    format!("{}@{}", e.username, e.host)
+                } else {
+                    format!("{}@{}:{}", e.username, e.host, e.port)
+                };
                 let is_connected = self.connected_server_ids.contains(&e.id.to_string());
                 HostRow {
                     id: e.id,
                     label,
                     sub,
+                    os: e.os.filter(|os| !os.trim().is_empty()),
                     is_connected,
                 }
             })
@@ -450,28 +460,28 @@ impl CommandPalette {
                     row => (row, None),
                 };
                 if let Some(row) = connect_first {
-                    sections.push((SharedString::from("CONNECT"), items.len()));
+                    sections.push((SharedString::from("Connect"), items.len()));
                     items.push(PaletteItem::Connect(row));
                 }
                 if !recent.is_empty() {
-                    sections.push((SharedString::from("RECENT"), items.len()));
+                    sections.push((SharedString::from("Recent"), items.len()));
                     items.extend(recent.into_iter().map(snippet_to_item));
                 }
                 if !hosts.is_empty() {
-                    sections.push((SharedString::from("HOSTS"), items.len()));
+                    sections.push((SharedString::from("Hosts"), items.len()));
                     items.extend(hosts.into_iter().map(PaletteItem::Host));
                 }
                 if !others.is_empty() {
-                    sections.push((SharedString::from("SNIPPETS"), items.len()));
+                    sections.push((SharedString::from("Snippets"), items.len()));
                     items.extend(others.into_iter().map(snippet_to_item));
                 }
                 let commands = matching_commands(&self.query(cx), self.active_server_id.is_some());
                 if !commands.is_empty() {
-                    sections.push((SharedString::from("COMMANDS"), items.len()));
+                    sections.push((SharedString::from("Commands"), items.len()));
                     items.extend(commands.into_iter().map(PaletteItem::Command));
                 }
                 if let Some(row) = connect_last {
-                    sections.push((SharedString::from("CONNECT"), items.len()));
+                    sections.push((SharedString::from("Connect"), items.len()));
                     items.push(PaletteItem::Connect(row));
                 }
                 (items, sections)
@@ -481,7 +491,7 @@ impl CommandPalette {
                 let sections = if hosts.is_empty() {
                     vec![]
                 } else {
-                    vec![(SharedString::from("HOSTS"), 0)]
+                    vec![(SharedString::from("Hosts"), 0)]
                 };
                 let items = hosts.into_iter().map(PaletteItem::Host).collect();
                 (items, sections)
@@ -492,7 +502,7 @@ impl CommandPalette {
                 let sections = if items.is_empty() {
                     vec![]
                 } else {
-                    vec![(SharedString::from("LEFT PANE"), 0)]
+                    vec![(SharedString::from("Left pane"), 0)]
                 };
                 (items, sections)
             }
@@ -614,13 +624,10 @@ impl Render for CommandPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let bg_float = flint_theme::pop_surface();
-        let bg_element_hover = theme.list_hover;
-        let border = theme.title_bar_border;
-        let border_focused = flint_theme::border_focused();
+        let border = flint_theme::border();
+        let border_focused = flint_theme::float_border();
         let text = theme.foreground;
         let text_muted = theme.muted_foreground;
-        let accent = theme.primary;
-        let green = flint_theme::status_online();
         let scrim_bg = theme.overlay;
 
         let (items, sections) = self.items(cx);
@@ -642,11 +649,11 @@ impl Render for CommandPalette {
             h_flex()
                 .items_center()
                 .gap(px(6.))
-                .h(px(24.))
-                .px(px(12.))
+                .h(px(32.))
+                .px(px(14.))
                 .border_b_1()
                 .border_color(border)
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .text_color(text_muted)
                 .child(div().child(text))
                 .child(div().flex_1())
@@ -663,11 +670,13 @@ impl Render for CommandPalette {
                 let label = sections[next_section].0.clone();
                 body_rows.push(
                     div()
-                        .h(px(24.))
+                        .h(px(28.))
                         .flex()
-                        .items_center()
+                        .items_end()
+                        .pb(px(5.))
                         .px(px(8.))
-                        .text_size(px(10.))
+                        .text_size(px(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(flint_theme::text_dim())
                         .child(label)
                         .into_any_element(),
@@ -675,28 +684,18 @@ impl Render for CommandPalette {
                 next_section += 1;
             }
             let is_selected = ix == selected;
-            body_rows.push(render_palette_row(
-                ix,
-                item,
-                is_selected,
-                cx,
-                text,
-                text_muted,
-                bg_element_hover,
-                accent,
-                green,
-            ));
+            body_rows.push(render_palette_row(ix, item, is_selected, cx));
         }
 
         let empty = body_rows.is_empty();
         let body: AnyElement = if empty {
             let q = self.search.read(cx).value().to_string();
             div()
-                .h(px(32.))
+                .h(px(44.))
                 .flex()
                 .items_center()
-                .px(px(12.))
-                .text_size(px(12.))
+                .px(px(16.))
+                .text_size(px(13.))
                 .text_color(flint_theme::text_dim())
                 .child(if q.is_empty() {
                     "No saved hosts".to_string()
@@ -709,10 +708,9 @@ impl Render for CommandPalette {
                 .id("palette-list")
                 .track_scroll(&self.scroll_handle)
                 .overflow_y_scroll()
-                .max_h(px(320.))
-                .pt(px(2.))
-                .pb(px(8.))
-                .px(px(4.))
+                .max_h(px(380.))
+                .pb(px(6.))
+                .px(px(6.))
                 .children(body_rows)
                 .into_any_element()
         };
@@ -740,27 +738,27 @@ impl Render for CommandPalette {
             )
             .child(
                 v_flex()
-                    .w(px(560.))
-                    .max_w(px(560.))
+                    .w(px(600.))
+                    .max_w(px(600.))
                     .bg(bg_float)
                     .border_1()
                     .border_color(border_focused)
-                    .rounded(px(6.))
-                    .shadow_lg()
+                    .rounded(px(12.))
+                    .shadow(crate::ui::modal_shadow())
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .children(banner)
                     .child(
                         h_flex()
                             .items_center()
-                            .h(px(32.))
-                            .gap(px(8.))
-                            .px(px(12.))
+                            .h(px(48.))
+                            .gap(px(10.))
+                            .px(px(16.))
                             .border_b_1()
                             .border_color(border)
                             .child(
                                 Icon::new(IconName::Search)
-                                    .size(px(12.))
+                                    .size(px(16.))
                                     .text_color(text_muted),
                             )
                             .child(
@@ -947,29 +945,27 @@ fn snippet_rank(s: &Snippet, active: Option<Uuid>) -> (u8, i64) {
     (2, -s.updated_at)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Every row's leading slot is this wide, so host tiles and bare icons line
+/// up in one column.
+const LEAD_SIZE: f32 = 24.;
+
 fn render_palette_row(
     ix: usize,
     item: PaletteItem,
     is_selected: bool,
     cx: &mut Context<CommandPalette>,
-    text: gpui::Hsla,
-    text_muted: gpui::Hsla,
-    bg_element_hover: gpui::Hsla,
-    accent: gpui::Hsla,
-    green: gpui::Hsla,
 ) -> AnyElement {
     let row = h_flex()
         .id(("palette-row", ix))
-        .h(px(24.))
+        .h(px(36.))
         .items_center()
-        .gap(px(8.))
+        .gap(px(10.))
         .px(px(8.))
-        .rounded(px(4.))
+        .rounded(px(7.))
         .cursor_pointer()
-        .when(is_selected, |el| el.bg(crate::theme::accent_soft()))
-        .when(!is_selected, |el| el.hover(|s| s.bg(bg_element_hover)))
-        .active(|s| s.bg(crate::theme::element_active()))
+        .when(is_selected, |el| el.bg(flint_theme::accent_soft()))
+        .when(!is_selected, |el| el.hover(|s| s.bg(flint_theme::field())))
+        .active(|s| s.bg(flint_theme::element_active()))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, _, cx| {
@@ -979,146 +975,49 @@ fn render_palette_row(
         )
         .on_click(cx.listener(move |this, _, window, cx| this.activate_index(ix, window, cx)));
 
-    match item {
-        PaletteItem::Connect(connect) => {
-            let label: SharedString = format!("Connect to {}", connect.target.address()).into();
-            let note: SharedString = connect_row_note(&connect).into();
-            row.child(
-                Icon::new(IconName::ArrowRight)
-                    .size(px(12.))
-                    .text_color(accent),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(text)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(text_muted)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(note),
-                    ),
-            )
-            .into_any_element()
-        }
-        PaletteItem::Host(h) => {
-            let label: SharedString = h.label.into();
-            let sub: SharedString = h.sub.into();
-            let icon_color = if h.is_connected {
-                green
-            } else {
-                crate::theme::text_dim()
-            };
-            row.child(
-                Icon::empty()
-                    .path("icons/server.svg")
-                    .size(px(12.))
-                    .text_color(icon_color),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(text)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(text_muted)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(sub),
-                    ),
-            )
-            .into_any_element()
-        }
-        PaletteItem::Snippet(s) => {
-            let name: SharedString = s.name.into();
-            let desc: SharedString = s.description.unwrap_or_default().into();
-            row.child(
-                Icon::new(IconName::SquareTerminal)
-                    .size(px(12.))
-                    .text_color(crate::theme::cyan()),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(text)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(name),
-                    )
-                    .when(!desc.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(text_muted)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .truncate()
-                                .child(desc),
-                        )
-                    }),
-            )
-            .into_any_element()
-        }
-        PaletteItem::ThisComputer => row
-            .child(
-                Icon::new(IconName::FolderOpen)
-                    .size(px(12.))
-                    .text_color(crate::theme::text_dim()),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(text)
-                            .child(THIS_COMPUTER_LABEL),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(text_muted)
-                            .child("local files"),
-                    ),
-            )
-            .into_any_element(),
+    let (lead, title, note, is_note_mono, shortcut): (
+        AnyElement,
+        SharedString,
+        SharedString,
+        bool,
+        Option<&'static str>,
+    ) = match item {
+        PaletteItem::Connect(connect) => (
+            lead_icon(Icon::new(IconName::ArrowRight), flint_theme::accent()),
+            format!("Connect to {}", connect.target.address()).into(),
+            connect_row_note(&connect).into(),
+            false,
+            None,
+        ),
+        PaletteItem::Host(h) => (
+            host_icon(
+                h.os.as_deref(),
+                h.is_connected,
+                flint_theme::pop_surface(),
+                LEAD_SIZE,
+            ),
+            h.label.into(),
+            h.sub.into(),
+            true,
+            None,
+        ),
+        PaletteItem::Snippet(s) => (
+            lead_icon(Icon::new(IconName::SquareTerminal), flint_theme::cyan()),
+            s.name.into(),
+            s.description.unwrap_or_default().into(),
+            false,
+            None,
+        ),
+        PaletteItem::ThisComputer => (
+            lead_icon(
+                Icon::empty().path(file_pane::source_icon(PaneKind::Local)),
+                flint_theme::text_dim(),
+            ),
+            THIS_COMPUTER_LABEL.into(),
+            "local files".into(),
+            false,
+            None,
+        ),
         PaletteItem::Command(spec) => {
             let is_current_theme =
                 spec.command == PaletteCommand::SetTheme(cx.global::<Preferences>().theme);
@@ -1127,50 +1026,77 @@ fn render_palette_row(
             } else {
                 spec.note
             };
-            row.child(
-                command_icon(spec.command)
-                    .size(px(12.))
-                    .text_color(crate::theme::text_dim()),
+            (
+                lead_icon(command_icon(spec.command), flint_theme::text_dim()),
+                spec.label.into(),
+                note.into(),
+                false,
+                spec.shortcut,
             )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(text)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .child(spec.label),
-                    )
-                    .when(!note.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(text_muted)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .truncate()
-                                .child(note),
-                        )
-                    }),
-            )
-            .when_some(spec.shortcut, |el, shortcut| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.5))
-                        .text_color(text_muted)
-                        .child(shortcut),
-                )
-            })
-            .into_any_element()
         }
-    }
+    };
+
+    row.child(lead)
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_baseline()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(320.))
+                        .text_size(px(13.))
+                        .text_color(cx.theme().foreground)
+                        .truncate()
+                        .child(title),
+                )
+                .when(!note.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(flint_theme::text_dim())
+                            .when(is_note_mono, |el| el.font_family(flint_theme::MONO_FONT))
+                            .truncate()
+                            .child(note),
+                    )
+                }),
+        )
+        .when_some(shortcut, |el, shortcut| el.child(key_cap(shortcut)))
+        // What Enter does is shown on the row it would act on.
+        .when(is_selected && shortcut.is_none(), |el| {
+            el.child(key_cap("\u{21B5}"))
+        })
+        .into_any_element()
+}
+
+/// A bare icon centred in the leading slot.
+fn lead_icon(icon: Icon, color: gpui::Hsla) -> AnyElement {
+    div()
+        .flex_none()
+        .size(px(LEAD_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon.size(px(15.)).text_color(color))
+        .into_any_element()
+}
+
+/// A key or a chord, drawn as a small key cap.
+fn key_cap(keys: &'static str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .h(px(20.))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .bg(flint_theme::field())
+        .text_size(px(11.))
+        .text_color(flint_theme::text_dim())
+        .child(keys)
 }
 
 #[cfg(test)]
@@ -1296,6 +1222,7 @@ mod tests {
             id: Uuid::new_v4(),
             label: label.to_string(),
             sub: String::new(),
+            os: None,
             is_connected: false,
         }
     }

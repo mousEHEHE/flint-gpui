@@ -22,6 +22,7 @@ use crate::ui::terminal_element::{
 };
 use crate::ui::terminal_keymap;
 use crate::ui::terminal_link::{self, TerminalLink};
+use crate::ui::terminal_palette::TerminalColors;
 use crate::ui::terminal_search::{self, SearchState};
 use crate::ui::terminal_suggestions::{NavAction, SuggestionState};
 
@@ -46,6 +47,10 @@ actions!(
 
 /// How long the "Copied" note stays up after a copy.
 const COPIED_HINT_DURATION: Duration = Duration::from_millis(1500);
+
+/// Space between the side edges of the terminal and its text. The scrollbar
+/// sits inside it, so overlays and the scrollbar's grab band account for it.
+pub(crate) const SIDE_PADDING: f32 = 12.;
 
 pub fn init(cx: &mut App) {
     terminal_search::init(cx);
@@ -379,7 +384,7 @@ impl TerminalView {
                 .absolute()
                 .bottom(px(8.))
                 // Clear of the scrollbar, like the search bar.
-                .right(px(20.))
+                .right(px(20. + SIDE_PADDING))
                 .px(px(8.))
                 .py(px(3.))
                 .bg(flint_theme::pop_surface())
@@ -1316,12 +1321,17 @@ impl Render for TerminalView {
         });
 
         let search_bar = self.render_search_bar(window, cx);
+        // The side margins take the terminal's own background, so a color
+        // scheme other than the app's still reaches the edges.
+        let background = TerminalColors::current(cx).bg;
 
         div()
             .id("terminal-view")
             .track_focus(&self.focus_handle)
             .key_context("Terminal")
             .size_full()
+            .px(px(SIDE_PADDING))
+            .bg(background)
             // Anchor for the search bar, which pins itself to the top-right.
             .relative()
             .on_action(cx.listener(Self::on_tab))

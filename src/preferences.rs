@@ -153,6 +153,17 @@ pub enum UpdateChecks {
     Manual,
 }
 
+/// Where a session puts the terminal relative to its file panes.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalPosition {
+    /// Files on top, terminal under them.
+    #[default]
+    Below,
+    /// Terminal on the left, files on the right.
+    Beside,
+}
+
 /// Every field carries a serde default so a file written by an older build
 /// still loads.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -181,6 +192,14 @@ pub struct Preferences {
     /// file, see `update_checks_in`.
     #[serde(default)]
     pub update_checks: Option<UpdateChecks>,
+    /// Shared by every session, so the layout picked once stays.
+    #[serde(default)]
+    pub terminal_position: TerminalPosition,
+    /// Whether a session shows the second file pane (this computer or
+    /// another server) next to the session's own files. Off by default: most
+    /// uploads come from Finder or Explorer.
+    #[serde(default)]
+    pub is_second_pane_shown: bool,
 }
 
 /// The update answer the raw file holds. Read on its own so that a file that
@@ -224,6 +243,8 @@ impl Default for Preferences {
             terminal_font: TerminalFont::default(),
             terminal_scheme: TerminalScheme::default(),
             update_checks: None,
+            terminal_position: TerminalPosition::default(),
+            is_second_pane_shown: false,
         }
     }
 }
@@ -269,6 +290,17 @@ impl Preferences {
         cx.try_global::<Self>()
             .map(|prefs| prefs.terminal_scheme)
             .unwrap_or_default()
+    }
+
+    pub fn terminal_position(cx: &gpui::App) -> TerminalPosition {
+        cx.try_global::<Self>()
+            .map(|prefs| prefs.terminal_position)
+            .unwrap_or_default()
+    }
+
+    pub fn is_second_pane_shown(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.is_second_pane_shown)
     }
 
     /// Change the preferences and write them to disk. The change has already
@@ -526,6 +558,24 @@ mod tests {
         let json = serde_json::to_string(&on).unwrap();
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert!(back.is_option_meta);
+    }
+
+    #[test]
+    fn session_layout_defaults_when_missing_and_round_trips() {
+        let old: Preferences = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(old.terminal_position, TerminalPosition::Below);
+        assert!(!old.is_second_pane_shown);
+
+        let changed = Preferences {
+            terminal_position: TerminalPosition::Beside,
+            is_second_pane_shown: true,
+            ..Preferences::default()
+        };
+        let json = serde_json::to_string(&changed).unwrap();
+        assert!(json.contains(r#""terminal_position":"beside""#), "{json}");
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.terminal_position, TerminalPosition::Beside);
+        assert!(back.is_second_pane_shown);
     }
 
     #[test]

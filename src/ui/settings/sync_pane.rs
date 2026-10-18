@@ -250,7 +250,7 @@ impl SyncPane {
         let (fg, muted_fg, danger) = (theme.foreground, theme.muted_foreground, theme.danger);
         let mut section = v_flex().gap(px(6.)).mt(px(6.)).child(
             div()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child("Devices"),
@@ -260,13 +260,13 @@ impl SyncPane {
             let Some(error) = self.device_error.clone() else {
                 return section.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(11.5))
                         .text_color(muted_fg)
                         .child("Loading…"),
                 );
             };
             return section
-                .child(div().text_size(px(11.)).text_color(danger).child(error))
+                .child(div().text_size(px(12.)).text_color(danger).child(error))
                 .child(
                     h_flex().child(
                         Button::new("devices-retry")
@@ -291,14 +291,14 @@ impl SyncPane {
                 )
                 .child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(px(12.5))
                         .text_color(fg)
                         .child(format!("{} · {}", device.device_name, device.platform)),
                 )
                 .when(!device.is_current, |row| {
                     row.child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(11.5))
                             .text_color(muted_fg)
                             .child(format!("last seen {day}")),
                     )
@@ -307,7 +307,7 @@ impl SyncPane {
             row = if device.is_current {
                 row.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(px(11.5))
                         .text_color(muted_fg)
                         .child("this device"),
                 )
@@ -329,7 +329,7 @@ impl SyncPane {
         section.children(
             self.device_error
                 .clone()
-                .map(|e| div().text_size(px(11.)).text_color(danger).child(e)),
+                .map(|e| div().text_size(px(12.)).text_color(danger).child(e)),
         )
     }
 
@@ -358,7 +358,7 @@ impl SyncPane {
         }
         section
             .w(px(340.))
-            .child(div().text_size(px(10.5)).text_color(muted_fg).child(
+            .child(div().text_size(px(11.5)).text_color(muted_fg).child(
                 "This removes the account and everything stored for it on the server, and signs \
                  out every device. The records in this vault stay. Enter your master password \
                  to confirm.",
@@ -367,7 +367,7 @@ impl SyncPane {
             .children(
                 self.delete_error
                     .clone()
-                    .map(|e| div().text_size(px(11.)).text_color(danger).child(e)),
+                    .map(|e| div().text_size(px(12.)).text_color(danger).child(e)),
             )
             .child(
                 h_flex()
@@ -410,13 +410,13 @@ impl Render for SyncPane {
 
         let heading = |text: String| {
             div()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
         };
-        let caption = |text: String| div().text_size(px(10.5)).text_color(muted_fg).child(text);
-        let problem = |text: String| div().text_size(px(11.)).text_color(danger).child(text);
+        let caption = |text: String| div().text_size(px(11.5)).text_color(muted_fg).child(text);
+        let problem = |text: String| div().text_size(px(12.)).text_color(danger).child(text);
 
         let account = self.vault_state.read(cx).manager().and_then(|vault| {
             let state = vault.sync_state()?;
@@ -510,8 +510,8 @@ impl Render for SyncPane {
                     )
             }
 
+            // The page title above already says "Sync".
             (SignIn::Idle, None) => body
-                .child(heading("Sync".into()))
                 .child(caption(
                     "Keep hosts, keys and snippets the same on all your devices. Everything is \
                      encrypted on this device before it is sent, with a key that only your \
@@ -576,8 +576,8 @@ impl Render for SyncPane {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(crate::theme::modal_surface())
-            .p(px(10.))
+            .px(px(20.))
+            .pb(px(20.))
             .child(body)
     }
 }

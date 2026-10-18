@@ -5,14 +5,15 @@ use gpui::prelude::*;
 use gpui::{div, px, Context, Entity, EventEmitter, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    dialog::{DialogHeader, DialogTitle},
+    dialog::DialogHeader,
     h_flex,
     input::{Textarea, TextareaState},
-    v_flex, ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
+    v_flex, ActiveTheme as _, Disableable as _, Sizable as _,
 };
 
 use crate::account::api::FeedbackKind;
 use crate::account::{Api, ApiError};
+use crate::theme;
 use crate::ui::VaultState;
 
 /// The server takes at most this many characters.
@@ -118,6 +119,52 @@ impl FeedbackView {
     }
 }
 
+/// Bug, Idea or Other as one segmented control, like the layout switch in
+/// the session header.
+fn kind_switch(selected: FeedbackKind, cx: &mut Context<FeedbackView>) -> impl IntoElement {
+    let fg = cx.theme().foreground;
+    let kinds = [
+        (FeedbackKind::Bug, "Bug"),
+        (FeedbackKind::Idea, "Idea"),
+        (FeedbackKind::Other, "Other"),
+    ];
+    h_flex()
+        .flex_none()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(px(7.))
+        .bg(theme::field())
+        .children(kinds.into_iter().map(|(kind, label)| {
+            let is_selected = selected == kind;
+            div()
+                .id(SharedString::from(format!("feedback-kind-{label}")))
+                // A tab stop: Enter or Space on it picks it, as the buttons
+                // this replaced did.
+                .focusable()
+                .tab_stop(true)
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(|s| s.border_color(theme::accent()))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(is_selected, |el| el.bg(theme::element()).text_color(fg))
+                .when(!is_selected, |el| {
+                    el.text_color(theme::text_dim())
+                        .hover(move |s| s.text_color(fg))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.kind = kind;
+                    cx.notify();
+                }))
+        }))
+}
+
 fn send_problem(error: &ApiError) -> String {
     match error.code() {
         Some("rate_limited") => "That is a lot of messages. Try again in an hour.".into(),
@@ -137,8 +184,12 @@ impl Render for FeedbackView {
             theme.danger,
             theme.success,
         );
-        let caption =
-            move |text: &'static str| div().text_size(px(11.)).text_color(muted_fg).child(text);
+        let caption = |text: &'static str| {
+            div()
+                .text_size(px(11.5))
+                .text_color(theme::text_dim())
+                .child(text)
+        };
         let close = |label: &'static str, cx: &mut Context<Self>| {
             Button::new("feedback-close")
                 .small()
@@ -147,14 +198,19 @@ impl Render for FeedbackView {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(FeedbackEvent::Closed)))
         };
 
-        let body = v_flex()
-            .p(px(12.))
-            .gap(px(8.))
-            .child(DialogHeader::new().child(DialogTitle::new().child("Write to the developer")));
+        let body = v_flex().p(px(8.)).gap(px(12.)).child(
+            DialogHeader::new().child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("Write to the developer"),
+            ),
+        );
 
         if self.session_token(cx).is_none() {
             return body
-                .child(div().text_size(px(12.)).text_color(fg).child(
+                .child(div().text_size(px(13.)).text_color(muted_fg).child(
                     "Messages are sent from your sync account. Sign in under Settings, Sync first.",
                 ))
                 .child(h_flex().justify_end().child(close("Close", cx)));
@@ -163,7 +219,7 @@ impl Render for FeedbackView {
             return body
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(success)
                         .child("Sent. Thank you."),
                 )
@@ -171,32 +227,16 @@ impl Render for FeedbackView {
         }
 
         let is_sending = matches!(self.status, Status::Sending);
-        let kinds = [
-            (FeedbackKind::Bug, "Bug"),
-            (FeedbackKind::Idea, "Idea"),
-            (FeedbackKind::Other, "Other"),
-        ];
-        let kind_buttons = kinds.into_iter().map(|(kind, label)| {
-            Button::new(SharedString::from(format!("feedback-kind-{label}")))
-                .xsmall()
-                .ghost()
-                .selected(self.kind == kind)
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.kind = kind;
-                    cx.notify();
-                }))
-        });
 
-        body.child(h_flex().gap(px(6.)).children(kind_buttons))
-            .child(Textarea::new(&self.message).h(px(150.)))
+        body.child(h_flex().child(kind_switch(self.kind, cx)))
+            .child(Textarea::new(&self.message).h(px(160.)))
             .child(caption(
                 "Sent with your GitHub login, the app version and your OS.",
             ))
             .children(match &self.status {
                 Status::Failed(problem) => Some(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(px(12.))
                         .text_color(danger)
                         .child(problem.clone()),
                 ),

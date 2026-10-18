@@ -15,7 +15,7 @@ use crate::shell::{GridPoint, GridSelectionRange, SelectionSide, TermSnapshot};
 use crate::theme as flint_theme;
 use crate::ui::terminal_link::TerminalLink;
 use crate::ui::terminal_palette::{self, ColorKey, TerminalColors};
-use crate::ui::terminal_view::{ScrollbarGeom, TerminalView};
+use crate::ui::terminal_view::{ScrollbarGeom, TerminalView, SIDE_PADDING};
 
 /// Height of a terminal row, as a multiple of the font size.
 pub(crate) const LINE_HEIGHT_FACTOR: f32 = 1.3;
@@ -1273,13 +1273,13 @@ impl Element for TerminalElement {
             );
 
             // The clickable band is wider than the painted bar: a few pixels to
-            // its left, the right margin out to the edge, and the full height, so
-            // the thin bar is easy to grab.
+            // its left, the right margin and the view's side padding out to the
+            // window edge, and the full height, so the thin bar is easy to grab.
             let grab_pad = px(4.0);
             self.view.update(cx, |view, _| {
                 view.scrollbar_geom = Some(ScrollbarGeom {
                     hit_x0: track_x - grab_pad,
-                    hit_x1: bounds.origin.x + bounds.size.width,
+                    hit_x1: bounds.origin.x + bounds.size.width + px(SIDE_PADDING),
                     hit_y0: bounds.origin.y,
                     hit_y1: bounds.origin.y + bounds.size.height,
                     track_y,

@@ -113,14 +113,14 @@ fn trash_icon() -> Icon {
 
 fn caption_text(cx: &App, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(10.5))
+        .text_size(px(11.5))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
 
 fn line_text(cx: &App, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(11.5))
+        .text_size(px(12.5))
         .text_color(cx.theme().foreground)
         .child(text.into())
 }
@@ -710,7 +710,7 @@ impl TeamsPane {
                             .flex_none()
                             .max_w(px(220.))
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(px(12.5))
                             .text_color(fg)
                             .child(row.label.clone()),
                     )
@@ -719,7 +719,7 @@ impl TeamsPane {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(10.5))
+                            .text_size(px(11.5))
                             .text_color(muted_fg)
                             .child(row.address.clone()),
                     ),
@@ -845,7 +845,7 @@ impl TeamsPane {
                  could see them, as personal copies. Enter your master password to confirm.",
             ))
             .child(Input::new(&self.confirm_password).small().mask_toggle())
-            .children(error.map(|text| div().text_size(px(11.)).text_color(danger).child(text)))
+            .children(error.map(|text| div().text_size(px(12.)).text_color(danger).child(text)))
             .child(
                 h_flex()
                     .gap(px(8.))
@@ -934,27 +934,28 @@ impl Render for TeamsPane {
 
         let heading = move |text: String| {
             div()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
         };
         let caption =
-            move |text: String| div().text_size(px(10.5)).text_color(muted_fg).child(text);
+            move |text: String| div().text_size(px(11.5)).text_color(muted_fg).child(text);
         let note = move |text: String| caption(text).max_w(px(520.));
-        let line = move |text: String| div().text_size(px(11.5)).text_color(fg).child(text);
+        let line = move |text: String| div().text_size(px(12.5)).text_color(fg).child(text);
 
         let pane = v_flex()
             .id("teams-scroll")
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(crate::theme::modal_surface())
-            .p(px(10.))
-            .gap(px(8.));
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.));
 
         let Some(teams) = self.teams(cx) else {
-            return pane.child(heading("Teams".into())).child(caption(
+            // The page title above already says "Teams".
+            return pane.child(caption(
                 "Share hosts with other people. Sign in under Sync first: a team needs an account."
                     .into(),
             ));
@@ -979,7 +980,6 @@ impl Render for TeamsPane {
         let is_spinning = move |id: &SharedString| is_busy && pressed.as_ref() == Some(id);
 
         let mut pane = pane
-            .child(heading("Teams".into()))
             .child(note(
                 "Share hosts, and the keys they log in with, with other accounts. They are \
                  encrypted for members only; the sync service cannot read them or add anyone."
@@ -990,8 +990,8 @@ impl Render for TeamsPane {
                  teams; members never pay."
                     .into(),
             ))
-            .children(error.map(|text| div().text_size(px(11.)).text_color(danger).child(text)))
-            .children(notice.map(|text| div().text_size(px(11.)).text_color(success).child(text)));
+            .children(error.map(|text| div().text_size(px(12.)).text_color(danger).child(text)))
+            .children(notice.map(|text| div().text_size(px(12.)).text_color(success).child(text)));
         if waiting > 0 {
             pane = pane.child(caption(
                 "You asked to join a team. You are in once the person who sent the link opens \
@@ -1162,7 +1162,7 @@ impl Render for TeamsPane {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.))
+                                .text_size(px(12.))
                                 .text_color(muted_fg)
                                 .font_family(mono)
                                 .child(link.clone()),

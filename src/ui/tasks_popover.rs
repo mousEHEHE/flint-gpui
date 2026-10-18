@@ -22,7 +22,7 @@ use crate::theme;
 use crate::ui::file_pane::fmt_size;
 use crate::ui::server_session::{ServerSession, TransferTask};
 use crate::ui::sftp_browser::TransferKind;
-use crate::ui::terminal_tabs::header_button;
+use crate::ui::terminal_tabs::{header_button, SESSION_HEADER_HEIGHT};
 
 const POPOVER_W: f32 = 340.0;
 
@@ -163,8 +163,8 @@ impl ServerSession {
         let popover = v_flex()
             .occlude()
             .absolute()
-            .right(px(12.))
-            .bottom(px(12.))
+            .right(px(8.))
+            .top(px(SESSION_HEADER_HEIGHT + 4.))
             .w(px(POPOVER_W))
             .bg(theme::pop_surface())
             .border_1()

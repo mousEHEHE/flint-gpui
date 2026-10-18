@@ -8,6 +8,7 @@ pub mod file_pane;
 pub mod file_pane_keys;
 pub mod file_selection;
 pub mod forwards_popover;
+pub mod host_icon;
 pub mod host_sharing;
 pub mod import_view;
 pub mod keyboard_layout;
@@ -23,6 +24,7 @@ pub mod server_session;
 pub mod servers_view;
 pub mod settings;
 pub mod sftp_browser;
+pub mod shortcut_hints;
 pub mod sidebar;
 pub mod sync_service;
 pub mod tasks_popover;
@@ -54,12 +56,20 @@ pub fn dialog_chrome(dialog: gpui_component::dialog::Dialog) -> gpui_component::
 
     dialog
         .bg(crate::theme::pop_surface())
-        .border_color(crate::theme::border_focused())
+        .border_color(crate::theme::float_border())
+        .rounded(gpui::px(12.))
         .shadow(modal_shadow())
 }
 
+/// Corner radius of the working area, the card that holds the host list or
+/// a session.
+pub const PANEL_RADIUS: f32 = 10.;
+
 pub const DIALOG_NARROW: gpui::Pixels = gpui::px(400.);
 pub const DIALOG_WIDE: gpui::Pixels = gpui::px(480.);
+/// The host form: user, host and port share a row, and so do the folder and
+/// the tags.
+pub const DIALOG_FORM: gpui::Pixels = gpui::px(620.);
 
 /// The four-layer shadow Zed gives its modals, shared by dialogs, the palette
 /// and the settings card so they all sit at the same height.

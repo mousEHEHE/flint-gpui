@@ -175,7 +175,7 @@ impl SettingsView {
         let key_search = cx.new(|cx| InputState::new(window, cx).placeholder("filter by name…"));
 
         let snippet_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("filter by name or description…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("filter snippets…"));
 
         let sync_pane = cx.new(|cx| SyncPane::new(vault_state.clone(), window, cx));
         let teams_pane = cx.new(|cx| TeamsPane::new(vault_state.clone(), window, cx));
@@ -697,7 +697,6 @@ impl SettingsView {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let bg_elevated = crate::theme::modal_surface();
         let accent = theme.primary;
 
         let (proxies, routing, mut servers) = {
@@ -713,17 +712,8 @@ impl SettingsView {
         };
         servers.sort_by_key(|a| a.label.to_lowercase());
 
-        let header = h_flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_semibold()
-                    .text_color(fg)
-                    .child("Proxies"),
-            )
-            .child(count_chip(proxies.len()))
+        let header = page_head("Proxies", Some(proxies.len()))
+            .px_0()
             .child(div().flex_1())
             .child(
                 Button::new("add-proxy-btn")
@@ -737,12 +727,15 @@ impl SettingsView {
         let profile_rows: gpui::AnyElement = if proxies.is_empty() {
             div()
                 .py(px(18.))
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted_fg)
                 .child("No proxies yet. Add one to route hosts through it.")
                 .into_any_element()
         } else {
-            v_flex()
+            let count = proxies.len();
+            list_card()
+                .mx_0()
+                .mb_0()
                 .children(proxies.iter().enumerate().map(|(ix, p)| {
                     let id = p.id;
                     let meta = format!(
@@ -751,30 +744,31 @@ impl SettingsView {
                         p.port,
                         if p.has_auth { " · auth" } else { "" }
                     );
-                    h_flex()
-                        .id(("proxy-row", ix))
-                        .h(px(26.))
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(8.))
-                        .rounded(px(4.))
-                        .hover(|s| s.bg(theme.list_hover))
-                        .child(proxy_kind_pill(p.kind, cx))
+                    card_row(("proxy-row", ix), ix == 0, ix + 1 == count)
+                        .cursor_default()
+                        .child(row_tile(
+                            Icon::new(IconName::Network),
+                            crate::theme::accent(),
+                        ))
                         .child(
                             div()
-                                .flex_none()
-                                .max_w(px(180.))
-                                .text_size(px(12.5))
+                                .w(px(180.))
+                                .flex_shrink(1.)
+                                .min_w(px(80.))
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(fg)
                                 .truncate()
                                 .child(SharedString::from(p.name.clone())),
                         )
+                        .child(proxy_kind_pill(p.kind, cx))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(10.5))
-                                .text_color(muted_fg)
+                                .font_family(crate::theme::MONO_FONT)
+                                .text_size(px(12.))
+                                .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(meta),
                         )
@@ -862,7 +856,7 @@ impl SettingsView {
             let server_rows: gpui::AnyElement = if servers.is_empty() {
                 div()
                     .py(px(12.))
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted_fg)
                     .child("No hosts saved yet.")
                     .into_any_element()
@@ -901,10 +895,10 @@ impl SettingsView {
                         // rule: an override wins over it.
                         let checkbox = div()
                             .id(("srv-chk", ix))
-                            .w(px(13.))
-                            .h(px(13.))
+                            .w(px(16.))
+                            .h(px(16.))
                             .flex_none()
-                            .rounded(px(3.))
+                            .rounded(px(4.))
                             .border_1()
                             .border_color(if in_set && is_rule {
                                 accent
@@ -920,7 +914,7 @@ impl SettingsView {
                             .items_center()
                             .justify_center()
                             .when(in_set, |el| {
-                                el.child(Icon::new(IconName::Check).size(px(9.)))
+                                el.child(Icon::new(IconName::Check).size(px(11.)))
                             })
                             .when(is_rule, |el| {
                                 el.cursor_pointer()
@@ -940,7 +934,14 @@ impl SettingsView {
                                     }))
                             });
 
-                        let mut overrides = h_flex().gap(px(3.)).flex_none();
+                        // Wraps onto a second line rather than run past the
+                        // page when there are many proxies or little room.
+                        let mut overrides = h_flex()
+                            .gap(px(4.))
+                            .flex_wrap()
+                            .justify_end()
+                            .flex_shrink(1.)
+                            .min_w_0();
                         overrides = overrides.child(
                             select_chip(("ovr-rule", ix), "Rule", is_rule, cx).on_click(
                                 cx.listener(move |this, _, _, cx| {
@@ -980,27 +981,34 @@ impl SettingsView {
 
                         h_flex()
                             .id(("srv-row", ix))
-                            .h(px(24.))
+                            .min_h(px(36.))
+                            .py(px(4.))
                             .items_center()
-                            .gap(px(8.))
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .hover(|s| s.bg(theme.list_hover))
+                            .gap(px(10.))
+                            .px(px(8.))
+                            .rounded(px(7.))
+                            .hover(|s| s.bg(crate::theme::field()))
                             .child(checkbox)
                             .child(
                                 div()
-                                    .flex_none()
+                                    .flex_shrink(1.)
+                                    .min_w(px(60.))
                                     .max_w(px(160.))
-                                    .text_size(px(12.5))
+                                    .text_size(px(13.))
                                     .text_color(fg)
                                     .truncate()
-                                    .child(SharedString::from(s.label.clone())),
+                                    // A host without a name goes by its address.
+                                    .child(SharedString::from(if s.label.is_empty() {
+                                        s.host.clone()
+                                    } else {
+                                        s.label.clone()
+                                    })),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(10.5))
+                                    .text_size(px(11.5))
                                     .text_color(muted_fg)
                                     .truncate()
                                     .child(SharedString::from(format!(
@@ -1011,8 +1019,10 @@ impl SettingsView {
                             .when(is_rule, |el| {
                                 el.child(
                                     div()
-                                        .flex_none()
-                                        .text_size(px(10.5))
+                                        .flex_shrink(1.)
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.5))
                                         .text_color(muted_fg)
                                         .child(badge_text),
                                 )
@@ -1024,7 +1034,7 @@ impl SettingsView {
 
             v_flex()
                 .gap(px(8.))
-                .child(section_header("ROUTING", None))
+                .child(section_header("Routing", None))
                 .child(
                     v_flex()
                         .gap(px(6.))
@@ -1032,7 +1042,7 @@ impl SettingsView {
                         .child(default_chips),
                 )
                 .child(mode_rows)
-                .child(section_header("HOSTS", Some(servers.len())))
+                .child(section_header("Hosts", Some(servers.len())))
                 .child(server_rows)
                 .into_any_element()
         };
@@ -1042,9 +1052,9 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(bg_elevated)
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.))
             .child(header)
             .child(profile_rows)
             .child(routing_section)
@@ -1053,7 +1063,6 @@ impl SettingsView {
     fn render_proxy_editor(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
-        let bg_elevated = crate::theme::modal_surface();
 
         let title = match self.proxy_editor_mode {
             ProxyEditorMode::Add => "Add proxy",
@@ -1153,9 +1162,10 @@ impl SettingsView {
         v_flex()
             .id("proxy-editor")
             .size_full()
-            .bg(bg_elevated)
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pt(px(14.))
+            .pb(px(20.))
+            .gap(px(12.))
             .overflow_y_scroll()
             .child(
                 h_flex()
@@ -1172,7 +1182,7 @@ impl SettingsView {
                     ))
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(17.))
                             .font_semibold()
                             .text_color(fg)
                             .child(title),
@@ -1195,9 +1205,9 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(crate::theme::modal_surface())
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.))
             .child(group_title("Theme", cx))
             .child(
                 v_flex()
@@ -1219,9 +1229,9 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(crate::theme::modal_surface())
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.))
             .child(group_title("Font size", cx))
             .child(self.render_terminal_font_size(cx))
             .child(group_title("Font", cx).mt(px(6.)))
@@ -1255,7 +1265,7 @@ impl SettingsView {
                 div()
                     .w(px(40.))
                     .text_center()
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
                     .text_color(fg)
                     .child(format!("{size} px")),
             )
@@ -1282,7 +1292,7 @@ impl SettingsView {
             .child(
                 div()
                     .ml(px(6.))
-                    .text_size(px(10.5))
+                    .text_size(px(11.5))
                     .text_color(muted_fg)
                     .child("Shared by every terminal. The zoom shortcuts change it too."),
             )
@@ -1363,7 +1373,7 @@ impl SettingsView {
         let caption = move |text: &'static str| {
             div()
                 .pl(px(22.))
-                .text_size(px(10.5))
+                .text_size(px(11.5))
                 .text_color(muted_fg)
                 .child(text)
         };
@@ -1423,7 +1433,7 @@ impl SettingsView {
                     div()
                         .w(px(80.))
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_size(px(12.))
                         .text_color(muted_fg)
                         .child(label),
                 )
@@ -1431,15 +1441,16 @@ impl SettingsView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .text_color(fg)
                         .child(value),
                 )
         };
 
         v_flex()
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.))
             .child(group_title("About flint", cx))
             .child(
                 v_flex()
@@ -1475,12 +1486,12 @@ impl SettingsView {
                             }),
                     ),
             )
-            .child(div().text_size(px(11.)).text_color(muted_fg).child(
+            .child(div().text_size(px(12.)).text_color(muted_fg).child(
                 "Copy diagnostics copies the version and the system only. \
                          The log file holds host names, user names and errors: \
                          read it before you attach it to an issue.",
             ))
-            .child(div().text_size(px(11.)).text_color(muted_fg).child(
+            .child(div().text_size(px(12.)).text_color(muted_fg).child(
                 "flint is free software under the GNU GPL version 3 and comes \
                          with no warranty. The source is at the Repository link.",
             ))
@@ -1516,7 +1527,7 @@ impl SettingsView {
             .child(
                 div()
                     .pl(px(22.))
-                    .text_size(px(10.5))
+                    .text_size(px(11.5))
                     .text_color(muted_fg)
                     .child(
                     "When on, flint asks the flint server for the newest version when it starts \
@@ -1545,7 +1556,7 @@ impl SettingsView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.))
+                            .text_size(px(12.))
                             .text_color(muted_fg)
                             .child(result),
                     ),
@@ -1553,8 +1564,6 @@ impl SettingsView {
     }
 
     fn render_keys_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg_elevated = crate::theme::modal_surface();
-
         let mut all_keys: Vec<SshKeySummary> = self
             .vault_state
             .read(cx)
@@ -1599,7 +1608,6 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .bg(bg_elevated)
             .child(content)
     }
 
@@ -1612,23 +1620,10 @@ impl SettingsView {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let border = theme.title_bar_border;
-        let list_hover = theme.list_hover;
 
-        let total = all_keys.len();
-
-        let title_row = h_flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_semibold()
-                    .text_color(fg)
-                    .child("SSH keys"),
-            )
-            .child(count_chip(total))
+        let head = page_head("SSH keys", Some(all_keys.len()))
             .child(div().flex_1())
+            .child(filter_field(&self.key_search))
             .child(
                 Button::new("add-key-btn")
                     .primary()
@@ -1638,37 +1633,16 @@ impl SettingsView {
                     .on_click(cx.listener(|this, _, window, cx| this.enter_add_key(window, cx))),
             );
 
-        let search_input = Input::new(&self.key_search).small().prefix(
-            Icon::new(IconName::Search)
-                .size(px(12.))
-                .text_color(muted_fg),
-        );
-
-        let list_head = v_flex()
-            .gap(px(6.))
-            .px(px(8.))
-            .py(px(8.))
-            .border_b_1()
-            .border_color(border)
-            .child(title_row)
-            .child(search_input);
-
         let rows: gpui::AnyElement = if filtered.is_empty() {
             let msg = if all_keys.is_empty() {
                 "No keys yet."
             } else {
                 "No keys match the filter."
             };
-            v_flex()
-                .py(px(18.))
-                .px(px(12.))
-                .items_center()
-                .child(div().text_size(px(12.)).text_color(muted_fg).child(msg))
-                .into_any_element()
+            empty_note(msg).into_any_element()
         } else {
-            v_flex()
-                .px(px(4.))
-                .py(px(4.))
+            let count = filtered.len();
+            list_card()
                 .children(filtered.iter().enumerate().map(|(ix, key)| {
                     let id = key.id;
                     let in_use_count = self
@@ -1677,12 +1651,11 @@ impl SettingsView {
                         .manager()
                         .map(|vm| vm.servers_using_key(id).len())
                         .unwrap_or(0);
-
                     let meta_line =
                         format!("{} · added {}", key.key_type, fmt_relative(key.created_at));
-                    let badge = div()
+                    let usage = div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(px(12.))
                         .text_color(if in_use_count > 0 {
                             muted_fg
                         } else {
@@ -1694,29 +1667,23 @@ impl SettingsView {
                             n => format!("{n} hosts"),
                         });
 
-                    let row = h_flex()
-                        .id(("key-row", ix))
-                        .relative()
-                        .w_full()
-                        .h(px(24.))
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(8.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(list_hover))
-                        .active(|s| s.bg(crate::theme::element_active()))
+                    card_row(("key-row", ix), ix == 0, ix + 1 == count)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selected_key_id = Some(id);
                             this.pubkey_cache = None;
                             cx.notify();
                         }))
-                        .child(key_glyph(muted_fg))
+                        .child(row_tile(
+                            Icon::empty().path("icons/key-round.svg"),
+                            crate::theme::yellow(),
+                        ))
                         .child(
                             div()
-                                .flex_none()
-                                .max_w(px(180.))
-                                .text_size(px(12.5))
+                                .w(px(200.))
+                                .flex_shrink(1.)
+                                .min_w(px(80.))
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(fg)
                                 .truncate()
                                 .child(SharedString::from(key.name.clone())),
@@ -1725,36 +1692,34 @@ impl SettingsView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(10.5))
-                                .text_color(muted_fg)
+                                .text_size(px(12.))
+                                .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(meta_line),
                         )
-                        .child(badge);
-                    row
+                        .child(usage)
                 }))
                 .into_any_element()
         };
-
-        let body = div()
-            .id("keys-scroll")
-            .flex_1()
-            .overflow_y_scroll()
-            .child(rows);
 
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .h_full()
-            .child(list_head)
-            .child(body)
+            .child(head)
+            .child(
+                div()
+                    .id("keys-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
     }
 
     fn render_keys_detail_pane(&mut self, id: Uuid, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted_fg = theme.muted_foreground;
-        let bg_elevated = crate::theme::modal_surface();
 
         let key_clone: Option<SshKey> = self
             .vault_state
@@ -1771,7 +1736,7 @@ impl SettingsView {
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(muted_fg)
                         .child("This key is no longer in the vault."),
                 )
@@ -1784,7 +1749,6 @@ impl SettingsView {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(bg_elevated)
             .child(body)
     }
 
@@ -1811,10 +1775,10 @@ impl SettingsView {
 
         let det_head = h_flex()
             .flex_none()
-            .h(px(28.))
+            .h(px(52.))
             .items_center()
-            .gap(px(6.))
-            .px(px(8.))
+            .gap(px(10.))
+            .px(px(20.))
             .border_b_1()
             .border_color(border)
             .child(back_button(
@@ -1829,7 +1793,7 @@ impl SettingsView {
             .child(type_pill(&key.key_type, accent, accent_soft, accent_border))
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(fg)
                     .truncate()
@@ -1866,14 +1830,14 @@ impl SettingsView {
             .gap(px(2.))
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(12.5))
                     .text_color(text_editor)
                     .font_family(terminal_font)
                     .child(SharedString::from(key.fingerprint.clone())),
             )
             .child(
                 div()
-                    .text_size(px(10.5))
+                    .text_size(px(11.5))
                     .text_color(muted_fg)
                     .child(format!("added {added_relative}")),
             );
@@ -1883,7 +1847,7 @@ impl SettingsView {
             div()
                 .px(px(2.))
                 .py(px(4.))
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted_fg)
                 .child("Not bound to any host yet.")
                 .into_any_element()
@@ -1929,13 +1893,13 @@ impl SettingsView {
             );
         let pubkey_block = div()
             .id("pubkey-body")
-            .p(px(8.))
-            .rounded(px(4.))
+            .p(px(12.))
+            .rounded(px(8.))
             .bg(bg_deep)
             .border_1()
             .border_color(border)
             .font_family(terminal_font)
-            .text_size(px(11.5))
+            .text_size(px(12.5))
             .text_color(text_editor)
             .child(pub_line);
 
@@ -1950,9 +1914,9 @@ impl SettingsView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(8.))
+                    .gap(px(12.))
+                    .px(px(20.))
+                    .py(px(16.))
                     .child(fingerprint)
                     .child(in_use_section_h)
                     .child(in_use_body)
@@ -1960,7 +1924,7 @@ impl SettingsView {
                     .child(pubkey_block)
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(11.5))
                             .text_color(muted_fg)
                             .child("The private key stays encrypted in the vault."),
                     ),
@@ -2134,8 +2098,10 @@ impl SettingsView {
         v_flex()
             .id("add-key-form")
             .size_full()
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pt(px(14.))
+            .pb(px(20.))
+            .gap(px(12.))
             .overflow_y_scroll()
             .child(
                 h_flex()
@@ -2152,7 +2118,7 @@ impl SettingsView {
                     ))
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(17.))
                             .font_semibold()
                             .text_color(fg)
                             .child("Add key"),
@@ -2162,8 +2128,6 @@ impl SettingsView {
     }
 
     fn render_snippets_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg_elevated = crate::theme::modal_surface();
-
         let mut snippets: Vec<Snippet> = self
             .vault_state
             .read(cx)
@@ -2219,7 +2183,6 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .bg(bg_elevated)
             .child(content)
     }
 
@@ -2229,24 +2192,9 @@ impl SettingsView {
         total: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted_fg = theme.muted_foreground;
-        let border = theme.title_bar_border;
-        let list_hover = theme.list_hover;
-
-        let title_row = h_flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_semibold()
-                    .text_color(fg)
-                    .child("Snippets"),
-            )
-            .child(count_chip(total))
+        let head = page_head("Snippets", Some(total))
             .child(div().flex_1())
+            .child(filter_field(&self.snippet_search))
             .child(
                 Button::new("add-snippet-btn")
                     .primary()
@@ -2258,72 +2206,45 @@ impl SettingsView {
                     ),
             );
 
-        let search_input = Input::new(&self.snippet_search).small().prefix(
-            Icon::new(IconName::Search)
-                .size(px(12.))
-                .text_color(muted_fg),
-        );
-
-        let list_head = v_flex()
-            .gap(px(6.))
-            .px(px(8.))
-            .py(px(8.))
-            .border_b_1()
-            .border_color(border)
-            .child(title_row)
-            .child(search_input);
-
-        let rows: Vec<gpui::AnyElement> = snippets
-            .iter()
-            .map(|snippet| {
-                self.render_snip_row(snippet, list_hover, cx)
-                    .into_any_element()
+        let rows: gpui::AnyElement = if snippets.is_empty() {
+            empty_note(if total == 0 {
+                "No snippets yet."
+            } else {
+                "No snippets match the filter."
             })
-            .collect();
-
-        let empty: Option<gpui::AnyElement> = (snippets.is_empty()).then(|| {
-            v_flex()
-                .py(px(18.))
-                .px(px(12.))
-                .items_center()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(muted_fg)
-                        .child(if total == 0 {
-                            "No snippets yet."
-                        } else {
-                            "No snippets match the filter."
-                        }),
+            .into_any_element()
+        } else {
+            let count = snippets.len();
+            list_card()
+                .children(
+                    snippets
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, snippet)| self.render_snip_row(snippet, ix, count, cx)),
                 )
                 .into_any_element()
-        });
-
-        let body = div()
-            .id("snippets-scroll")
-            .flex_1()
-            .overflow_y_scroll()
-            .child(
-                v_flex()
-                    .px(px(4.))
-                    .py(px(4.))
-                    .children(rows)
-                    .children(empty),
-            );
+        };
 
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .h_full()
-            .child(list_head)
-            .child(body)
+            .child(head)
+            .child(
+                div()
+                    .id("snippets-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
     }
 
     fn render_snip_row(
         &self,
         snippet: &Snippet,
-        list_hover: Hsla,
+        ix: usize,
+        count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let row_id: SharedString = format!("snip-row-{}", snippet.id).into();
@@ -2332,42 +2253,27 @@ impl SettingsView {
         let muted_fg = theme.muted_foreground;
         let id = snippet.id;
 
-        let glyph = div()
-            .flex_none()
-            .text_color(muted_fg)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(Icon::new(IconName::SquareTerminal).size(px(12.)));
-
         let SnippetBody::Script { content } = &snippet.body;
         let preview: SharedString = content.lines().next().unwrap_or("").to_string().into();
-
         let updated_label = fmt_relative(snippet.updated_at.max(0) as u64);
 
-        let row = h_flex()
-            .id(row_id)
-            .relative()
-            .w_full()
-            .h(px(24.))
-            .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .rounded(px(4.))
-            .cursor_pointer()
-            .hover(move |s| s.bg(list_hover))
-            .active(|s| s.bg(crate::theme::element_active()))
+        card_row(row_id, ix == 0, ix + 1 == count)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_snippet_id = Some(id);
                 this.snippet_view_mode = SnippetEditMode::View;
                 cx.notify();
             }))
-            .child(glyph)
+            .child(row_tile(
+                Icon::new(IconName::SquareTerminal),
+                crate::theme::cyan(),
+            ))
             .child(
                 div()
-                    .flex_none()
-                    .max_w(px(150.))
-                    .text_size(px(12.5))
+                    .w(px(180.))
+                    .flex_shrink(1.)
+                    .min_w(px(80.))
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(fg)
                     .truncate()
                     .child(SharedString::from(snippet.name.clone())),
@@ -2376,20 +2282,19 @@ impl SettingsView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(10.5))
-                    .text_color(muted_fg)
+                    .font_family(crate::theme::MONO_FONT)
+                    .text_size(px(12.))
+                    .text_color(crate::theme::text_dim())
                     .truncate()
                     .child(preview),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(10.))
+                    .text_size(px(12.))
                     .text_color(muted_fg)
                     .child(updated_label),
-            );
-
-        row
+            )
     }
 
     fn render_snippets_detail_pane(
@@ -2398,7 +2303,6 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let muted_fg = cx.theme().muted_foreground;
-        let bg_elevated = crate::theme::modal_surface();
 
         let snippet: Option<Snippet> = self
             .vault_state
@@ -2414,12 +2318,11 @@ impl SettingsView {
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .bg(bg_elevated)
                 .items_center()
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(muted_fg)
                         .child("This snippet is no longer in the vault."),
                 )
@@ -2472,8 +2375,6 @@ impl SettingsView {
         creating: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let bg_elevated = crate::theme::modal_surface();
-
         let SnippetBody::Script { content } = &snippet.body;
         let content = content.clone();
         let in_edit = creating || self.snippet_view_mode == SnippetEditMode::Edit;
@@ -2495,7 +2396,7 @@ impl SettingsView {
                 .filter(|desc| !desc.is_empty())
                 .map(|desc| {
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .text_color(cx.theme().foreground)
                         .child(desc)
                         .into_any_element()
@@ -2521,9 +2422,9 @@ impl SettingsView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .gap(px(8.))
-            .px(px(10.))
-            .py(px(8.))
+            .gap(px(12.))
+            .px(px(20.))
+            .py(px(16.))
             .children(description_row)
             .child(content_block);
 
@@ -2535,7 +2436,6 @@ impl SettingsView {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(bg_elevated)
             .child(det_head)
             .child(det_body)
             .child(foot)
@@ -2571,7 +2471,7 @@ impl SettingsView {
         let updated = (!creating).then(|| {
             div()
                 .flex_none()
-                .text_size(px(10.5))
+                .text_size(px(11.5))
                 .text_color(muted_fg)
                 .child(format!(
                     "updated {}",
@@ -2591,7 +2491,7 @@ impl SettingsView {
                 .min_w(px(0.))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(fg)
                         .truncate()
@@ -2603,9 +2503,9 @@ impl SettingsView {
         h_flex()
             .flex_none()
             .items_center()
-            .h(px(28.))
-            .gap(px(8.))
-            .px(px(8.))
+            .h(px(52.))
+            .gap(px(10.))
+            .px(px(20.))
             .border_b_1()
             .border_color(border)
             .child(back_button(
@@ -2636,7 +2536,6 @@ impl SettingsView {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let border = theme.title_bar_border;
-        let bg_elevated = crate::theme::modal_surface();
         let danger = theme.danger;
 
         let in_view = !creating && self.snippet_view_mode == SnippetEditMode::View;
@@ -2648,7 +2547,7 @@ impl SettingsView {
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(danger)
                     .truncate()
                     .child(msg)
@@ -2660,11 +2559,10 @@ impl SettingsView {
 
         let bar = h_flex()
             .flex_none()
-            .h(px(30.))
-            .px(px(10.))
+            .h(px(52.))
+            .px(px(20.))
             .items_center()
-            .gap(px(6.))
-            .bg(bg_elevated)
+            .gap(px(8.))
             .border_t_1()
             .border_color(border);
 
@@ -2939,75 +2837,120 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        // The card is the lighter ground and the nav rail the tinted surface
-        // in both light and dark mode, so they have their own tokens and do
-        // not use the app's `title_bar` / `background` pair.
-        let bg_elevated = crate::theme::modal_surface();
-        let bg = crate::theme::modal_rail();
-        let border = theme.title_bar_border;
-        let border_focused = crate::theme::border_focused();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
-        let list_hover = theme.list_hover;
+        // gpui does not clip children to rounded corners, so the rail rounds
+        // its own outer corners to sit inside the card's.
+        let inner_radius = px(CARD_RADIUS - 1.);
 
-        let section_sidebar = v_flex()
-            .w(px(148.))
+        let rail_items = SettingsSection::all()
+            .iter()
+            .enumerate()
+            .map(|(ix, &section)| {
+                let is_active = self.active_section == section;
+                // Marked like "All hosts" in the sidebar: a raised fill and
+                // an accent icon.
+                let icon_color = if is_active {
+                    crate::theme::accent()
+                } else {
+                    muted_fg
+                };
+                h_flex()
+                    .id(("settings-section", ix))
+                    .w_full()
+                    .h(px(30.))
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .text_color(if is_active { fg } else { muted_fg })
+                    .cursor_pointer()
+                    .when(is_active, |el| el.bg(crate::theme::element()))
+                    .when(!is_active, |el| {
+                        el.hover(|s| s.bg(crate::theme::field()).text_color(fg))
+                            .active(|s| s.bg(crate::theme::element_active()))
+                    })
+                    .child(section.icon().size(px(15.)).text_color(icon_color))
+                    .child(section.label())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_section = section;
+                        this.mode = match section {
+                            SettingsSection::Vault => SettingsMode::Vault,
+                            SettingsSection::Sync => SettingsMode::Sync,
+                            SettingsSection::Teams => SettingsMode::Teams,
+                            SettingsSection::Appearance => SettingsMode::Appearance,
+                            SettingsSection::Terminal => SettingsMode::Terminal,
+                            SettingsSection::Keys => SettingsMode::KeysList,
+                            SettingsSection::Snippets => SettingsMode::SnippetsList,
+                            SettingsSection::Network => SettingsMode::ProxyList,
+                            SettingsSection::About => SettingsMode::About,
+                        };
+                        this.add_error = None;
+                        this.edit_error = None;
+                        cx.notify();
+                    }))
+            });
+
+        let close_button = div()
+            .id("settings-close")
+            .size(px(26.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_color(muted_fg)
+            .hover(move |s| s.bg(crate::theme::field()).text_color(fg))
+            .active(|s| s.bg(crate::theme::element_active()))
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new("Close settings (Esc)").build(window, cx)
+            })
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(SettingsViewEvent::Close);
+            }))
+            .child(gpui_component::Icon::new(IconName::Close).size(px(14.)));
+
+        let rail = v_flex()
+            .w(px(200.))
             .h_full()
             .flex_none()
-            .bg(bg)
+            .rounded_l(inner_radius)
+            .bg(crate::theme::modal_rail())
             .border_r_1()
-            .border_color(border)
-            .py(px(4.))
-            .px(px(4.))
-            .children(
-                SettingsSection::all()
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, &section)| {
-                        let is_active = self.active_section == section;
-                        // As in Zed's settings: the selected row is marked by its
-                        // background alone, with no accent bar or tinted icon.
-                        let text_color = if is_active { fg } else { muted_fg };
+            .border_color(crate::theme::border())
+            .px(px(8.))
+            .pb(px(8.))
+            .gap(px(2.))
+            .child(
+                h_flex()
+                    .h(px(52.))
+                    .pl(px(10.))
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child("Settings"),
+                    )
+                    .child(close_button),
+            )
+            .children(rail_items);
 
-                        let row = h_flex()
-                            .id(("settings-section", ix))
-                            .relative()
-                            .w_full()
-                            .h(px(24.))
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(8.))
-                            .rounded(px(4.))
-                            .text_size(px(12.))
-                            .text_color(text_color)
-                            .when(is_active, |el| el.bg(crate::theme::element_active()))
-                            .child(section.icon().size(px(12.)).text_color(text_color))
-                            .child(div().child(section.label()));
-
-                        row.cursor_pointer()
-                            .when(!is_active, |el| {
-                                el.hover(|s| s.bg(list_hover).text_color(fg))
-                                    .active(|s| s.bg(crate::theme::element_active()).text_color(fg))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.active_section = section;
-                                this.mode = match section {
-                                    SettingsSection::Vault => SettingsMode::Vault,
-                                    SettingsSection::Sync => SettingsMode::Sync,
-                                    SettingsSection::Teams => SettingsMode::Teams,
-                                    SettingsSection::Appearance => SettingsMode::Appearance,
-                                    SettingsSection::Terminal => SettingsMode::Terminal,
-                                    SettingsSection::Keys => SettingsMode::KeysList,
-                                    SettingsSection::Snippets => SettingsMode::SnippetsList,
-                                    SettingsSection::Network => SettingsMode::ProxyList,
-                                    SettingsSection::About => SettingsMode::About,
-                                };
-                                this.add_error = None;
-                                this.edit_error = None;
-                                cx.notify();
-                            }))
-                    }),
-            );
+        // List pages carry their own title row with a filter and a button;
+        // the others get the section's name here.
+        let page_title = match self.mode {
+            SettingsMode::Vault
+            | SettingsMode::Sync
+            | SettingsMode::Teams
+            | SettingsMode::Appearance
+            | SettingsMode::Terminal
+            | SettingsMode::About => Some(self.active_section.label()),
+            _ => None,
+        };
 
         let content_pane: gpui::AnyElement = match self.mode {
             SettingsMode::Vault => self.vault_pane.clone().into_any_element(),
@@ -3023,6 +2966,21 @@ impl Render for SettingsView {
             SettingsMode::About => self.render_about(cx).into_any_element(),
         };
 
+        let content = v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .when_some(page_title, |el, title| el.child(page_head(title, None)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(content_pane),
+            );
+
         div()
             .id("settings-overlay")
             .absolute()
@@ -3035,7 +2993,7 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(28.))
+            .p(px(32.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, _, _, cx| {
@@ -3048,76 +3006,22 @@ impl Render for SettingsView {
                 cx.emit(SettingsViewEvent::Close);
             }))
             .child(
-                v_flex()
+                h_flex()
                     .id("settings-card")
                     .w_full()
                     .h_full()
-                    .max_w(px(1040.))
-                    .max_h(px(660.))
-                    .bg(bg_elevated)
+                    .max_w(px(980.))
+                    .max_h(px(680.))
+                    .items_stretch()
+                    .bg(crate::theme::modal_surface())
                     .border_1()
-                    .border_color(border_focused)
-                    .rounded(px(6.))
-                    .shadow_xl()
+                    .border_color(crate::theme::float_border())
+                    .rounded(px(CARD_RADIUS))
+                    .shadow(crate::ui::modal_shadow())
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .px(px(10.))
-                            .h(px(32.))
-                            .gap(px(6.))
-                            .border_b_1()
-                            .border_color(border)
-                            .items_center()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(fg)
-                                    .child("Settings"),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id("settings-close")
-                                    .size(px(18.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.))
-                                    .cursor_pointer()
-                                    .text_color(muted_fg)
-                                    .hover(move |s| s.bg(list_hover).text_color(fg))
-                                    .active(move |s| {
-                                        s.bg(crate::theme::element_active()).text_color(fg)
-                                    })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(SettingsViewEvent::Close);
-                                    }))
-                                    .child(
-                                        gpui_component::Icon::new(IconName::Close).size(px(10.)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .items_stretch()
-                            .child(section_sidebar)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .h_full()
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .overflow_hidden()
-                                    .child(content_pane),
-                            ),
-                    ),
+                    .child(rail)
+                    .child(content),
             )
     }
 }
@@ -3132,34 +3036,148 @@ pub(crate) fn set_theme_preference(pref: ThemePreference, window: &mut Window, c
     }
 }
 
+const CARD_RADIUS: f32 = 12.;
+
+/// The top of a settings page: its name, and the count of what it lists.
+/// List pages add their filter and button to the right.
+fn page_head(title: &'static str, count: Option<usize>) -> gpui::Div {
+    h_flex()
+        .flex_none()
+        .h(px(60.))
+        .px(px(20.))
+        .gap(px(10.))
+        .items_center()
+        .child(
+            div()
+                .text_size(px(17.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(crate::theme::text())
+                .child(title),
+        )
+        .when_some(count, |el, n| el.child(count_chip(n)))
+}
+
+/// The filter field of a list page: a fill, an outline and a search icon.
+fn filter_field(input: &Entity<InputState>) -> impl IntoElement {
+    h_flex()
+        .w(px(220.))
+        .flex_shrink(1.)
+        .min_w(px(120.))
+        .h(px(28.))
+        .pl(px(10.))
+        .pr(px(6.))
+        .gap(px(7.))
+        .items_center()
+        .rounded(px(7.))
+        .bg(crate::theme::field())
+        .border_1()
+        .border_color(crate::theme::border())
+        .child(
+            Icon::new(IconName::Search)
+                .size(px(13.))
+                .text_color(crate::theme::text_dim()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(input).appearance(false)),
+        )
+}
+
+/// The rows of a list page, as one card a step lighter than the page.
+fn list_card() -> gpui::Div {
+    v_flex()
+        .mx(px(20.))
+        .mb(px(20.))
+        .rounded(px(CARD_RADIUS - 2.))
+        .border_1()
+        .border_color(crate::theme::border())
+        .bg(crate::theme::card())
+}
+
+/// One row of a list card. The end rows round their own corners, since a
+/// hover fill is not clipped to the card's, and every row after the first
+/// has a line above it that starts past the tile.
+fn card_row(
+    id: impl Into<gpui::ElementId>,
+    is_first: bool,
+    is_last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let inner_radius = px(CARD_RADIUS - 3.);
+    h_flex()
+        .id(id)
+        .relative()
+        .w_full()
+        .h(px(44.))
+        .px(px(12.))
+        .gap(px(12.))
+        .items_center()
+        .when(is_first, |row| row.rounded_t(inner_radius))
+        .when(is_last, |row| row.rounded_b(inner_radius))
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::field()))
+        .active(|s| s.bg(crate::theme::element_active()))
+        .when(!is_first, |row| {
+            row.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(52.))
+                    .right_0()
+                    .h(px(1.))
+                    .bg(crate::theme::border()),
+            )
+        })
+}
+
+/// The tile at the start of a list row, tinted with `color`.
+fn row_tile(icon: Icon, color: Hsla) -> impl IntoElement {
+    div()
+        .flex_none()
+        .size(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .bg(color.opacity(0.16))
+        .child(icon.size(px(15.)).text_color(color))
+}
+
 /// Heading of one group of controls on a settings page.
 fn group_title(text: &'static str, cx: &App) -> gpui::Div {
     div()
-        .text_size(px(12.))
-        .font_semibold()
+        .text_size(px(13.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(cx.theme().foreground)
         .child(text)
 }
 
 fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_size(px(12.))
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }
 
 fn radio_dot(selected: bool, cx: &App) -> impl IntoElement {
+    let accent = cx.theme().primary;
     div()
         .flex_none()
-        .size(px(12.))
+        .size(px(16.))
         .rounded_full()
         .border_1()
-        .border_color(cx.theme().border)
+        .border_color(if selected {
+            accent
+        } else {
+            crate::theme::border_focused()
+        })
+        .bg(crate::theme::field())
         .flex()
         .items_center()
         .justify_center()
         .when(selected, |el| {
-            el.child(div().size(px(6.)).rounded_full().bg(cx.theme().primary))
+            el.child(div().size(px(8.)).rounded_full().bg(accent))
         })
 }
 
@@ -3201,23 +3219,22 @@ fn fmt_relative(timestamp: u64) -> String {
         .unwrap_or(raw)
 }
 
+/// What a list page says when it has no rows to show.
+fn empty_note(text: &'static str) -> impl IntoElement {
+    div()
+        .mx(px(20.))
+        .py(px(24.))
+        .text_size(px(13.))
+        .text_color(crate::theme::text_dim())
+        .child(text)
+}
+
 /// Plain "N" count shown next to a page title.
 fn count_chip(n: usize) -> impl IntoElement {
     div()
-        .text_size(px(10.5))
+        .text_size(px(13.))
         .text_color(crate::theme::text_dim())
         .child(n.to_string())
-}
-
-/// Leading glyph of an SSH-key row: a bare icon, sized to the row's text.
-fn key_glyph(color: Hsla) -> impl IntoElement {
-    div()
-        .flex_none()
-        .text_color(color)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(Icon::empty().path("icons/key-round.svg").size(px(12.)))
 }
 
 /// Uppercase key-type pill for the detail header.
@@ -3225,38 +3242,38 @@ fn type_pill(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
     let t = text.to_uppercase();
     h_flex()
         .flex_none()
-        .h(px(18.))
-        .px(px(6.))
+        .h(px(22.))
+        .px(px(8.))
         .items_center()
         .gap(px(6.))
-        .rounded(px(3.))
+        .rounded(px(6.))
         .bg(bg)
         .border_1()
         .border_color(border)
-        .text_size(px(10.))
+        .text_size(px(11.5))
         .text_color(fg)
         .child(Icon::new(IconName::Asterisk).size(px(11.)))
         .child(SharedString::from(t))
 }
 
-/// Section header row: uppercase label + optional count.
+/// Heading over a part of a page, with an optional count.
 fn section_header(label: &'static str, count: Option<usize>) -> gpui::Div {
-    let text_dim = crate::theme::text_dim();
     h_flex()
         .items_center()
         .gap(px(8.))
-        .mt(px(4.))
+        .mt(px(8.))
         .child(
             div()
-                .text_size(px(10.))
-                .text_color(text_dim)
-                .child(label.to_uppercase()),
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(crate::theme::text())
+                .child(label),
         )
         .when_some(count, |el, n| {
             el.child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(text_dim)
+                    .text_size(px(12.))
+                    .text_color(crate::theme::text_dim())
                     .child(n.to_string()),
             )
         })
@@ -3280,13 +3297,13 @@ where
     } else {
         theme.foreground
     };
-    let hover_bg = theme.list_hover;
+    let hover_bg = crate::theme::field();
     div()
         .id(id)
-        .w(px(20.))
-        .h(px(20.))
+        .w(px(26.))
+        .h(px(26.))
         .flex_none()
-        .rounded(px(3.))
+        .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
@@ -3304,20 +3321,20 @@ fn host_pill(ix: usize, label: SharedString, sub: SharedString, cx: &App) -> imp
     h_flex()
         .id(("host-pill", ix))
         .flex_none()
-        .h(px(22.))
-        .px(px(7.))
+        .h(px(26.))
+        .px(px(9.))
         .gap(px(6.))
         .items_center()
-        .rounded(px(4.))
-        .bg(crate::theme::modal_rail())
+        .rounded(px(6.))
+        .bg(crate::theme::field())
         .border_1()
-        .border_color(theme.title_bar_border)
-        .text_size(px(12.))
+        .border_color(crate::theme::border())
+        .text_size(px(13.))
         .text_color(theme.foreground)
         .child(div().child(label))
         .child(
             div()
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .text_color(theme.muted_foreground)
                 .child(sub),
         )
@@ -3335,27 +3352,26 @@ where
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let fg = theme.foreground;
-    let hover_bg = theme.list_hover;
+    let hover_bg = crate::theme::field();
     h_flex()
         .id(id)
         .flex_none()
-        .h(px(20.))
-        .px(px(6.))
-        .gap(px(4.))
+        .h(px(26.))
+        .px(px(8.))
+        .gap(px(6.))
         .items_center()
-        .rounded(px(3.))
-        .text_size(px(11.))
+        .rounded(px(6.))
+        .text_size(px(12.5))
         .text_color(muted)
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg).text_color(fg))
         .active(move |s| s.bg(crate::theme::element_active()).text_color(fg))
         .on_click(on_click)
-        .child(Icon::new(IconName::ArrowLeft).size(px(11.)))
+        .child(Icon::new(IconName::ArrowLeft).size(px(14.)))
         .child("Back")
 }
 
 fn code_block(content: &str, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
     let text_editor = crate::theme::text_editor();
     let yellow = crate::theme::yellow();
     let yellow_bg = yellow.opacity(0.08);
@@ -3382,12 +3398,12 @@ fn code_block(content: &str, cx: &App) -> impl IntoElement {
     });
 
     v_flex()
-        .p(px(10.))
-        .rounded(px(3.))
+        .p(px(12.))
+        .rounded(px(8.))
         .bg(crate::theme::surface_sunken())
         .border_1()
-        .border_color(theme.title_bar_border)
-        .text_size(px(12.))
+        .border_color(crate::theme::border())
+        .text_size(px(13.))
         .line_height(px(18.))
         .font_family(Preferences::terminal_font(cx).family())
         .children(lines)
@@ -3442,22 +3458,25 @@ fn select_chip(
     let accent = theme.primary;
     h_flex()
         .id(id)
-        .h(px(18.))
-        .px(px(6.))
+        .h(px(26.))
+        .px(px(9.))
         .items_center()
-        .rounded(px(3.))
+        .rounded(px(6.))
         .border_1()
         .border_color(if active {
             accent
         } else {
-            theme.title_bar_border
+            crate::theme::border()
         })
         .bg(if active {
             crate::theme::accent_soft()
         } else {
-            theme.input
+            crate::theme::field()
         })
-        .text_size(px(11.))
+        .when(!active, |el| {
+            el.hover(|s| s.bg(crate::theme::element_hover()))
+        })
+        .text_size(px(12.5))
         .text_color(if active {
             theme.foreground
         } else {
@@ -3476,14 +3495,14 @@ fn radio_row(
 ) -> gpui::Stateful<gpui::Div> {
     h_flex()
         .id(id)
-        .h(px(20.))
-        .gap(px(6.))
+        .h(px(28.))
+        .gap(px(10.))
         .items_center()
         .cursor_pointer()
         .child(radio_dot(active, cx))
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(px(13.))
                 .text_color(cx.theme().foreground)
                 .child(label.into()),
         )
@@ -3494,15 +3513,15 @@ fn proxy_kind_pill(kind: ProxyKind, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .flex_none()
-        .h(px(16.))
-        .px(px(5.))
+        .h(px(20.))
+        .px(px(6.))
         .flex()
         .items_center()
-        .rounded(px(3.))
-        .bg(theme.input)
+        .rounded(px(5.))
+        .bg(crate::theme::field())
         .border_1()
-        .border_color(theme.title_bar_border)
-        .text_size(px(10.))
+        .border_color(crate::theme::border())
+        .text_size(px(11.5))
         .text_color(theme.foreground)
         .child(kind.display_label())
 }

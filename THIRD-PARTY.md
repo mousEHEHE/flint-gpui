@@ -12,6 +12,10 @@ The icons in `assets/icons/` are from [Lucide](https://lucide.dev), except
 © Lucide Icons and Contributors. Some of its icons come from Feather,
 © Cole Bemis, MIT License. Full text: `assets/icons/LUCIDE-LICENSE.txt`.
 
+The marks in `assets/icons/distro/` are from [Simple Icons](https://simpleicons.org),
+CC0 1.0. They name the operating system a host runs; the brands belong to
+their owners.
+
 `gpui-kit-assets` embeds its own icon set, which is mostly Lucide icons under
 the same license.
 

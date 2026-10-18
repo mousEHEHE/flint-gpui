@@ -18,7 +18,7 @@ use gpui_component::{
 
 use crate::theme as flint_theme;
 use crate::ui::keyboard_layout::bind_chord;
-use crate::ui::terminal_view::TerminalView;
+use crate::ui::terminal_view::{TerminalView, SIDE_PADDING};
 
 actions!(
     terminal_search,
@@ -250,7 +250,7 @@ impl TerminalView {
                 .top(px(8.))
                 // Clear of the scrollbar's grab band on the right edge, or the
                 // bar's hitbox would swallow clicks meant for the thumb.
-                .right(px(20.))
+                .right(px(20. + SIDE_PADDING))
                 .w(px(300.))
                 .items_center()
                 .gap(px(6.))

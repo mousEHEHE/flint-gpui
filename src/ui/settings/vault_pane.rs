@@ -408,14 +408,14 @@ impl VaultPane {
             .w(px(300.))
             .child(
                 div()
-                    .text_size(px(10.5))
+                    .text_size(px(11.5))
                     .text_color(theme.muted_foreground)
                     .child("Enter your master password to confirm."),
             )
             .child(Input::new(&self.delete_password).small().mask_toggle())
             .children(self.delete_error.clone().map(|message| {
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(theme.danger)
                     .child(message)
             }))
@@ -566,7 +566,7 @@ impl Render for VaultPane {
 
         let heading = |text: &'static str| {
             div()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
@@ -574,7 +574,7 @@ impl Render for VaultPane {
         let caption = |text: &'static str| {
             div()
                 .max_w(px(520.))
-                .text_size(px(10.5))
+                .text_size(px(11.5))
                 .text_color(muted_fg)
                 .child(text)
         };
@@ -589,13 +589,13 @@ impl Render for VaultPane {
             ChangeStatus::Idle | ChangeStatus::Working => None,
             ChangeStatus::Changed => Some(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(theme.success)
                     .child("Master password changed. Use it the next time you unlock."),
             ),
             ChangeStatus::Failed(message) => Some(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(theme.danger)
                     .child(message.clone()),
             ),
@@ -606,9 +606,9 @@ impl Render for VaultPane {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(crate::theme::modal_surface())
-            .p(px(10.))
-            .gap(px(8.))
+            .px(px(20.))
+            .pb(px(20.))
+            .gap(px(12.))
             .child(heading("Lock"))
             .child(caption(
                 "Clears the vault key from memory. Open sessions stay connected behind the lock \
@@ -672,7 +672,7 @@ impl Render for VaultPane {
                     .child(Input::new(&self.phrase_password).small().mask_toggle())
                     .children(self.phrase_error.clone().map(|message| {
                         div()
-                            .text_size(px(11.))
+                            .text_size(px(12.))
                             .text_color(theme.danger)
                             .child(message)
                     }))

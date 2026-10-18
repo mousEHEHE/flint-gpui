@@ -10,12 +10,15 @@ use gpui_component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, Icon, I
 use uuid::Uuid;
 
 use crate::theme as flint_theme;
+use crate::ui::app_view::ToggleSettings;
 use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use crate::ui::host_sharing;
+use crate::ui::shortcut_hints;
 use crate::ui::VaultState;
 use crate::vault::ServerEntrySummary;
 
-const SIDEBAR_WIDTH: f32 = 224.;
+const SIDEBAR_WIDTH: f32 = 232.;
+const ROW_HEIGHT: f32 = 28.;
 const SIDEBAR_GROUP: &str = "sidebar-host-row";
 /// Cap on how many closed-but-recent hosts the RECENT zone shows. The full
 /// catalog lives behind the "All hosts" button, so this stays a short list.
@@ -42,6 +45,8 @@ pub enum SidebarEvent {
     ShowAllServers,
     EditServerRequested(Uuid),
     DeleteServerRequested(Uuid),
+    SettingsRequested,
+    FeedbackRequested,
 }
 
 pub struct Sidebar {
@@ -101,14 +106,20 @@ impl Sidebar {
         status: HostStatus,
         compact: bool,
         show_close: bool,
+        shortcut: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // While the shortcut hints show, the tab number takes the place of the
+        // subtitle and the row controls.
+        let hint = shortcut.filter(|_| shortcut_hints::is_shown(cx));
         let theme = cx.theme();
         let bg_element_hover = theme.list_hover;
         let bg_element_active = theme.list_active;
         let text = theme.foreground;
+        let text_muted = theme.muted_foreground;
         let text_dim = flint_theme::text_dim();
-        let accent_soft = flint_theme::accent_soft();
+        let row_hover = flint_theme::field();
+        let row_selected = flint_theme::element();
         let status_online = flint_theme::status_online();
         let status_connecting = theme.warning;
         let status_down = theme.danger;
@@ -126,30 +137,29 @@ impl Sidebar {
         let is_active = self.active_server_id.as_deref() == Some(entry_id_str.as_str());
         let group_id: SharedString = format!("{SIDEBAR_GROUP}-{ui_idx}").into();
 
-        let label_color = if compact { text_dim } else { text };
+        let label_color = if compact { text_muted } else { text };
 
         let dot_color = match status {
             HostStatus::Connected => status_online,
             HostStatus::Connecting => status_connecting,
             HostStatus::Disconnected => status_down,
-            // Recent rows have no live state; the empty slot keeps labels aligned.
-            HostStatus::Offline => gpui::transparent_black(),
+            HostStatus::Offline => flint_theme::status_off(),
         };
-        let dot = div().size(px(5.)).flex_none().rounded_full().bg(dot_color);
+        let dot = div().size(px(6.)).flex_none().rounded_full().bg(dot_color);
 
         h_flex()
             .id(("sidebar-host", ui_idx))
             .group(group_id.clone())
             .relative()
-            .h(px(24.))
-            .gap(px(6.))
-            .px(px(6.))
-            .rounded(px(4.))
+            .h(px(ROW_HEIGHT))
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(6.))
             .items_center()
             .cursor_pointer()
-            .when(is_active, |el| el.bg(accent_soft))
+            .when(is_active, |el| el.bg(row_selected))
             .when(!is_active, |el| {
-                el.hover(|s| s.bg(bg_element_hover))
+                el.hover(|s| s.bg(row_hover))
                     .active(|s| s.bg(bg_element_active))
             })
             .child(dot)
@@ -167,7 +177,7 @@ impl Sidebar {
                         div()
                             .min_w_0()
                             .text_color(label_color)
-                            .text_size(px(12.5))
+                            .text_size(px(13.))
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .truncate()
@@ -190,10 +200,10 @@ impl Sidebar {
                 div()
                     .flex_none()
                     .text_color(text_dim)
-                    .text_size(px(10.5))
+                    .text_size(px(11.5))
                     .whitespace_nowrap()
                     .group_hover(group_id.clone(), |s| s.invisible())
-                    .when(is_active, |el| el.invisible())
+                    .when(is_active || hint.is_some(), |el| el.invisible())
                     .child(subtitle),
             )
             .child(
@@ -203,7 +213,10 @@ impl Sidebar {
                     .flex_none()
                     .gap(px(1.))
                     .items_center()
-                    .when(show_close, |row| {
+                    .when_some(hint.clone(), |row, keys| {
+                        row.child(shortcut_hints::badge(keys))
+                    })
+                    .when(show_close && hint.is_none(), |row| {
                         row.child(
                             div()
                                 .id(("sidebar-host-close", ui_idx))
@@ -233,7 +246,9 @@ impl Sidebar {
                                 .child(Icon::new(IconName::Close).size(px(10.))),
                         )
                     })
-                    .child(self.host_more_menu(ui_idx, entry_id, show_close, cx)),
+                    .when(hint.is_none(), |row| {
+                        row.child(self.host_more_menu(ui_idx, entry_id, show_close, cx))
+                    }),
             )
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::OpenServer(entry_id));
@@ -373,17 +388,119 @@ impl Sidebar {
     }
 }
 
+/// Small heading over a group of sidebar rows.
+fn section_label(text: &'static str) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(26.))
+        .px(px(8.))
+        .pb(px(4.))
+        .flex()
+        .items_end()
+        .text_size(px(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(flint_theme::text_dim())
+        .child(text)
+        .into_any_element()
+}
+
+impl Sidebar {
+    /// The way back to the full list of hosts. Selected while no session is
+    /// in front.
+    fn all_hosts_row(&self, host_count: usize, cx: &mut Context<Self>) -> AnyElement {
+        let is_active = self.active_server_id.is_none();
+        let text = cx.theme().foreground;
+        let icon_color = if is_active {
+            flint_theme::accent()
+        } else {
+            cx.theme().muted_foreground
+        };
+        h_flex()
+            .id("sidebar-all-hosts")
+            .h(px(ROW_HEIGHT))
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(text)
+            .when(is_active, |el| el.bg(flint_theme::element()))
+            .when(!is_active, |el| {
+                el.hover(|s| s.bg(flint_theme::field()))
+                    .active(|s| s.bg(flint_theme::element_active()))
+            })
+            .child(
+                Icon::empty()
+                    .path("icons/servers.svg")
+                    .size(px(14.))
+                    .text_color(icon_color),
+            )
+            .child(div().flex_1().child("All hosts"))
+            // On the selected fill the dim colour falls below AA contrast.
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(if is_active {
+                        cx.theme().muted_foreground
+                    } else {
+                        flint_theme::text_dim()
+                    })
+                    .child(host_count.to_string()),
+            )
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowAllServers)))
+            .into_any_element()
+    }
+
+    /// A square, quiet icon button for the footer. With `action` the tooltip
+    /// also shows that action's shortcut.
+    fn footer_icon_button(
+        &self,
+        id: &'static str,
+        icon: Icon,
+        tooltip: &'static str,
+        action: Option<&'static dyn gpui::Action>,
+        hint: Option<&'static str>,
+        event: fn() -> SidebarEvent,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hint = hint.filter(|_| shortcut_hints::is_shown(cx));
+        let muted = cx.theme().muted_foreground;
+        let text = cx.theme().foreground;
+        div()
+            .id(id)
+            .relative()
+            .flex_none()
+            .size(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.))
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |s| s.bg(flint_theme::field()).text_color(text))
+            .active(|s| s.bg(flint_theme::element_active()))
+            .tooltip(move |window, cx| {
+                let tip = Tooltip::new(tooltip);
+                match action {
+                    Some(action) => tip.action(action, None),
+                    None => tip,
+                }
+                .build(window, cx)
+            })
+            .child(icon.size(px(15.)))
+            .when_some(hint, |el, keys| {
+                el.child(shortcut_hints::corner_badge(keys))
+            })
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(event())))
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-
-        let bg_elevated = theme.title_bar;
-        let bg_element = theme.input;
-        let bg_element_hover = theme.list_hover;
-        let border = theme.title_bar_border;
-        let border_focused = flint_theme::border_focused();
+        let bg = theme.sidebar;
         let text = theme.foreground;
-        let text_muted = theme.muted_foreground;
         let text_dim = flint_theme::text_dim();
 
         let entries = self
@@ -405,14 +522,15 @@ impl Render for Sidebar {
         recents.sort_by_key(|e| std::cmp::Reverse(e.last_opened_at));
         recents.truncate(RECENT_LIMIT);
 
-        let has_open = !self.sessions.is_empty();
-        let has_recent = !recents.is_empty();
-
-        let mut content: Vec<AnyElement> = Vec::new();
+        let mut content: Vec<AnyElement> = vec![self.all_hosts_row(entries.len(), cx)];
         let mut ui_idx = 0usize;
 
         // Open sessions first, in tab order.
-        for (id, status) in &self.sessions {
+        if !self.sessions.is_empty() {
+            content.push(section_label("Open"));
+        }
+        // Cmd+1 to Cmd+9 follow this order: it is the tab order.
+        for (tab_index, (id, status)) in self.sessions.iter().enumerate() {
             let Some(e) = by_id.get(id) else { continue };
             let sub: SharedString = match status {
                 HostStatus::Connected => "",
@@ -421,44 +539,34 @@ impl Render for Sidebar {
                 HostStatus::Offline => "offline",
             }
             .into();
-            content.push(self.host_row(ui_idx, e, sub, *status, false, true, cx));
+            let shortcut = shortcut_hints::tab_key(tab_index);
+            content.push(self.host_row(ui_idx, e, sub, *status, false, true, shortcut, cx));
             ui_idx += 1;
         }
 
-        if has_open && has_recent {
-            content.push(
-                div()
-                    .flex_none()
-                    .h(px(24.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(10.))
-                    .text_color(text_dim)
-                    .child("RECENT")
-                    .into_any_element(),
-            );
+        if !recents.is_empty() {
+            content.push(section_label("Recent"));
         }
-
         for e in &recents {
             let sub: SharedString = e
                 .last_opened_at
                 .map(|t| relative_time(t, now))
                 .unwrap_or_default()
                 .into();
-            content.push(self.host_row(ui_idx, e, sub, HostStatus::Offline, true, false, cx));
+            content.push(self.host_row(ui_idx, e, sub, HostStatus::Offline, true, false, None, cx));
             ui_idx += 1;
         }
 
         // Nothing open and nothing recent: a quiet hint, never the full catalog.
-        if content.is_empty() {
+        if self.sessions.is_empty() && recents.is_empty() && !entries.is_empty() {
             content.push(
                 div()
-                    .h(px(24.))
-                    .px(px(6.))
+                    .h(px(ROW_HEIGHT))
+                    .px(px(8.))
+                    .mt(px(6.))
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(12.))
                     .text_color(text_dim)
                     .child("No recent hosts")
                     .into_any_element(),
@@ -469,88 +577,73 @@ impl Render for Sidebar {
             .w(px(SIDEBAR_WIDTH))
             .flex_none()
             .h_full()
-            .bg(bg_elevated)
-            .border_r_1()
-            .border_color(border)
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(24.))
-                    .px(px(10.))
-                    .child(div().text_color(text_dim).text_size(px(10.)).child("HOSTS")),
-            )
+            .bg(bg)
             .child(
                 v_flex()
                     .id("sidebar-list")
                     .flex_1()
                     .overflow_y_scroll()
                     .pb(px(4.))
-                    .px(px(4.))
+                    .px(px(8.))
                     .children(content),
             )
             .child(
                 h_flex()
-                    .border_t_1()
-                    .border_color(border)
-                    .h(px(32.))
-                    .px(px(4.))
-                    .gap(px(6.))
+                    .h(px(46.))
+                    .px(px(8.))
+                    .gap(px(4.))
                     .items_center()
                     .child(
                         h_flex()
                             .id("sb-btn-new-host")
+                            .relative()
                             .flex_1()
-                            .h(px(24.))
+                            .h(px(30.))
                             .px(px(10.))
                             .gap(px(6.))
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(border_focused)
-                            .bg(bg_element)
-                            .text_size(px(11.5))
-                            .text_color(text_muted)
+                            .rounded(px(7.))
+                            .bg(flint_theme::field())
+                            .text_size(px(13.))
+                            .text_color(text)
                             .cursor_pointer()
-                            .hover(|s| s.bg(bg_element_hover).text_color(text))
+                            .hover(|s| s.bg(flint_theme::element()))
                             .active(|s| s.bg(flint_theme::element_active()))
-                            .child(Icon::new(IconName::Plus).size(px(12.)))
+                            .child(Icon::new(IconName::Plus).size(px(13.)))
                             .child(div().child("New host"))
+                            .when(shortcut_hints::is_shown(cx), |el| {
+                                el.child(shortcut_hints::corner_badge(shortcut_hints::NEW_HOST))
+                            })
                             .on_click(
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(SidebarEvent::AddServerRequested)
                                 }),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("sb-btn-all-servers")
-                            .flex_none()
-                            .w(px(26.))
-                            .h(px(24.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .bg(bg_element)
-                            .border_1()
-                            .border_color(border_focused)
-                            .text_color(text_muted)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(bg_element_hover).text_color(text))
-                            .active(|s| s.bg(flint_theme::element_active()).text_color(text))
-                            .tooltip(|window, cx| Tooltip::new("All hosts").build(window, cx))
-                            .child(Icon::empty().path("icons/servers.svg").size(px(14.)))
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ShowAllServers)),
-                            ),
-                    ),
+                    .child(self.footer_icon_button(
+                        "sb-btn-feedback",
+                        Icon::empty().path("icons/message-square.svg"),
+                        "Send feedback",
+                        None,
+                        None,
+                        || SidebarEvent::FeedbackRequested,
+                        cx,
+                    ))
+                    .child(self.footer_icon_button(
+                        "sb-btn-settings",
+                        Icon::new(IconName::Settings),
+                        "Settings",
+                        Some(&ToggleSettings),
+                        Some(shortcut_hints::SETTINGS),
+                        || SidebarEvent::SettingsRequested,
+                        cx,
+                    )),
             )
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -558,7 +651,7 @@ fn unix_now() -> i64 {
 }
 
 /// Compact relative-time label ("just now", "5m ago", "yesterday", "3d ago").
-fn relative_time(ts: i64, now: i64) -> String {
+pub(crate) fn relative_time(ts: i64, now: i64) -> String {
     let d = (now - ts).max(0);
     if d < 60 {
         "just now".to_string()

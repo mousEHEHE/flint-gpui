@@ -22,12 +22,14 @@ use crate::connection::Connection;
 use crate::file_associations::SharedFileAssociations;
 use crate::file_edit::{FileEditSession, SyncState};
 use crate::file_open::OpenError;
+use crate::preferences::{Preferences, TerminalPosition};
 use crate::ssh::{
     CancelFlag, DownloadResult, FileEntry, SftpEvent, SftpHandle, StageItem, TransferOutcome,
 };
+use crate::theme;
 use crate::ui::file_pane::{
-    source_pill, DraggedEntry, EntryRef, FilePane, FilePaneEvent, PaneKind, SourcePillClick,
-    StagedFile, SyncIndicator,
+    source_icon, source_pill, DraggedEntry, EntryRef, FilePane, FilePaneEvent, PaneKind,
+    SourcePillClick, StagedFile, SyncIndicator,
 };
 use crate::ui::file_pane_keys::{pane_command, PaneCommand, SwitchPane, KEY_CONTEXT};
 use crate::ui::transfer_conflict::{
@@ -605,6 +607,23 @@ impl SftpBrowser {
             return Some(&self.local_pane);
         }
         self.side(Side::Left).map(|remote| &remote.pane)
+    }
+
+    /// Show the left half if it is hidden. The choice is saved, like the
+    /// header's switch.
+    fn reveal_second_pane(&mut self, cx: &mut Context<Self>) {
+        if Preferences::is_second_pane_shown(cx) {
+            return;
+        }
+        Preferences::update(cx, |prefs| prefs.is_second_pane_shown = true);
+        cx.notify();
+    }
+
+    /// The other server in the left half, if one was chosen instead of this
+    /// computer. Named on the switch that shows the half.
+    pub fn left_source_name(&self) -> Option<String> {
+        let slot = self.peer.as_ref()?;
+        Some(slot.connection.display_name().to_string())
     }
 
     /// The handle that holds the keys when they are in the left half.
@@ -1243,7 +1262,9 @@ impl SftpBrowser {
                 }
             }
             FilePaneEvent::TransferRequested { paths } => {
-                // Into the folder the other pane shows.
+                // Into the folder the other pane shows, so that pane must be
+                // on screen for the user to see where the files went.
+                self.reveal_second_pane(cx);
                 let Some(to) = self.opposite(Endpoint::Server(side)) else {
                     cx.emit(BrowserEvent::StatusChanged(LEFT_NOT_CONNECTED.to_string()));
                     return;
@@ -2553,6 +2574,10 @@ impl SftpBrowser {
     /// Tab in a file list or on the placeholder: move the keys to the other
     /// half.
     fn on_switch_pane(&mut self, _: &SwitchPane, window: &mut Window, cx: &mut Context<Self>) {
+        // A hidden half cannot take the keys.
+        if !Preferences::is_second_pane_shown(cx) {
+            return;
+        }
         let left = self.left_focus_handle(cx);
         let target = if left.contains_focused(window, cx) {
             self.right.pane.focus_handle(cx)
@@ -2594,17 +2619,30 @@ impl Render for SftpBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_peer_password_input(window, cx);
         self.move_left_focus(window, cx);
+        let root = div()
+            .size_full()
+            .flex()
+            .overflow_hidden()
+            .on_action(cx.listener(Self::on_switch_pane));
+        if !Preferences::is_second_pane_shown(cx) {
+            return root.child(self.right.pane.clone());
+        }
+
         let left: AnyElement = match self.left_pane() {
             Some(pane) => pane.clone().into_any_element(),
             None => self.render_peer_placeholder(cx),
         };
-
-        h_flex()
-            .size_full()
-            .overflow_hidden()
-            .on_action(cx.listener(Self::on_switch_pane))
-            .child(left)
-            .child(div().w(px(1.)).h_full().bg(cx.theme().title_bar_border))
+        // Next to the terminal the panes are narrow, so they go one above
+        // the other.
+        let is_stacked = Preferences::terminal_position(cx) == TerminalPosition::Beside;
+        let divider = div().flex_none().bg(theme::border());
+        let (root, divider) = if is_stacked {
+            (root.flex_col(), divider.h(px(1.)).w_full())
+        } else {
+            (root.flex_row(), divider.w(px(1.)).h_full())
+        };
+        root.child(left)
+            .child(divider)
             .child(self.right.pane.clone())
     }
 }
@@ -2624,13 +2662,17 @@ impl SftpBrowser {
             cx.emit(BrowserEvent::LeftSourcePickerRequested);
         }));
         let header = h_flex()
-            .h(px(28.))
-            .px(px(8.))
+            .h(px(38.))
+            .flex_none()
+            .px(px(6.))
             .items_center()
-            .border_b_1()
-            .border_color(theme.title_bar_border)
-            .bg(theme.tab_bar)
-            .child(source_pill(name.clone().into(), Some(pick_source), cx));
+            .child(source_pill(
+                source_icon(PaneKind::Peer),
+                name.clone().into(),
+                false,
+                Some(pick_source),
+                cx,
+            ));
 
         let use_local = Button::new("peer-use-local")
             .ghost()

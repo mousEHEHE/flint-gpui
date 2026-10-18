@@ -5,8 +5,8 @@ use crate::theme as flint_theme;
 use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use gpui::prelude::*;
 use gpui::{
-    div, px, svg, Anchor, ClipboardItem, Context, Entity, EventEmitter, Focusable, MouseButton,
-    MouseDownEvent, Window,
+    div, px, svg, Anchor, App, ClipboardItem, Context, Entity, EventEmitter, Focusable,
+    MouseButton, MouseDownEvent, Window,
 };
 use gpui_component::{
     h_flex,
@@ -15,11 +15,16 @@ use gpui_component::{
 };
 use uuid::Uuid;
 
+use crate::ui::host_icon::{host_icon, TILE_SIZE};
 use crate::ui::host_sharing;
 use crate::ui::VaultState;
 use crate::vault::ServerEntrySummary;
 
 const SERVER_ROW_GROUP: &str = "server-row";
+const CARD_RADIUS: f32 = 10.;
+/// Where the line between two rows starts: past the host's tile, so the
+/// tiles stand in one column.
+const ROW_DIVIDER_INSET: f32 = 52.;
 
 #[cfg(target_os = "macos")]
 const ADD_HOST_HINT: &str = "or press Cmd+T to add a host";
@@ -33,6 +38,13 @@ fn ssh_config_offer(host_count: usize) -> Option<String> {
         1 => Some("Found 1 host in your SSH config".to_string()),
         count => Some(format!("Found {count} hosts in your SSH config")),
     }
+}
+
+/// Where a row sits in its card: the end rows round their corners.
+#[derive(Clone, Copy)]
+struct RowPlace {
+    is_first: bool,
+    is_last: bool,
 }
 
 pub enum ServersViewEvent {
@@ -158,11 +170,11 @@ impl ServersView {
 
         let trigger = div()
             .id(("server-row-more-btn", ix))
-            .size(px(18.))
+            .size(px(24.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
+            .rounded(px(6.))
             .border_1()
             .border_color(gpui::transparent_black())
             .text_color(if is_menu_open { fg } else { text_dim })
@@ -188,7 +200,7 @@ impl ServersView {
                     cx.notify();
                 }),
             )
-            .child(Icon::new(IconName::Ellipsis).size(px(12.)));
+            .child(Icon::new(IconName::Ellipsis).size(px(14.)));
 
         let sharing_items: Vec<ContextMenuItem> =
             host_sharing::menu_choices(&self.vault_state, id, cx)
@@ -257,44 +269,74 @@ impl ServersView {
     }
 
     /// Section heading for a host folder: name + count, quiet and small.
-    fn group_header(&self, name: &str, count: usize) -> gpui::AnyElement {
-        let text_dim = flint_theme::text_dim();
+    fn group_header(&self, name: &str, count: usize, cx: &App) -> gpui::AnyElement {
         h_flex()
             .w_full()
-            .h(px(22.))
-            .mt(px(6.))
-            .px(px(8.))
+            .h(px(32.))
+            .mt(px(8.))
+            .px(px(4.))
             .gap(px(6.))
             .items_center()
             .child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(text_dim)
-                    .child(name.to_uppercase()),
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(name.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(text_dim)
+                    .text_size(px(12.))
+                    .text_color(flint_theme::text_dim())
                     .child(format!("{count}")),
             )
             .into_any_element()
     }
 
-    /// One host in the list. A single 26px line: status, name, address, and
-    /// the OS/tag chips pushed to the right.
+    /// The hosts of one folder as a card, one row each.
+    fn host_card(
+        &self,
+        entries: Vec<ServerEntrySummary>,
+        first_ix: usize,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let count = entries.len();
+        let mut card = v_flex()
+            .w_full()
+            .rounded(px(CARD_RADIUS))
+            .border_1()
+            .border_color(flint_theme::border())
+            .bg(flint_theme::card());
+        for (pos, entry) in entries.into_iter().enumerate() {
+            let place = RowPlace {
+                is_first: pos == 0,
+                is_last: pos + 1 == count,
+            };
+            card = card.child(self.server_row(first_ix + pos, entry, place, now, cx));
+        }
+        card.into_any_element()
+    }
+
+    /// One host in a card: the system's mark with the session dot, name,
+    /// address, OS, tags, and when it was last opened. The "more" menu takes
+    /// the place of the time while the row is hovered.
     fn server_row(
         &self,
         ix: usize,
         entry: ServerEntrySummary,
+        place: RowPlace,
+        now: i64,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = cx.theme();
         let fg = theme.foreground;
+        let muted_fg = theme.muted_foreground;
         let text_dim = flint_theme::text_dim();
-        let list_hover = theme.list_hover;
-        let status_online = flint_theme::status_online();
-        let status_off = flint_theme::status_off();
+        let row_hover = flint_theme::field();
+        // A hovered row's fill is square, and gpui does not clip it to the
+        // card's corners, so the end rows round their own.
+        let inner_radius = px(CARD_RADIUS - 1.);
 
         let id = entry.id;
         let name = if entry.label.is_empty() {
@@ -302,7 +344,16 @@ impl ServersView {
         } else {
             entry.label.clone()
         };
-        let addr = format!("{}@{}:{}", entry.username, entry.host, entry.port);
+        // Port 22 is implied; only an unusual port is worth the space.
+        let addr = if entry.port == 22 {
+            format!("{}@{}", entry.username, entry.host)
+        } else {
+            format!("{}@{}:{}", entry.username, entry.host, entry.port)
+        };
+        let last_opened = entry
+            .last_opened_at
+            .map(|at| crate::ui::sidebar::relative_time(at, now))
+            .unwrap_or_default();
         // Detected OS (filled on connect); nothing shows until then.
         let os = entry.os.clone().filter(|os| !os.trim().is_empty());
         let tag_names = entry.tag_names.clone();
@@ -314,80 +365,130 @@ impl ServersView {
         h_flex()
             .id(("srow", ix))
             .group(group_id.clone())
+            .relative()
             .w_full()
-            .h(px(26.))
-            .px(px(8.))
-            .gap(px(8.))
+            .h(px(44.))
+            .px(px(12.))
+            .gap(px(12.))
             .items_center()
-            .rounded(px(4.))
+            .when(place.is_first, |row| row.rounded_t(inner_radius))
+            .when(place.is_last, |row| row.rounded_b(inner_radius))
             .cursor_pointer()
-            .hover(|s| s.bg(list_hover))
-            .when(is_menu_open, |el| el.bg(list_hover))
+            .hover(|s| s.bg(row_hover))
+            .when(is_menu_open, |el| el.bg(row_hover))
             .active(|s| s.bg(flint_theme::element_active()))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(ServersViewEvent::OpenServer(entry.clone()));
             }))
-            .child(
-                div()
-                    .size(px(5.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(if is_connected {
-                        status_online
-                    } else {
-                        status_off
-                    }),
-            )
+            .when(!place.is_first, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(ROW_DIVIDER_INSET))
+                        .right_0()
+                        .h(px(1.))
+                        .bg(flint_theme::border()),
+                )
+            })
+            .child(host_icon(
+                os.as_deref(),
+                is_connected,
+                flint_theme::card(),
+                TILE_SIZE,
+            ))
+            // Fixed widths keep the columns lined up from row to row; the
+            // spare room collects in the tags column, not between the texts.
             .child(
                 div()
                     .w(px(200.))
-                    .flex_none()
-                    .text_size(px(12.5))
+                    .flex_shrink(1.)
+                    .min_w(px(96.))
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(fg)
                     .truncate()
                     .child(name),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(11.))
+                    .w(px(240.))
+                    .flex_shrink(1.)
+                    .min_w(px(96.))
+                    .font_family(flint_theme::MONO_FONT)
+                    .text_size(px(12.))
                     .text_color(text_dim)
                     .truncate()
                     .child(addr),
             )
-            .children(os.map(|os| {
+            .child(
                 div()
-                    .flex_none()
-                    .text_size(px(10.5))
+                    .w(px(130.))
+                    .flex_shrink(1.)
+                    .min_w(px(60.))
+                    .text_size(px(12.))
                     .text_color(text_dim)
-                    .child(os)
-            }))
+                    .truncate()
+                    .children(os),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .items_center()
+                    .overflow_hidden()
+                    .children(tag_names.into_iter().map(|t| {
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(flint_theme::border())
+                            .bg(row_hover)
+                            .text_size(px(11.5))
+                            .text_color(muted_fg)
+                            .child(format!("#{t}"))
+                    })),
+            )
             .children(team_name.map(|team| {
                 h_flex()
                     .flex_none()
-                    .gap(px(3.))
+                    .gap(px(4.))
                     .items_center()
-                    .text_size(px(10.5))
+                    .text_size(px(12.))
                     .text_color(text_dim)
-                    .child(Icon::new(IconName::User).size(px(10.)))
+                    .child(Icon::new(IconName::User).size(px(11.)))
                     .child(team)
             }))
-            .children(tag_names.into_iter().map(|t| {
-                div()
-                    .flex_none()
-                    .text_size(px(10.5))
-                    .text_color(text_dim)
-                    .child(format!("#{t}"))
-            }))
+            // Trailing slot: when it was last opened, or the menu on hover.
             .child(
                 div()
+                    .relative()
+                    .w(px(64.))
                     .flex_none()
-                    .when(!is_menu_open, |el| {
-                        el.invisible()
-                            .group_hover(group_id.clone(), |s| s.visible())
-                    })
-                    .child(self.row_more_menu(ix, id, is_menu_open, cx)),
+                    .flex()
+                    .justify_end()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(text_dim)
+                            .whitespace_nowrap()
+                            .when(is_menu_open, |el| el.invisible())
+                            .group_hover(group_id.clone(), |s| s.invisible())
+                            .child(last_opened),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .when(!is_menu_open, |el| {
+                                el.invisible()
+                                    .group_hover(group_id.clone(), |s| s.visible())
+                            })
+                            .child(self.row_more_menu(ix, id, is_menu_open, cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -462,39 +563,48 @@ impl Render for ServersView {
         let search_text = self.search.clone();
 
         let theme = cx.theme();
-        let bg = theme.background;
-        let border = theme.title_bar_border;
         let fg = theme.foreground;
         let text_dim = flint_theme::text_dim();
         let muted_fg = theme.muted_foreground;
-        let bg_element = theme.input;
         let accent = theme.primary;
-        let accent_soft = flint_theme::accent_soft();
-        let accent_line = flint_theme::accent_line();
-        let border_focused = flint_theme::border_focused();
+        let accent_hover = theme.primary_hover;
+        let accent_active = theme.primary_active;
+        let accent_ink = theme.primary_foreground;
+        let field = flint_theme::field();
+        let selected_chip = flint_theme::element();
+        let host_count = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|vm| vm.list_entries().ok())
+            .map_or(0, |list| list.len());
 
+        // The one filled button on the screen.
         let add_server_btn = |id: &'static str| {
             h_flex()
                 .id(id)
-                .h(px(26.))
-                .pl(px(9.))
-                .pr(px(11.))
+                .h(px(28.))
+                .pl(px(10.))
+                .pr(px(12.))
                 .gap(px(6.))
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(accent_line)
-                .bg(accent_soft)
-                .text_size(px(11.5))
-                .text_color(accent)
+                .rounded(px(7.))
+                .bg(accent)
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(accent_ink)
                 .cursor_pointer()
-                .hover(move |s| s.bg(accent_soft).border_color(accent))
-                .active(move |s| s.bg(flint_theme::accent_soft_press()).border_color(accent))
+                .hover(move |s| s.bg(accent_hover))
+                .active(move |s| s.bg(accent_active))
                 .on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(ServersViewEvent::AddServerRequested);
                 }))
-                .child(Icon::new(IconName::Plus).size(px(12.)).text_color(accent))
+                .child(
+                    Icon::new(IconName::Plus)
+                        .size(px(13.))
+                        .text_color(accent_ink),
+                )
                 .child(div().child("New host"))
         };
 
@@ -504,23 +614,25 @@ impl Render for ServersView {
             .focus_handle(cx)
             .is_focused(window);
         let search_field = h_flex()
-            .flex_1()
-            .h(px(26.))
-            .pl(px(9.))
+            .w(px(240.))
+            .flex_shrink(1.)
+            .min_w(px(140.))
+            .h(px(28.))
+            .pl(px(10.))
             .pr(px(6.))
             .gap(px(7.))
             .items_center()
-            .rounded(px(4.))
-            .bg(bg_element)
+            .rounded(px(7.))
+            .bg(field)
             .border_1()
             .border_color(if search_focused {
                 accent
             } else {
-                border_focused
+                flint_theme::border()
             })
             .child(
                 Icon::new(IconName::Search)
-                    .size(px(12.))
+                    .size(px(13.))
                     .text_color(text_dim),
             )
             .child(
@@ -530,23 +642,25 @@ impl Render for ServersView {
                     .child(Input::new(&self.search_input).appearance(false)),
             );
 
+        // Filled and outlined at rest, so it reads as a button before the
+        // pointer gets there.
         let import_btn = |id: &'static str| {
             h_flex()
                 .id(id)
-                .h(px(26.))
+                .h(px(28.))
                 .px(px(10.))
                 .gap(px(6.))
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
+                .rounded(px(7.))
                 .border_1()
-                .border_color(border_focused)
-                .bg(bg_element)
-                .text_size(px(11.5))
-                .text_color(muted_fg)
+                .border_color(flint_theme::border())
+                .bg(field)
+                .text_size(px(13.))
+                .text_color(fg)
                 .cursor_pointer()
-                .hover(move |s| s.bg(flint_theme::element_hover()).text_color(fg))
-                .active(move |s| s.bg(flint_theme::element_active()).text_color(fg))
+                .hover(|s| s.bg(flint_theme::element_hover()))
+                .active(|s| s.bg(flint_theme::element_active()))
                 .on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(ServersViewEvent::ImportRequested);
                 }))
@@ -554,45 +668,68 @@ impl Render for ServersView {
 
         let header = h_flex()
             .w_full()
-            .px(px(8.))
-            .py(px(8.))
-            .gap(px(6.))
+            .pl(px(20.))
+            .pr(px(16.))
+            .pt(px(14.))
+            .pb(px(10.))
+            .gap(px(8.))
+            .items_center()
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("All hosts"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(text_dim)
+                    .child(host_count.to_string()),
+            )
+            .child(div().flex_1())
             .child(search_field)
-            .child(import_btn("import-hosts-header").child("Import"))
+            .child(
+                import_btn("import-hosts-header")
+                    .child(Icon::empty().path("icons/download.svg").size(px(14.)))
+                    .child("Import"),
+            )
             .child(add_server_btn("add-server-header"));
 
         // "All" resets, one group at a time, tags stack.
         let filter_bar = (!all_groups.is_empty() || !all_tags.is_empty()).then(|| {
+            // Every chip has a fill and an outline, so the bar reads as a row
+            // of buttons; the chosen one is a step lighter.
             let chip = |active: bool| {
                 h_flex()
-                    .h(px(20.))
-                    .px(px(7.))
-                    .gap(px(4.))
+                    .h(px(26.))
+                    .px(px(9.))
+                    .gap(px(5.))
                     .items_center()
                     .flex_none()
-                    .rounded(px(3.))
+                    .rounded(px(6.))
                     .border_1()
-                    .text_size(px(10.5))
+                    .text_size(px(12.5))
                     .cursor_pointer()
                     .map(move |el| {
                         if active {
-                            el.bg(accent_soft)
-                                .border_color(accent_line)
-                                .text_color(accent)
+                            el.bg(selected_chip)
+                                .border_color(selected_chip)
+                                .text_color(fg)
                         } else {
-                            el.bg(bg_element)
-                                .border_color(border)
+                            el.bg(field)
+                                .border_color(flint_theme::border())
                                 .text_color(muted_fg)
-                                .hover(move |s| s.text_color(fg).border_color(border_focused))
+                                .hover(move |s| s.bg(flint_theme::element_hover()).text_color(fg))
                         }
                     })
             };
 
             let mut bar = h_flex()
                 .w_full()
-                .px(px(8.))
-                .pb(px(8.))
-                .gap(px(4.))
+                .px(px(16.))
+                .pb(px(4.))
+                .gap(px(6.))
                 .flex_wrap()
                 .child(
                     chip(!has_filters)
@@ -624,8 +761,8 @@ impl Render for ServersView {
                         .child(
                             svg()
                                 .path("icons/folder.svg")
-                                .size(px(10.))
-                                .text_color(if active { accent } else { text_dim }),
+                                .size(px(12.))
+                                .text_color(if active { fg } else { text_dim }),
                         )
                         .child(group.clone()),
                 );
@@ -658,13 +795,14 @@ impl Render for ServersView {
                 .gap(px(8.))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(15.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(fg)
                         .child("No hosts yet"),
                 )
                 .map(|el| match ssh_config_offer(self.ssh_config_host_count) {
                     Some(offer) => el
-                        .child(div().text_size(px(12.)).text_color(muted_fg).child(offer))
+                        .child(div().text_size(px(13.)).text_color(muted_fg).child(offer))
                         .child(
                             h_flex()
                                 .gap(px(6.))
@@ -675,7 +813,7 @@ impl Render for ServersView {
                 })
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(12.))
                         .text_color(text_dim)
                         .child(ADD_HOST_HINT),
                 )
@@ -686,7 +824,7 @@ impl Render for ServersView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted_fg)
                 .child(if is_search_empty {
                     "No hosts match the current filters".to_string()
@@ -706,36 +844,39 @@ impl Render for ServersView {
             }
             let has_groups = !grouped.is_empty();
 
+            let now = crate::ui::sidebar::unix_now();
             let mut content: Vec<gpui::AnyElement> = Vec::new();
             let mut ix = 0usize;
             for (group_name, entries) in grouped {
-                content.push(self.group_header(&group_name, entries.len()));
-                for entry in entries {
-                    content.push(self.server_row(ix, entry, cx));
-                    ix += 1;
-                }
+                content.push(self.group_header(&group_name, entries.len(), cx));
+                let count = entries.len();
+                content.push(self.host_card(entries, ix, now, cx));
+                ix += count;
             }
 
-            // Ungrouped hosts get a heading only when folders render above.
-            if has_groups && !ungrouped.is_empty() {
-                content.push(self.group_header("Ungrouped", ungrouped.len()));
-            }
-            for entry in ungrouped {
-                content.push(self.server_row(ix, entry, cx));
-                ix += 1;
+            if !ungrouped.is_empty() {
+                // A heading only when folders render above; alone, the card
+                // just needs room under the filters.
+                if has_groups {
+                    content.push(self.group_header("Ungrouped", ungrouped.len(), cx));
+                } else {
+                    content.push(div().h(px(8.)).into_any_element());
+                }
+                content.push(self.host_card(ungrouped, ix, now, cx));
             }
 
             div()
                 .id("servers-list")
                 .flex_1()
                 .overflow_y_scroll()
-                .px(px(8.))
-                .pb(px(8.))
+                .px(px(16.))
+                .pb(px(16.))
                 .child(v_flex().w_full().children(content))
                 .into_any_element()
         };
 
-        div().size_full().bg(bg).child(
+        // No background of its own: the card it sits in paints it, rounded.
+        div().size_full().child(
             v_flex()
                 .size_full()
                 .child(header)

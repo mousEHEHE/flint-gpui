@@ -16,6 +16,9 @@ use crate::preferences::ThemePreference;
 /// One complete set of app colours. `DARK` and `LIGHT` are the only instances.
 struct Palette {
     // Surfaces and text
+    /// The window itself: title bar and sidebar. The working panel sits on it
+    /// as a rounded card, so the two read as separate layers without a line.
+    chrome: Hsla,
     /// The main ground the app sits on.
     background: Hsla,
     /// Raised chrome: title bar, sidebar, tab bar, panels.
@@ -33,6 +36,13 @@ struct Palette {
     /// Border for surfaces that float above the chrome, where `border` is too
     /// faint to read.
     border_focused: Hsla,
+    /// Outline of a modal card: the settings, the palette, dialogs. Lighter
+    /// than `border` so the card reads against the dimmed window.
+    float_border: Hsla,
+    /// Borderless fill for inputs, quiet buttons and hovered rows.
+    field: Hsla,
+    /// A group of rows set off from the panel, such as a folder of hosts.
+    card: Hsla,
     text: Hsla,
     text_muted: Hsla,
     text_dim: Hsla,
@@ -57,7 +67,6 @@ struct Palette {
     accent_ink: Hsla,
     accent_soft: Hsla,
     accent_soft_press: Hsla,
-    accent_line: Hsla,
 
     // Status
     status_off: Hsla,
@@ -111,14 +120,20 @@ struct Palette {
 /// Andromeda.
 #[rustfmt::skip]
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
+    chrome:                gpui::rgb(0x1B1D23).into(),
     background:            gpui::rgb(0x23262E).into(),
     surface:               gpui::rgb(0x2B303B).into(),
     surface_sunken:        gpui::rgb(0x1B1D23).into(),
     surface_float:         gpui::rgb(0x2B303B).into(),
-    modal_surface:         gpui::rgb(0x2B303B).into(),
-    modal_rail:            gpui::rgb(0x23262E).into(),
-    border:                gpui::rgb(0x1B1D23).into(),
+    modal_surface:         gpui::rgb(0x23262E).into(),
+    modal_rail:            gpui::rgb(0x1B1D23).into(),
+    // White at low alpha instead of a dark line: it separates without
+    // carving a groove into the surface.
+    border:                gpui::rgba(0xFFFFFF12).into(),
     border_focused:        gpui::rgb(0x746F77).into(),
+    float_border:          gpui::rgba(0xFFFFFF1C).into(),
+    field:                 gpui::rgba(0xFFFFFF0E).into(),
+    card:                  gpui::rgb(0x272A32).into(),
     text:                  gpui::rgb(0xE1DDE4).into(),
     text_muted:            gpui::rgb(0xADADAD).into(),
     text_dim:              gpui::rgb(0x9A9AA0).into(),
@@ -137,7 +152,6 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
     accent_ink:            gpui::rgb(0x051A27).into(),
     accent_soft:           gpui::rgba(0x74C7EC22).into(),
     accent_soft_press:     gpui::rgba(0x74C7EC33).into(),
-    accent_line:           gpui::rgba(0x74C7EC44).into(),
 
     status_off:            gpui::rgb(0x565A64).into(),
     conflict:              gpui::rgb(0xFAB387).into(),
@@ -184,6 +198,7 @@ static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
 /// test owns the matrix.
 #[rustfmt::skip]
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
+    chrome:                gpui::rgb(0xF1F3F7).into(),
     background:            gpui::rgb(0xFFFFFF).into(),
     surface:               gpui::rgb(0xF1F3F7).into(),
     surface_sunken:        gpui::rgb(0xE9ECF2).into(),
@@ -192,6 +207,9 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     modal_rail:            gpui::rgb(0xF1F3F7).into(),
     border:                gpui::rgb(0xD8DCE4).into(),
     border_focused:        gpui::rgb(0xB4BAC6).into(),
+    float_border:          gpui::rgb(0xCDD2DB).into(),
+    field:                 gpui::rgba(0x1C1F260A).into(),
+    card:                  gpui::rgb(0xF7F8FA).into(),
     text:                  gpui::rgb(0x1C1F26).into(),
     text_muted:            gpui::rgb(0x474D58).into(),
     text_dim:              gpui::rgb(0x5F6572).into(),
@@ -212,8 +230,6 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
     accent_ink:            gpui::rgb(0xFFFFFF).into(),
     accent_soft:           gpui::rgba(0x0B6C951C).into(),
     accent_soft_press:     gpui::rgba(0x0B6C952E).into(),
-    // A tinted border needs more alpha to read on a light ground than on a dark one.
-    accent_line:           gpui::rgba(0x0B6C9566).into(),
 
     status_off:            gpui::rgb(0xA3A9B5).into(),
     conflict:              gpui::rgb(0x9E4F0F).into(),
@@ -290,8 +306,36 @@ fn set_mode(mode: ThemeMode) {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
+/// The interface font. Monospace gives the app the feel of the terminal it
+/// sits next to; the terminal itself has its own font setting.
+pub const UI_FONT: &str = "Cascadia Code";
+
+/// Font for everything that is data rather than interface: addresses,
+/// paths, permissions. Kept apart from `UI_FONT` so data stays monospace
+/// whatever the interface uses.
+pub const MONO_FONT: &str = "Cascadia Code";
+
 pub fn text() -> Hsla {
     active().text
+}
+
+/// The window surface: title bar and sidebar.
+pub fn chrome() -> Hsla {
+    active().chrome
+}
+
+/// Borderless fill: inputs, quiet buttons, hovered rows on the chrome.
+pub fn field() -> Hsla {
+    active().field
+}
+
+pub fn card() -> Hsla {
+    active().card
+}
+
+/// Divider and panel outline.
+pub fn border() -> Hsla {
+    active().border
 }
 
 /// Placeholder text in inputs. No ThemeColor field exists for this.
@@ -322,6 +366,10 @@ pub fn surface_sunken() -> Hsla {
 /// Popover surface: tasks popover, terminal suggestions, search bar.
 pub fn pop_surface() -> Hsla {
     active().surface_float
+}
+
+pub fn float_border() -> Hsla {
+    active().float_border
 }
 
 /// The settings modal's content pane.
@@ -355,6 +403,11 @@ pub fn accent() -> Hsla {
     active().accent
 }
 
+/// Text and icons drawn on the accent colour.
+pub fn accent_ink() -> Hsla {
+    active().accent_ink
+}
+
 /// Accent soft tint: selected backgrounds.
 pub fn accent_soft() -> Hsla {
     active().accent_soft
@@ -363,11 +416,6 @@ pub fn accent_soft() -> Hsla {
 /// Accent pressed tint: pressed accent buttons.
 pub fn accent_soft_press() -> Hsla {
     active().accent_soft_press
-}
-
-/// Accent line: accent borders.
-pub fn accent_line() -> Hsla {
-    active().accent_line
 }
 
 /// Tasks-popover error red: failed run glyph/bar.
@@ -492,7 +540,7 @@ fn apply_theme(cx: &mut App) {
     let p = active();
     let t = Theme::global_mut(cx);
 
-    t.font_family = "Cascadia Code".into();
+    t.font_family = UI_FONT.into();
     // gpui-component sizes every stock control off the theme's font size: it
     // is the window's rem, so `h_6`, `px_2`, `text_sm` and friends all scale
     // with it. 16px puts a plain Input at 32px and `text_sm` at 14px, both a
@@ -539,7 +587,7 @@ fn apply_theme(cx: &mut App) {
     t.tab_active_foreground = p.text;
     t.tab_foreground        = p.text_muted;
 
-    t.title_bar        = p.surface;
+    t.title_bar        = p.chrome;
     t.title_bar_border = p.border;
 
     // `Theme.list` is `ListSettings`, so the colour only reaches the theme
@@ -581,7 +629,7 @@ fn apply_theme(cx: &mut App) {
 
     t.overlay = p.overlay;
 
-    t.sidebar                    = p.surface;
+    t.sidebar                    = p.chrome;
     t.sidebar_accent             = p.element_hover;
     t.sidebar_accent_foreground  = p.text;
     t.sidebar_border             = p.border;
@@ -711,6 +759,7 @@ mod tests {
         let p = &*LIGHT;
         let grounds = [
             ("background", p.background),
+            ("card", p.card),
             ("surface", p.surface),
             ("surface_sunken", p.surface_sunken),
             ("element", p.element),
@@ -748,7 +797,12 @@ mod tests {
     #[test]
     fn dark_text_roles_meet_wcag_aa() {
         let p = &*DARK;
-        let grounds = [("background", p.background), ("surface", p.surface)];
+        let grounds = [
+            ("chrome", p.chrome),
+            ("background", p.background),
+            ("card", p.card),
+            ("surface", p.surface),
+        ];
         let roles = [
             ("text", p.text),
             ("text_muted", p.text_muted),

@@ -4,14 +4,14 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, point, px, svg, Anchor, AnyElement, App, Bounds, Context, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, Window,
+    canvas, deferred, div, point, px, svg, Anchor, AnyElement, App, Bounds, Context, ElementId,
+    Entity, EventEmitter, FocusHandle, Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent,
+    Pixels, Point, SharedString, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
-    dialog::{DialogHeader, DialogTitle},
+    dialog::DialogHeader,
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     radio::{Radio, RadioGroup},
@@ -40,7 +40,7 @@ pub enum FormEvent {
     Cancelled,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum AuthMode {
     Password,
     PrivateKey,
@@ -86,6 +86,9 @@ pub struct ServerFormView {
     /// Snippet sent to the shell on every connect; `None` = nothing runs.
     selected_startup_snippet: Option<Uuid>,
     startup_dropdown_open: bool,
+    /// The jump host, the startup snippet and the forwards are folded away
+    /// unless the host uses one of them.
+    is_advanced_open: bool,
 
     /// Folder path as typed/picked ("infra / web"); empty = ungrouped.
     /// Resolved to group ids on submit, creating missing folders.
@@ -183,8 +186,16 @@ impl ServerFormView {
                     }
                     AuthMethod::Agent => (AuthMode::Agent, String::new(), None),
                 };
+                // A name that only repeats the address was filled in for a
+                // host saved without one: show it empty, so a new address
+                // renames the host too.
+                let label = if e.label == e.host {
+                    String::new()
+                } else {
+                    e.label.clone()
+                };
                 (
-                    e.label.clone(),
+                    label,
                     e.host.clone(),
                     e.port.to_string(),
                     e.username.clone(),
@@ -211,14 +222,15 @@ impl ServerFormView {
 
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("web-01")
+                .placeholder("Defaults to the host")
                 .default_value(SharedString::from(label))
         });
         let host_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("example.com or 10.0.0.5")
+                .placeholder("example.com, or paste user@host:port")
                 .default_value(SharedString::from(host))
         });
+
         let port_input =
             cx.new(|cx| InputState::new(window, cx).default_value(SharedString::from(port)));
         let user_input = cx.new(|cx| {
@@ -324,6 +336,9 @@ impl ServerFormView {
             selected_jump_id: prefill.as_ref().and_then(|e| e.jump_host),
             jump_dropdown_open: false,
             selected_startup_snippet: prefill.as_ref().and_then(|e| e.startup_snippet),
+            is_advanced_open: prefill.as_ref().is_some_and(|e| {
+                e.jump_host.is_some() || e.startup_snippet.is_some() || !e.forwards.is_empty()
+            }),
             startup_dropdown_open: false,
             group_input,
             tag_names,
@@ -359,6 +374,15 @@ impl ServerFormView {
             error: None,
             warning: None,
         }
+    }
+
+    /// Put the keys in the host field. Called once the dialog is open: the
+    /// dialog takes the focus when it opens and gives it back to whatever
+    /// had it before, so focusing earlier would hand it to a field that is
+    /// gone after the dialog closes.
+    pub fn focus_host(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.host_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Show a message the form could not know about: a vault write the
@@ -404,11 +428,6 @@ impl ServerFormView {
                 input.set_value(port.to_string(), window, cx)
             });
         }
-        if self.name_input.read(cx).value().trim().is_empty() {
-            self.name_input.update(cx, |input, cx| {
-                input.set_value(target.host.clone(), window, cx)
-            });
-        }
         if let Some(jump_id) = target.jump.and_then(|jump| self.saved_jump_host(&jump, cx)) {
             self.selected_jump_id = Some(jump_id);
         }
@@ -433,9 +452,8 @@ impl ServerFormView {
         let host = strip_whitespace(&self.host_input.read(cx).value());
         let port_str = strip_whitespace(&self.port_input.read(cx).value());
         let user = strip_whitespace(&self.user_input.read(cx).value());
-        let name = self.name_input.read(cx).value();
 
-        if host.is_empty() || user.is_empty() || name.trim().is_empty() {
+        if host.is_empty() || user.is_empty() {
             return false;
         }
         if port_str.parse::<u16>().map(|p| p < 1).unwrap_or(true) {
@@ -667,8 +685,15 @@ impl ServerFormView {
         // Pasted values often carry invisible whitespace (stray \r, \n, spaces).
         // Host/port/username can never legitimately contain any whitespace, so
         // strip all of it; the display name only gets leading/trailing trimmed.
-        let label = self.name_input.read(cx).value().trim().to_string();
         let host = strip_whitespace(&self.host_input.read(cx).value());
+        // Without a name the host is saved under its address. The vault and
+        // its messages expect a name, so it is filled in rather than left
+        // empty; the form shows it empty again (see `new`), so it follows the
+        // address when that is edited.
+        let label = match self.name_input.read(cx).value().trim() {
+            "" => host.clone(),
+            name => name.to_string(),
+        };
         let port: u16 = strip_whitespace(&self.port_input.read(cx).value())
             .parse()
             .unwrap_or(22);
@@ -872,14 +897,11 @@ impl Render for ServerFormView {
         }
 
         let theme = cx.theme();
-        let border = theme.border;
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
         let danger = theme.danger;
-        let list_hover = theme.list_hover;
-        let muted = theme.muted;
-        let radius = theme.radius;
-        let inner_radius = (radius - px(4.)).max(px(0.));
+        let list_hover = crate::theme::field();
+        let inner_radius = px(6.);
 
         let is_edit = matches!(self.mode, FormMode::Edit { .. });
         let is_valid = self.is_valid(cx);
@@ -945,12 +967,6 @@ impl Render for ServerFormView {
         let (jump_field, jump_popup) = self.render_jump_picker(cx);
         let (startup_field, startup_popup) = self.render_startup_snippet_picker(cx);
 
-        let selected_radio = match self.auth_mode {
-            AuthMode::Password => 0usize,
-            AuthMode::PrivateKey => 1usize,
-            AuthMode::Agent => 2usize,
-        };
-
         let group_focused = self
             .group_input
             .read(cx)
@@ -960,29 +976,28 @@ impl Render for ServerFormView {
         let group_highlight = self.group_highlight;
 
         let group_field = v_flex()
-            .gap_1()
+            .gap(px(6.))
             .capture_key_down(cx.listener(Self::on_group_key))
             .child(field_label("Group", cx))
             .child(Input::new(&self.group_input))
             .when(group_focused && !group_suggestions.is_empty(), |el| {
                 el.child(
                     v_flex()
-                        .mt(px(2.))
-                        .p(px(2.))
-                        .rounded(px(6.))
+                        .p(px(4.))
+                        .rounded(px(9.))
                         .border_1()
-                        .border_color(crate::theme::border_focused())
+                        .border_color(crate::theme::float_border())
                         .bg(crate::theme::pop_surface())
                         .children(group_suggestions.into_iter().enumerate().map(|(ix, path)| {
                             let value = path.clone();
                             h_flex()
                                 .id(("group-suggestion", ix))
-                                .h(px(22.))
-                                .px(px(6.))
-                                .gap(px(6.))
+                                .h(px(30.))
+                                .px(px(8.))
+                                .gap(px(8.))
                                 .items_center()
                                 .rounded(inner_radius)
-                                .text_size(px(12.))
+                                .text_size(px(13.))
                                 .text_color(fg)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(list_hover))
@@ -998,7 +1013,7 @@ impl Render for ServerFormView {
                                 .child(
                                     svg()
                                         .path("icons/folder.svg")
-                                        .size(px(10.))
+                                        .size(px(14.))
                                         .text_color(muted_fg),
                                 )
                                 .child(path)
@@ -1022,26 +1037,26 @@ impl Render for ServerFormView {
                 .gap(px(5.))
                 .children(self.tag_names.iter().enumerate().map(|(ix, name)| {
                     h_flex()
-                        .h(px(20.))
-                        .pl(px(7.))
-                        .pr(px(3.))
+                        .h(px(26.))
+                        .pl(px(9.))
+                        .pr(px(4.))
                         .gap(px(4.))
                         .items_center()
-                        .rounded(px(3.))
+                        .rounded(px(6.))
                         .border_1()
-                        .border_color(border)
-                        .bg(muted)
-                        .text_size(px(11.))
+                        .border_color(crate::theme::border())
+                        .bg(crate::theme::field())
+                        .text_size(px(12.5))
                         .text_color(fg)
                         .child(format!("#{name}"))
                         .child(
                             div()
                                 .id(("tag-remove", ix))
-                                .size(px(14.))
+                                .size(px(18.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(2.))
+                                .rounded(px(4.))
                                 .text_color(muted_fg)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(list_hover).text_color(fg))
@@ -1049,12 +1064,12 @@ impl Render for ServerFormView {
                                     this.tag_names.remove(ix);
                                     cx.notify();
                                 }))
-                                .child(Icon::new(IconName::Close).size(px(10.))),
+                                .child(Icon::new(IconName::Close).size(px(12.))),
                         )
                 }));
 
         let tags_field = v_flex()
-            .gap_1()
+            .gap(px(6.))
             .capture_key_down(cx.listener(Self::on_tag_key))
             .child(field_label("Tags", cx))
             .when(!self.tag_names.is_empty(), |el| el.child(chips))
@@ -1065,22 +1080,21 @@ impl Render for ServerFormView {
                 |el| {
                     el.child(
                         v_flex()
-                            .mt(px(2.))
-                            .p(px(2.))
-                            .rounded(px(6.))
+                            .p(px(4.))
+                            .rounded(px(9.))
                             .border_1()
-                            .border_color(crate::theme::border_focused())
+                            .border_color(crate::theme::float_border())
                             .bg(crate::theme::pop_surface())
                             // "Create" row first when the text is a new tag.
                             .when(!tag_text.is_empty() && !exact_match, |el| {
                                 el.child(
                                     h_flex()
                                         .id("tag-create")
-                                        .h(px(22.))
-                                        .px(px(6.))
+                                        .h(px(30.))
+                                        .px(px(8.))
                                         .items_center()
                                         .rounded(inner_radius)
-                                        .text_size(px(12.))
+                                        .text_size(px(13.))
                                         .text_color(fg)
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(list_hover))
@@ -1097,11 +1111,11 @@ impl Render for ServerFormView {
                                 let value = name.clone();
                                 h_flex()
                                     .id(("tag-suggestion", ix))
-                                    .h(px(22.))
-                                    .px(px(6.))
+                                    .h(px(30.))
+                                    .px(px(8.))
                                     .items_center()
                                     .rounded(inner_radius)
-                                    .text_size(px(12.))
+                                    .text_size(px(13.))
                                     .text_color(fg)
                                     .cursor_pointer()
                                     .hover(move |s| s.bg(list_hover))
@@ -1119,11 +1133,10 @@ impl Render for ServerFormView {
             );
 
         let auth_body: gpui::AnyElement = match self.auth_mode {
-            AuthMode::Password => v_flex()
-                .gap_1()
-                .child(field_label("Password", cx))
-                .child(Input::new(&self.pass_input).mask_toggle())
-                .into_any_element(),
+            AuthMode::Password => {
+                labeled("Password", cx, Input::new(&self.pass_input).mask_toggle())
+                    .into_any_element()
+            }
 
             AuthMode::PrivateKey => {
                 let display_label = match self.selected_key_id {
@@ -1143,7 +1156,7 @@ impl Render for ServerFormView {
                 };
 
                 v_flex()
-                    .gap_1()
+                    .gap(px(6.))
                     .child(field_label("SSH key", cx))
                     .child(dropdown_trigger(
                         "key-dropdown-btn",
@@ -1169,28 +1182,24 @@ impl Render for ServerFormView {
                         )
                     })
                     .child(
-                        div()
-                            .id("add-new-key-link")
-                            .h(px(20.))
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .text_color(muted_fg)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(fg))
-                            .active(|s| s.text_color(crate::theme::accent()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.form_state = FormState::AddingKey;
-                                this.addkey_error = None;
-                                cx.notify();
-                            }))
-                            .child("Add key…"),
+                        h_flex().child(
+                            Button::new("add-new-key-link")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Plus)
+                                .child("New key")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.form_state = FormState::AddingKey;
+                                    this.addkey_error = None;
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .into_any_element()
             }
 
             AuthMode::Agent => div()
-                .text_xs()
+                .text_size(px(12.))
                 .text_color(muted_fg)
                 .child(if cfg!(windows) {
                     "Keys are provided by the system SSH agent. The \
@@ -1203,112 +1212,181 @@ impl Render for ServerFormView {
                 .into_any_element(),
         };
 
-        v_flex()
-            .max_h(dialog_max_height(window))
-            .child(div().flex_none().px(px(12.)).pt(px(12.)).pb(px(8.)).child(
-                DialogHeader::new().child(DialogTitle::new().child(if is_edit {
-                    "Edit host"
+        let auth_switch = segmented(
+            "auth-mode",
+            &[
+                (AuthMode::Password, "Password"),
+                (AuthMode::PrivateKey, "SSH key"),
+                (AuthMode::Agent, "Agent"),
+            ],
+            self.auth_mode,
+            cx,
+            |this, mode, cx| {
+                this.auth_mode = mode;
+                this.key_dropdown_open = false;
+                cx.notify();
+            },
+        );
+
+        // User @ host : port, the order ssh writes it in. A pasted
+        // `user@host:port` in the host field is split across the three.
+        let address_row = h_flex()
+            .gap(px(8.))
+            .items_end()
+            .child(
+                labeled("User", cx, Input::new(&self.user_input))
+                    .w(px(150.))
+                    .flex_shrink(1.),
+            )
+            .child(address_separator("@"))
+            .child(
+                labeled("Host", cx, Input::new(&self.host_input))
+                    .flex_1()
+                    .min_w(px(120.)),
+            )
+            .child(address_separator(":"))
+            .child(
+                labeled("Port", cx, Input::new(&self.port_input))
+                    .w(px(76.))
+                    .flex_none(),
+            );
+
+        let advanced_summary = self.advanced_summary(cx);
+        let is_advanced_open = self.is_advanced_open;
+        let advanced_toggle = h_flex()
+            .id("advanced-toggle")
+            .w_full()
+            .h(px(32.))
+            .gap(px(8.))
+            .items_center()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.is_advanced_open = !this.is_advanced_open;
+                // A panel left open would hang where its field used to be.
+                this.close_dropdowns(cx);
+            }))
+            .child(
+                Icon::new(if is_advanced_open {
+                    IconName::ChevronDown
                 } else {
-                    "Add host"
-                })),
-            ))
+                    IconName::ChevronRight
+                })
+                .size(px(14.))
+                .text_color(muted_fg),
+            )
+            .child(section_title("Advanced", cx))
+            .when(!is_advanced_open, |el| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(crate::theme::text_dim())
+                        .child(advanced_summary),
+                )
+            });
+
+        let fields = v_flex()
+            .id("server-form-fields")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            // An open panel stays where its field was and is not clipped by
+            // the dialog, so it closes rather than float over the header.
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_dropdowns(cx)))
+            .px(px(16.))
+            .pt(px(4.))
+            .pb(px(16.))
+            .gap(px(20.))
             .child(
                 v_flex()
-                    .id("server-form-fields")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .gap(px(8.))
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(field_label("Name", cx))
-                            .child(Input::new(&self.name_input)),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(field_label("Host", cx))
-                            .child(Input::new(&self.host_input)),
-                    )
+                    .gap(px(12.))
+                    .child(section_title("Connection", cx))
+                    .child(address_row)
+                    .child(labeled("Name", cx, Input::new(&self.name_input))),
+            )
+            .child(
+                v_flex()
+                    .gap(px(12.))
                     .child(
                         h_flex()
-                            .gap_2()
-                            .child(
-                                v_flex()
-                                    .w(px(80.))
-                                    .gap_1()
-                                    .child(field_label("Port", cx))
-                                    .child(Input::new(&self.port_input)),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .gap_1()
-                                    .child(field_label("Username", cx))
-                                    .child(Input::new(&self.user_input)),
-                            ),
+                            .justify_between()
+                            .items_center()
+                            .child(section_title("Authentication", cx))
+                            .child(auth_switch),
                     )
-                    .child(
-                        v_flex()
-                            .gap(px(8.))
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(field_label("Authentication", cx))
-                                    .child(
-                                        RadioGroup::horizontal("auth-mode")
-                                            .selected_index(Some(selected_radio))
-                                            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                                this.auth_mode = match index {
-                                                    0 => AuthMode::Password,
-                                                    1 => AuthMode::PrivateKey,
-                                                    _ => AuthMode::Agent,
-                                                };
-                                                this.key_dropdown_open = false;
-                                                cx.notify();
-                                            }))
-                                            .child(Radio::new("auth-password").label("Password"))
-                                            .child(
-                                                Radio::new("auth-privatekey").label("Private key"),
-                                            )
-                                            .child(Radio::new("auth-agent").label("Agent")),
-                                    ),
-                            )
-                            .child(auth_body),
-                    )
-                    .child(jump_field)
-                    .child(group_field)
-                    .child(tags_field)
-                    .child(self.render_forwards_section(cx))
-                    .child(startup_field),
+                    .child(auth_body),
             )
+            .child(
+                v_flex()
+                    .gap(px(12.))
+                    .child(section_title("Organize", cx))
+                    .child(
+                        h_flex()
+                            .gap(px(12.))
+                            .items_start()
+                            .child(group_field.flex_1().min_w_0())
+                            .child(tags_field.flex_1().min_w_0()),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(12.))
+                    .child(advanced_toggle)
+                    .when(is_advanced_open, |el| {
+                        el.child(
+                            h_flex()
+                                .gap(px(12.))
+                                .items_start()
+                                .child(div().flex_1().min_w_0().child(jump_field))
+                                .child(div().flex_1().min_w_0().child(startup_field)),
+                        )
+                        .child(self.render_forwards_section(cx))
+                    }),
+            );
+
+        let footer_note = footer_message.or_else(|| {
+            self.missing_hint(cx)
+                .map(|hint| (hint.to_string(), crate::theme::text_dim()))
+        });
+
+        v_flex()
+            .max_h(dialog_max_height(window))
+            .child(
+                div().flex_none().px(px(16.)).pt(px(14.)).pb(px(12.)).child(
+                    DialogHeader::new().child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child(if is_edit { "Edit host" } else { "New host" }),
+                    ),
+                ),
+            )
+            .child(fields)
             .child(
                 // TODO security: input widget internals not zeroizable, see SECURITY.md
                 h_flex()
                     .flex_none()
-                    .gap_2()
+                    .gap(px(8.))
                     .justify_between()
                     .items_center()
-                    .px(px(12.))
-                    .pt(px(8.))
-                    .pb(px(12.))
+                    .px(px(16.))
+                    .py(px(12.))
                     .border_t_1()
-                    .border_color(border)
+                    .border_color(crate::theme::border())
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.))
-                            .when_some(footer_message, |el, (msg, color)| {
+                            .text_size(px(12.))
+                            .when_some(footer_note, |el, (msg, color)| {
                                 el.text_color(color).child(msg)
                             }),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(px(8.))
                             .child(Button::new("form-cancel").ghost().child("Cancel").on_click(
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(FormEvent::Cancelled);
@@ -1317,7 +1395,7 @@ impl Render for ServerFormView {
                             .child(
                                 Button::new("form-submit")
                                     .primary()
-                                    .child(if is_edit { "Save" } else { "Add" })
+                                    .child(if is_edit { "Save" } else { "Add host" })
                                     .disabled(!is_valid)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit(cx);
@@ -1333,6 +1411,77 @@ impl Render for ServerFormView {
 }
 
 impl ServerFormView {
+    fn close_dropdowns(&mut self, cx: &mut Context<Self>) {
+        if self.key_dropdown_open || self.jump_dropdown_open || self.startup_dropdown_open {
+            self.key_dropdown_open = false;
+            self.jump_dropdown_open = false;
+            self.startup_dropdown_open = false;
+            cx.notify();
+        }
+    }
+
+    /// What the folded "Advanced" section holds, in one line.
+    fn advanced_summary(&self, cx: &App) -> String {
+        let vault = self.vault_state.read(cx).manager();
+        // The same lookup as the jump field, so the two never disagree.
+        let edited_id = match self.mode {
+            FormMode::Edit { id, .. } => Some(id),
+            FormMode::Add => None,
+        };
+        let jump = match self.selected_jump_id {
+            None => "Direct connection".to_string(),
+            Some(id) => vault
+                .map(|vm| vm.list_jump_candidates(edited_id))
+                .and_then(|candidates| candidates.into_iter().find(|c| c.id == id))
+                .map(|candidate| {
+                    let name = if candidate.label.is_empty() {
+                        candidate.host
+                    } else {
+                        candidate.label
+                    };
+                    format!("Through {name}")
+                })
+                .unwrap_or_else(|| "Through a removed host".to_string()),
+        };
+        let forwards = match self.forwards.len() {
+            0 => "no forwards".to_string(),
+            1 => "1 forward".to_string(),
+            n => format!("{n} forwards"),
+        };
+        let startup = match self.selected_startup_snippet {
+            None => "no startup snippet".to_string(),
+            Some(id) => vault
+                .and_then(|vm| vm.list_snippets().ok())
+                .and_then(|snippets| snippets.into_iter().find(|s| s.id == id))
+                .map(|snippet| format!("runs {}", snippet.name))
+                .unwrap_or_else(|| "a removed snippet".to_string()),
+        };
+        format!("{jump} · {forwards} · {startup}")
+    }
+
+    /// Why "Add host" is greyed out, while it is.
+    fn missing_hint(&self, cx: &App) -> Option<&'static str> {
+        if strip_whitespace(&self.host_input.read(cx).value()).is_empty() {
+            return Some("Enter the host.");
+        }
+        if strip_whitespace(&self.user_input.read(cx).value()).is_empty() {
+            return Some("Enter the user.");
+        }
+        let port = strip_whitespace(&self.port_input.read(cx).value());
+        if port.parse::<u16>().map(|p| p < 1).unwrap_or(true) {
+            return Some("The port is a number from 1 to 65535.");
+        }
+        match self.auth_mode {
+            AuthMode::Password if self.pass_input.read(cx).value().is_empty() => {
+                Some("Enter the password.")
+            }
+            AuthMode::PrivateKey if self.selected_key_id.is_none() => {
+                Some("Choose a key or add one.")
+            }
+            _ => None,
+        }
+    }
+
     // Mirrors `SettingsView::render_add_key`.
     fn render_add_key_inline(
         &mut self,
@@ -1399,7 +1548,7 @@ impl ServerFormView {
             .id("addkey-form")
             .max_h(dialog_max_height(window))
             .overflow_y_scroll()
-            .p(px(12.))
+            .p(px(16.))
             .gap(px(8.))
             .child(
                 h_flex()
@@ -1414,7 +1563,7 @@ impl ServerFormView {
                         }),
                         cx,
                     ))
-                    .child(DialogTitle::new().child("Add SSH key")),
+                    .child(sub_view_title("Add SSH key", cx)),
             )
             .child(
                 v_flex()
@@ -1667,7 +1816,7 @@ impl ServerFormView {
         let jump_trigger: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
         let jump_field = v_flex()
-            .gap_1()
+            .gap(px(6.))
             .child(field_label("Jump host", cx))
             .child(dropdown_trigger(
                 "jump-dropdown-btn",
@@ -1792,7 +1941,7 @@ impl ServerFormView {
         let trigger: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
         let field = v_flex()
-            .gap_1()
+            .gap(px(6.))
             .child(field_label("Startup snippet", cx))
             .child(dropdown_trigger(
                 "startup-dropdown-btn",
@@ -1890,16 +2039,34 @@ impl ServerFormView {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
+        let count = self.forwards.len();
+        let inner_radius = px(8.);
 
         let rows = self.forwards.iter().enumerate().map(|(index, forward)| {
             let route = forward.spec().route_label();
+            let is_first = index == 0;
+            let is_last = index + 1 == count;
             h_flex()
                 .id(("forward-row", index))
-                .h(px(36.))
+                .relative()
+                .h(px(48.))
                 .items_center()
-                .gap(px(6.))
-                .px(px(6.))
-                .rounded(px(4.))
+                .gap(px(10.))
+                .px(px(12.))
+                .when(is_first, |row| row.rounded_t(inner_radius))
+                .when(is_last, |row| row.rounded_b(inner_radius))
+                .hover(|s| s.bg(crate::theme::field()))
+                .when(!is_first, |row| {
+                    row.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(12.))
+                            .right_0()
+                            .h(px(1.))
+                            .bg(crate::theme::border()),
+                    )
+                })
                 .child(forward_kind_pill(forward.kind, cx))
                 .child(
                     v_flex()
@@ -1908,11 +2075,11 @@ impl ServerFormView {
                         .gap(px(2.))
                         .child(
                             h_flex()
-                                .gap(px(5.))
+                                .gap(px(6.))
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(px(13.))
                                         .text_color(fg)
                                         .truncate()
                                         .child(SharedString::from(forward.name.clone())),
@@ -1920,21 +2087,25 @@ impl ServerFormView {
                                 .when(!is_loopback_bind(&forward.bind_address), |el| {
                                     el.child(
                                         div()
-                                            .text_size(px(10.))
+                                            .text_size(px(11.5))
                                             .text_color(crate::theme::warning())
                                             .child("public"),
                                     )
                                 })
                                 .when(forward.auto_start, |el| {
                                     el.child(
-                                        div().text_size(px(10.)).text_color(muted_fg).child("auto"),
+                                        div()
+                                            .text_size(px(11.5))
+                                            .text_color(muted_fg)
+                                            .child("auto"),
                                     )
                                 }),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(muted_fg)
+                                .font_family(crate::theme::MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(SharedString::from(route)),
                         ),
@@ -1960,25 +2131,41 @@ impl ServerFormView {
         });
 
         v_flex()
-            .gap_1()
-            .child(field_label("Port forwarding", cx))
-            .child(v_flex().gap(px(2.)).children(rows))
+            .gap(px(6.))
             .child(
-                div()
-                    .id("forward-add-link")
-                    .h(px(20.))
-                    .flex()
+                h_flex()
+                    .justify_between()
                     .items_center()
-                    .text_xs()
-                    .text_color(muted_fg)
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(fg))
-                    .active(|s| s.text_color(crate::theme::accent()))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.enter_add_forward(window, cx);
-                    }))
-                    .child("Add forward…"),
+                    .child(field_label("Port forwarding", cx))
+                    .child(
+                        Button::new("forward-add-link")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Plus)
+                            .child("Add forward")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.enter_add_forward(window, cx);
+                            })),
+                    ),
             )
+            .when(count > 0, |el| {
+                el.child(
+                    v_flex()
+                        .rounded(px(9.))
+                        .border_1()
+                        .border_color(crate::theme::border())
+                        .bg(crate::theme::card())
+                        .children(rows),
+                )
+            })
+            .when(count == 0, |el| {
+                el.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(crate::theme::text_dim())
+                        .child("None. A forward opens a port here or on the host through this connection."),
+                )
+            })
             .into_any_element()
     }
 
@@ -2046,7 +2233,7 @@ impl ServerFormView {
             .id("forward-form")
             .max_h(dialog_max_height(window))
             .overflow_y_scroll()
-            .p(px(12.))
+            .p(px(16.))
             .gap(px(8.))
             .child(
                 h_flex()
@@ -2061,7 +2248,7 @@ impl ServerFormView {
                         }),
                         cx,
                     ))
-                    .child(DialogTitle::new().child(title)),
+                    .child(sub_view_title(title, cx)),
             )
             .child(
                 v_flex()
@@ -2282,9 +2469,92 @@ fn strip_whitespace(s: &str) -> String {
 
 fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_size(px(12.))
         .text_color(cx.theme().muted_foreground)
         .child(text)
+}
+
+/// A field with its label above it.
+fn labeled(label: &'static str, cx: &App, field: impl IntoElement) -> gpui::Div {
+    v_flex()
+        .gap(px(6.))
+        .child(field_label(label, cx))
+        .child(field)
+}
+
+/// Title of a view that takes the form's place, after its Back button.
+fn sub_view_title(text: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .text_size(px(15.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(cx.theme().foreground)
+        .child(text)
+}
+
+/// Heading of one part of the form.
+fn section_title(text: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .text_size(px(13.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(cx.theme().foreground)
+        .child(text)
+}
+
+/// The `@` and `:` between user, host and port, level with the fields.
+fn address_separator(text: &'static str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .h(px(32.))
+        .flex()
+        .items_center()
+        .text_size(px(14.))
+        .text_color(crate::theme::text_dim())
+        .child(text)
+}
+
+/// A row of options of which one is chosen, drawn as one segmented control.
+fn segmented<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: &[(T, &'static str)],
+    selected: T,
+    cx: &Context<ServerFormView>,
+    on_pick: impl Fn(&mut ServerFormView, T, &mut Context<ServerFormView>) + Clone + 'static,
+) -> impl IntoElement {
+    let fg = cx.theme().foreground;
+    h_flex()
+        .flex_none()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(px(7.))
+        .bg(crate::theme::field())
+        .children(options.iter().enumerate().map(|(ix, &(value, label))| {
+            let is_selected = value == selected;
+            let on_pick = on_pick.clone();
+            div()
+                .id((id, ix))
+                // A tab stop: Enter or Space on it picks it, like a radio.
+                .focusable()
+                .tab_stop(true)
+                .h(px(26.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(|s| s.border_color(crate::theme::accent()))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(is_selected, |el| {
+                    el.bg(crate::theme::element()).text_color(fg)
+                })
+                .when(!is_selected, |el| {
+                    el.text_color(crate::theme::text_dim())
+                        .hover(move |s| s.text_color(fg))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| on_pick(this, value, cx)))
+        }))
 }
 
 /// How many characters one edit put in, going from `before` to `after`.
@@ -2350,13 +2620,14 @@ fn dropdown_trigger(
         .h_8()
         .flex()
         .items_center()
-        .px_3()
-        .rounded(px(6.))
+        .px(px(10.))
+        .rounded(px(7.))
         .border_1()
-        .border_color(theme.border)
-        .bg(theme.background)
+        .border_color(crate::theme::border())
+        .bg(crate::theme::field())
         .cursor_pointer()
-        .text_sm()
+        .hover(|s| s.bg(crate::theme::element_hover()))
+        .text_size(px(13.))
         .text_color(label_color)
         .on_mouse_down(
             MouseButton::Left,
@@ -2368,10 +2639,10 @@ fn dropdown_trigger(
                 .w_full()
                 .justify_between()
                 .items_center()
-                .child(div().child(label))
+                .child(div().min_w_0().truncate().child(label))
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(12.))
+                        .size(px(14.))
                         .text_color(muted_fg),
                 ),
         )
@@ -2386,26 +2657,27 @@ fn dropdown_option(
     cx: &Context<ServerFormView>,
     on_pick: impl Fn(&mut ServerFormView, &mut Context<ServerFormView>) + 'static,
 ) -> AnyElement {
-    let theme = cx.theme();
-    let list_hover = theme.list_hover;
-
     div()
         .id(id)
-        .h(px(22.))
+        .h(px(30.))
         .flex()
         .items_center()
-        .px(px(6.))
-        .rounded((theme.radius - px(4.)).max(px(0.)))
-        .text_size(px(12.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .text_size(px(13.))
         .truncate()
         .text_color(color)
         .cursor_pointer()
-        .hover(move |s| s.bg(list_hover))
+        .hover(|s| s.bg(crate::theme::field()))
         .active(|s| s.bg(crate::theme::element_active()))
         .on_click(cx.listener(move |this, _, _, cx| on_pick(this, cx)))
         .child(label)
         .into_any_element()
 }
+
+/// Where a dropdown panel stacks: with gpui-component's own popups
+/// (`POPUP_PRIORITY`), above dialogs and below tooltips.
+const DROPDOWN_PRIORITY: usize = 100;
 
 /// The panel a dropdown opens. It hangs off the form's root, where nothing
 /// clips it, and finds its place from the trigger's probe.
@@ -2417,10 +2689,11 @@ fn dropdown_panel(
     cx: &Context<ServerFormView>,
     on_close: impl Fn(&mut ServerFormView, &mut Context<ServerFormView>) + 'static,
 ) -> AnyElement {
-    let theme = cx.theme();
     let trigger = trigger.clone();
 
-    AnchoredToTrigger {
+    // Deferred so the panel is not cut off at the dialog's edge. Dialogs are
+    // deferred too, at priority 10 and up, so the panel needs a higher one.
+    let panel = AnchoredToTrigger {
         anchor: Anchor::TopLeft,
         anchor_point: anchor.clone(),
         margin: px(8.),
@@ -2438,18 +2711,20 @@ fn dropdown_panel(
             }))
             .bg(crate::theme::pop_surface())
             .border_1()
-            .border_color(crate::theme::border_focused())
-            .rounded(theme.radius)
-            .shadow_md()
-            .p(px(2.))
-            .min_w(px(200.))
-            .max_w(px(340.))
-            .max_h(px(240.))
+            .border_color(crate::theme::float_border())
+            .rounded(px(9.))
+            .shadow(crate::ui::modal_shadow())
+            .p(px(4.))
+            .min_w(px(220.))
+            .max_w(px(360.))
+            .max_h(px(260.))
             .overflow_y_scroll()
             .children(items)
             .into_any_element(),
-    }
-    .into_any_element()
+    };
+    deferred(panel)
+        .with_priority(DROPDOWN_PRIORITY)
+        .into_any_element()
 }
 
 /// An overlay that reports its host element's bottom-left corner into

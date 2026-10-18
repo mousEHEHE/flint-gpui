@@ -3,8 +3,8 @@ use gpui::prelude::*;
 use gpui::{
     canvas, div, px, uniform_list, App, Bounds, ClickEvent, ClipboardItem, Context, Entity,
     EntityId, EventEmitter, ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, Pixels, Point, SharedString, UniformListScrollHandle,
-    WeakEntity, Window,
+    Focusable, Hsla, KeyDownEvent, MouseButton, Pixels, Point, SharedString,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -381,7 +381,21 @@ impl Render for DragPreview {
 
 const SPIN_CYCLE: Duration = Duration::from_millis(800);
 
-const ROW_HEIGHT: Pixels = px(22.);
+const ROW_HEIGHT: Pixels = px(26.);
+/// Space between the pane edge and the rounded rows.
+const LIST_INSET: f32 = 6.;
+/// Space inside a row before its icon and after its last column.
+const ROW_PADDING: f32 = 8.;
+
+/// A selected row is accent while the keys are in its pane and grey when
+/// they are elsewhere, so the selection that Enter or Delete acts on stands out.
+fn selection_bg(is_selected: bool, has_focus: bool) -> Option<Hsla> {
+    match (is_selected, has_focus) {
+        (false, _) => None,
+        (true, true) => Some(crate::theme::accent_soft()),
+        (true, false) => Some(crate::theme::element()),
+    }
+}
 
 pub struct FilePane {
     focus_handle: FocusHandle,
@@ -1767,7 +1781,7 @@ impl FilePane {
         width: Option<Pixels>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let muted = crate::theme::text_dim();
         let fg = cx.theme().foreground;
         let active = self.sort_key == key;
         let arrow = if active {
@@ -1811,17 +1825,13 @@ impl Render for FilePane {
             )
         });
 
-        let border = cx.theme().title_bar_border;
-        let tab_bar = cx.theme().tab_bar;
-        let list_head = cx.theme().list_head;
         let muted_fg = cx.theme().muted_foreground;
         let fg = cx.theme().foreground;
-        let primary = cx.theme().primary;
-        let list_hover = cx.theme().list_hover;
+        let field = crate::theme::field();
         let is_remote = self.kind.is_remote();
-        // The pane the keys go to shows it with an accent line under its header.
+        // The pane the keys go to shows it with an accent icon in its header
+        // and an accent selection.
         let has_focus = self.focus_handle.contains_focused(window, cx);
-        let header_border = if has_focus { primary } else { border };
         // The session's own pane always shows its server; the other pane can
         // show this computer or another server.
         let pick_source: Option<SourcePillClick> = (self.kind != PaneKind::Session).then(|| {
@@ -1829,7 +1839,13 @@ impl Render for FilePane {
                 cx.emit(FilePaneEvent::SourcePickerRequested);
             })) as SourcePillClick
         });
-        let pill = source_pill(self.source_label.clone(), pick_source, cx);
+        let pill = source_pill(
+            source_icon(self.kind),
+            self.source_label.clone(),
+            has_focus,
+            pick_source,
+            cx,
+        );
 
         let is_editing = self.is_editing_path;
         let path_input = self.path_input.clone();
@@ -1854,13 +1870,15 @@ impl Render for FilePane {
                 .id("path-display")
                 .flex_1()
                 .min_w_0()
-                .px(px(4.))
-                .rounded(px(3.))
+                .px(px(5.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .font_family(crate::theme::MONO_FONT)
                 .text_size(px(12.))
-                .text_color(fg)
+                .text_color(muted_fg)
                 .truncate()
                 .cursor_pointer()
-                .hover(move |s| s.bg(list_hover))
+                .hover(move |s| s.bg(field).text_color(fg))
                 .active(|s| s.bg(crate::theme::element_active()))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.start_edit_path(window, cx);
@@ -1917,13 +1935,12 @@ impl Render for FilePane {
             .child(width_probe)
             .child(
                 h_flex()
-                    .h(px(28.))
-                    .px(px(8.))
-                    .gap(px(6.))
+                    .h(px(38.))
+                    .flex_none()
+                    .pl(px(6.))
+                    .pr(px(6.))
+                    .gap(px(4.))
                     .items_center()
-                    .border_b_1()
-                    .border_color(header_border)
-                    .bg(tab_bar)
                     .child(pill)
                     .child(path_area)
                     .children(filter_field)
@@ -1954,7 +1971,7 @@ impl Render for FilePane {
                     .child(
                         Button::new("go-up")
                             .ghost()
-                            .icon(IconName::ChevronUp)
+                            .icon(Icon::empty().path("icons/arrow-up.svg"))
                             .xsmall()
                             .tooltip("Parent folder")
                             .on_click(cx.listener(|this, _, _, cx| this.go_up(cx))),
@@ -1972,20 +1989,17 @@ impl Render for FilePane {
             )
             .child(
                 h_flex()
-                    .h(px(20.))
-                    .px(px(8.))
-                    .gap(px(6.))
+                    .h(px(22.))
+                    .flex_none()
+                    .px(px(LIST_INSET + ROW_PADDING))
+                    .gap(px(8.))
                     .items_center()
-                    .border_b_1()
-                    .border_color(border)
-                    .bg(list_head)
-                    .text_size(px(10.))
-                    .text_color(muted_fg)
-                    .child(self.sort_header("hdr-name", "NAME", SortKey::Name, None, cx))
+                    .text_size(px(11.5))
+                    .child(self.sort_header("hdr-name", "Name", SortKey::Name, None, cx))
                     .when(cols.type_col, |el| {
                         el.child(self.sort_header(
                             "hdr-type",
-                            "TYPE",
+                            "Type",
                             SortKey::Type,
                             Some(px(56.)),
                             cx,
@@ -1994,7 +2008,7 @@ impl Render for FilePane {
                     .when(cols.perms, |el| {
                         el.child(self.sort_header(
                             "hdr-perms",
-                            "PERMS",
+                            "Perms",
                             SortKey::Perms,
                             Some(px(72.)),
                             cx,
@@ -2003,7 +2017,7 @@ impl Render for FilePane {
                     .when(cols.size, |el| {
                         el.child(self.sort_header(
                             "hdr-size",
-                            "SIZE",
+                            "Size",
                             SortKey::Size,
                             Some(px(76.)),
                             cx,
@@ -2012,7 +2026,7 @@ impl Render for FilePane {
                     .when(cols.modified, |el| {
                         el.child(self.sort_header(
                             "hdr-modified",
-                            "MODIFIED",
+                            "Modified",
                             SortKey::Modified,
                             Some(px(92.)),
                             cx,
@@ -2067,8 +2081,9 @@ impl Render for FilePane {
                 // with hundreds of entries. Item 0 is the "../" row when shown.
                 let view = cx.entity();
                 let item_count = self.visible_indices().len() + show_parent as usize;
-                uniform_list(list_id, item_count, move |range, _window, app| {
+                uniform_list(list_id, item_count, move |range, window, app| {
                     view.update(app, |this, cx| {
+                        let has_focus = this.focus_handle.contains_focused(window, cx);
                         let pane_path = this.path.clone();
                         let kind = this.kind;
                         // Built once and shared: every selected row drags the
@@ -2103,7 +2118,7 @@ impl Render for FilePane {
                                 out.push(render_entry(
                                     entry_ix,
                                     e,
-                                    is_selected,
+                                    selection_bg(is_selected, has_focus),
                                     drag_items,
                                     &pane_path,
                                     kind,
@@ -2119,6 +2134,8 @@ impl Render for FilePane {
                 })
                 .track_scroll(&self.scroll_handle)
                 .flex_1()
+                .px(px(LIST_INSET))
+                .pb(px(LIST_INSET))
                 .when(self.is_loading, |s| s.opacity(0.5))
                 .on_drop(cx.listener(|_this, entry: &DraggedEntry, _window, cx| {
                     if entry.source != cx.entity_id() {
@@ -2159,35 +2176,57 @@ impl Render for FilePane {
 
 pub type SourcePillClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+/// The icon before a pane's name: this computer or a server.
+pub fn source_icon(kind: PaneKind) -> &'static str {
+    match kind {
+        PaneKind::Local if cfg!(target_os = "macos") => "icons/laptop.svg",
+        PaneKind::Local => "icons/monitor.svg",
+        PaneKind::Session | PaneKind::Peer => "icons/server.svg",
+    }
+}
+
 /// The title at the start of a pane header that says what the pane shows.
 /// With `on_click` it works as a dropdown that opens the source picker.
 pub fn source_pill(
+    icon: &'static str,
     label: SharedString,
+    has_focus: bool,
     on_click: Option<SourcePillClick>,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let theme = cx.theme();
     let fg = theme.foreground;
     let muted_fg = theme.muted_foreground;
-    let list_hover = theme.list_hover;
+    let icon_color = if has_focus {
+        crate::theme::accent()
+    } else {
+        muted_fg
+    };
     let is_clickable = on_click.is_some();
 
     h_flex()
         .id("source-pill")
-        .h(px(22.))
+        .h(px(26.))
         .max_w(px(180.))
         .flex_shrink_0()
-        .gap(px(4.))
+        .gap(px(6.))
         .items_center()
         .px(px(6.))
-        .rounded(px(4.))
-        .text_size(px(12.))
+        .rounded(px(6.))
+        .text_size(px(13.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(fg)
+        .child(
+            Icon::empty()
+                .path(icon)
+                .size(px(14.))
+                .flex_shrink_0()
+                .text_color(icon_color),
+        )
         .child(div().min_w_0().truncate().child(label))
         .when(is_clickable, |el| {
             el.cursor_pointer()
-                .hover(move |s| s.bg(list_hover))
+                .hover(|s| s.bg(crate::theme::field()))
                 .active(|s| s.bg(crate::theme::element_active()))
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -2218,26 +2257,26 @@ fn render_parent_row(
     cols: VisibleColumns,
     cx: &mut Context<FilePane>,
 ) -> gpui::AnyElement {
-    let list_hover = cx.theme().list_hover;
     let muted_fg = cx.theme().muted_foreground;
 
     h_flex()
         .id("entry-parent")
         .w_full()
         .h(ROW_HEIGHT)
-        .pl(px(8.))
-        .pr(px(8.))
-        .gap(px(6.))
+        .px(px(ROW_PADDING))
+        .gap(px(8.))
         .items_center()
+        .rounded(px(6.))
         .cursor_pointer()
-        .hover(move |s| s.bg(list_hover))
+        .hover(|s| s.bg(crate::theme::field()))
         .active(|s| s.bg(crate::theme::element_active()))
         .when(!is_loading, |s| {
             s.on_click(cx.listener(|this, _, _, cx| this.go_up(cx)))
         })
         .child(
-            Icon::new(IconName::FolderOpen)
-                .size(px(14.))
+            Icon::empty()
+                .path("icons/corner-left-up.svg")
+                .size(px(15.))
                 .flex_shrink_0()
                 .text_color(muted_fg),
         )
@@ -2245,9 +2284,9 @@ fn render_parent_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted_fg)
-                .child("../"),
+                .child(".."),
         )
         .when(cols.type_col, |el| {
             el.child(div().w(px(56.)).flex_shrink_0())
@@ -2350,7 +2389,7 @@ fn external_drag_payload(
 fn render_entry(
     ix: usize,
     entry: &FileEntry,
-    is_selected: bool,
+    selected_bg: Option<Hsla>,
     drag_items: Rc<[EntryRef]>,
     pane_path: &str,
     kind: PaneKind,
@@ -2359,8 +2398,8 @@ fn render_entry(
     cols: VisibleColumns,
     cx: &mut Context<FilePane>,
 ) -> gpui::AnyElement {
-    let list_hover = cx.theme().list_hover;
     let muted_fg = cx.theme().muted_foreground;
+    let dim_fg = crate::theme::text_dim();
     let fg = cx.theme().foreground;
     let danger = cx.theme().danger;
     let primary = cx.theme().primary;
@@ -2371,7 +2410,7 @@ fn render_entry(
     } else {
         IconName::File
     };
-    let icon_color = if opens_as_folder { primary } else { muted_fg };
+    let icon_color = if opens_as_folder { primary } else { dim_fg };
     let size_str: SharedString = if opens_as_folder {
         "--".into()
     } else {
@@ -2420,17 +2459,15 @@ fn render_entry(
         .id(("entry", ix))
         .w_full()
         .h(ROW_HEIGHT)
-        .pl(px(8.))
-        .pr(px(8.))
-        .gap(px(6.))
+        .px(px(ROW_PADDING))
+        .gap(px(8.))
         .items_center()
+        .rounded(px(6.))
         .cursor_pointer()
-        .bg(if is_selected {
-            crate::theme::accent_soft()
-        } else {
-            gpui::transparent_black()
+        .when_some(selected_bg, |s, bg| s.bg(bg))
+        .when(selected_bg.is_none(), |s| {
+            s.hover(|s| s.bg(crate::theme::field()))
         })
-        .when(!is_selected, |s| s.hover(move |s| s.bg(list_hover)))
         .active(|s| s.bg(crate::theme::element_active()))
         .on_drag(drag_value, {
             let pane = pane.clone();
@@ -2468,7 +2505,7 @@ fn render_entry(
         })
         .child(
             Icon::new(icon)
-                .size(px(14.))
+                .size(px(15.))
                 .flex_shrink_0()
                 .text_color(icon_color),
         )
@@ -2476,7 +2513,7 @@ fn render_entry(
             None => div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(name_color)
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -2490,7 +2527,7 @@ fn render_entry(
                 .min_w_0()
                 .gap(px(5.))
                 .overflow_hidden()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 // The name keeps its width; only the target gives way, so a
                 // long target never squeezes the name down to an ellipsis.
                 .child(
@@ -2518,8 +2555,8 @@ fn render_entry(
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(10.5))
-                    .text_color(muted_fg)
+                    .text_size(px(12.))
+                    .text_color(dim_fg)
                     .child(kind_label(entry.kind)),
             )
         })
@@ -2535,9 +2572,9 @@ fn render_entry(
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .font_family("Cascadia Code")
-                    .text_size(px(10.))
-                    .text_color(muted_fg)
+                    .font_family(crate::theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(dim_fg)
                     .child(perms_str),
             )
         })
@@ -2548,8 +2585,8 @@ fn render_entry(
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(10.5))
-                    .text_color(muted_fg)
+                    .text_size(px(12.))
+                    .text_color(dim_fg)
                     .child(size_str),
             )
         })
@@ -2560,8 +2597,8 @@ fn render_entry(
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(10.5))
-                    .text_color(muted_fg)
+                    .text_size(px(12.))
+                    .text_color(dim_fg)
                     .child(modified_str),
             )
         });

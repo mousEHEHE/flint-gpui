@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::connection::{Connection, ForwardSpec};
 use crate::file_associations::SharedFileAssociations;
-use crate::preferences::Preferences;
+use crate::preferences::{Preferences, TerminalPosition};
 use crate::shell::ShellHandle;
 use crate::ssh::{
     AuthCredential, AuthError, AuthPromptField, CancelFlag, ForwardState, SshConnection,
@@ -19,7 +19,7 @@ use crate::ui::terminal_view::TerminalView;
 use crate::ui::transfer_rate::TransferRate;
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, AsyncApp, ClipboardItem, Context, Entity, EventEmitter,
+    div, px, AnyElement, App, AsyncApp, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable as _, MouseButton, Pixels, Task, WeakEntity, Window,
 };
 use gpui_component::{
@@ -27,7 +27,7 @@ use gpui_component::{
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
-    resizable::{resizable_panel, v_resizable, ResizableState},
+    resizable::{h_resizable, resizable_panel, v_resizable, ResizableState},
     spinner::Spinner,
     v_flex, ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _,
 };
@@ -804,6 +804,9 @@ pub struct ServerSession {
     file_associations: SharedFileAssociations,
     /// Drag state for the resizable SFTP / terminal split.
     split_state: Entity<ResizableState>,
+    /// The divider when the terminal sits next to the files. Kept apart so
+    /// each layout remembers its own sizes.
+    split_state_beside: Entity<ResizableState>,
     _connect_task: Task<()>,
     /// Holds a clone of the connection, which stays open as long as any
     /// clone lives. Kept here so that it ends with the session.
@@ -979,6 +982,7 @@ impl ServerSession {
             connection_generation: 0,
             file_associations,
             split_state: cx.new(|_| ResizableState::default()),
+            split_state_beside: cx.new(|_| ResizableState::default()),
             _connect_task: task,
             probe_task: None,
         }
@@ -1585,7 +1589,27 @@ impl ServerSession {
             return;
         }
         browser.update(cx, |browser, cx| browser.focus_left(window, cx));
+        // A source was just chosen for the second pane, so it must be seen.
+        if !Preferences::is_second_pane_shown(cx) {
+            Preferences::update(cx, |prefs| prefs.is_second_pane_shown = true);
+            self.repaint_files(cx);
+        }
         self.show_file_panes(cx);
+    }
+
+    /// What should hold the keys when this tab comes to the front: its
+    /// terminal, or while there is none yet, a field that waits for an
+    /// answer. `None` while the session is only connecting.
+    pub fn focus_target(&self, cx: &App) -> Option<FocusHandle> {
+        if let Some(terminal) = self.active_terminal() {
+            return Some(terminal.read(cx).focus_handle(cx));
+        }
+        [Link::Session, Link::Peer]
+            .into_iter()
+            .filter_map(|link| self.auth_prompt(link))
+            .find_map(|prompt| prompt.inputs.first())
+            .or(self.password_input.as_ref())
+            .map(|input| input.read(cx).focus_handle(cx))
     }
 
     /// Hidden panes cannot take the keys.
@@ -1885,6 +1909,9 @@ impl ServerSession {
             div()
                 .absolute()
                 .inset_0()
+                // The working area is a rounded card; gpui does not clip to its
+                // corners, so the overlay rounds its own top ones.
+                .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
                 .bg(theme.overlay)
                 .flex()
                 .items_center()
@@ -2008,6 +2035,9 @@ impl ServerSession {
             div()
                 .absolute()
                 .inset_0()
+                // The working area is a rounded card; gpui does not clip to its
+                // corners, so the overlay rounds its own top ones.
+                .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
                 .bg(theme.overlay)
                 .flex()
                 .items_center()
@@ -2066,24 +2096,15 @@ impl Render for ServerSession {
             (&self.browser, self.active_terminal())
         {
             let term_header = h_flex()
-                .h(px(28.))
+                .h(px(38.))
+                .flex_none()
+                .min_w_0()
                 .px(px(8.))
-                .gap(px(6.))
                 .items_center()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.tab_bar)
-                .text_size(px(11.))
-                .text_color(theme.muted_foreground)
-                .child(div().child("Terminal"))
-                .child(self.render_terminal_tabs(cx))
-                .child(div().flex_1())
-                .when_some(self.render_forward_chip(cx), |el, chip| el.child(chip))
-                .when_some(self.render_task_pills(cx), |el, pills| el.child(pills))
-                .child(self.render_sftp_toggle(cx));
+                .child(self.render_terminal_tabs(cx));
 
             let terminal_block = v_flex()
-                .flex_1()
+                .size_full()
                 .overflow_hidden()
                 .child(term_header)
                 .child(
@@ -2092,30 +2113,52 @@ impl Render for ServerSession {
                         .overflow_hidden()
                         .child(terminal_view.clone()),
                 );
+            let files_block = div().size_full().overflow_hidden().child(browser.clone());
 
-            // SFTP (top) and terminal (bottom) panes with a draggable divider.
-            // Equal initial sizes normalize to a 50/50 split for any container height.
-            // With the file panes hidden the terminal is the whole tab.
-            let split = if self.is_sftp_hidden {
-                v_flex().size_full().child(terminal_block)
+            // The initial sizes only set the ratio: the panels are scaled to
+            // fill whatever room there is. With the file panes hidden the
+            // terminal is the whole tab.
+            let panes = if self.is_sftp_hidden {
+                terminal_block.into_any_element()
             } else {
-                div().size_full().child(
-                    v_resizable("sftp-terminal-split")
+                match Preferences::terminal_position(cx) {
+                    TerminalPosition::Below => v_resizable("sftp-terminal-split")
                         .with_state(&self.split_state)
                         .child(
                             resizable_panel()
                                 .size(px(400.))
                                 .size_range(px(120.)..Pixels::MAX)
-                                .child(div().size_full().overflow_hidden().child(browser.clone())),
+                                .child(files_block),
                         )
                         .child(
                             resizable_panel()
                                 .size(px(400.))
                                 .size_range(px(120.)..Pixels::MAX)
                                 .child(terminal_block),
-                        ),
-                )
+                        )
+                        .into_any_element(),
+                    // The terminal gets the larger part: it wants long lines.
+                    TerminalPosition::Beside => h_resizable("terminal-sftp-split")
+                        .with_state(&self.split_state_beside)
+                        .child(
+                            resizable_panel()
+                                .size(px(600.))
+                                .size_range(px(240.)..Pixels::MAX)
+                                .child(terminal_block),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(400.))
+                                .size_range(px(240.)..Pixels::MAX)
+                                .child(files_block),
+                        )
+                        .into_any_element(),
+                }
             };
+            let split = v_flex()
+                .size_full()
+                .child(self.render_session_header(cx))
+                .child(div().flex_1().min_h_0().overflow_hidden().child(panes));
 
             if let Some(ref info) = self.disconnected {
                 let host = info.host.clone();
@@ -2130,6 +2173,9 @@ impl Render for ServerSession {
                         div()
                             .absolute()
                             .inset_0()
+                            // The working area is a rounded card; gpui does not clip to its
+                            // corners, so the overlay rounds its own top ones.
+                            .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
                             .bg(theme.overlay)
                             .flex()
                             .items_center()
@@ -2211,6 +2257,9 @@ impl Render for ServerSession {
                         div()
                             .absolute()
                             .inset_0()
+                            // The working area is a rounded card; gpui does not clip to its
+                            // corners, so the overlay rounds its own top ones.
+                            .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
                             .bg(theme.overlay)
                             .flex()
                             .items_center()

@@ -2,15 +2,13 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable,
-    SystemNotification, Task, WeakEntity, Window,
+    actions, div, px, AnyElement, AnyWindowHandle, App, Context, Entity, EntityId, FocusHandle,
+    Focusable, ModifiersChangedEvent, SystemNotification, Task, WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
-    h_flex,
-    tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -32,13 +30,14 @@ use crate::ui::server_session::{
 use crate::ui::servers_view::{ServersView, ServersViewEvent};
 use crate::ui::settings::{SettingsView, SettingsViewEvent};
 use crate::ui::sftp_browser::{RestorePaths, TransferKind};
+use crate::ui::shortcut_hints;
 use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
 use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
 use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
-use crate::ui::{dialog_chrome, VaultState, DIALOG_NARROW, DIALOG_WIDE};
+use crate::ui::{dialog_chrome, VaultState, DIALOG_FORM, DIALOG_NARROW, DIALOG_WIDE};
 use crate::vault::{AuthMethod, ProxyKind, ServerEntry, SnippetBody};
 
 actions!(
@@ -157,6 +156,11 @@ enum ConnectIntent {
 
 pub struct AppView {
     focus_handle: FocusHandle,
+    /// The tab the keys were last given to. When another tab comes to the
+    /// front, `focus_front_tab_if_changed` moves them there.
+    focused_tab: Option<EntityId>,
+    /// Waits out `shortcut_hints::SHOW_DELAY` while the modifier is held.
+    hint_task: Option<Task<()>>,
     vault_state: Entity<VaultState>,
     servers_view: Entity<ServersView>,
     sidebar: Entity<Sidebar>,
@@ -212,6 +216,8 @@ impl AppView {
             SidebarEvent::ShowAllServers => this.show_all_servers(cx),
             SidebarEvent::EditServerRequested(id) => this.show_edit_form(*id, window, cx),
             SidebarEvent::DeleteServerRequested(id) => this.show_remove_dialog(*id, window, cx),
+            SidebarEvent::SettingsRequested => this.toggle_settings(window, cx),
+            SidebarEvent::FeedbackRequested => this.show_feedback_dialog(window, cx),
         })
         .detach();
 
@@ -236,6 +242,11 @@ impl AppView {
         .detach();
 
         cx.observe_window_activation(window, |this, window, cx| {
+            // The modifier may be let go in another app, out of our sight.
+            if !window.is_window_active() {
+                this.hint_task = None;
+                shortcut_hints::set_shown(false, window, cx);
+            }
             // Behind a lock screen this view is not on screen; taking focus
             // here would leave the password field without it.
             if this.is_vault_locked(cx) {
@@ -273,6 +284,8 @@ impl AppView {
 
         Self {
             focus_handle,
+            focused_tab: None,
+            hint_task: None,
             vault_state,
             servers_view,
             sidebar,
@@ -841,13 +854,7 @@ impl AppView {
 
         if let Some(session) = self.tabs.get(idx) {
             let session = session.clone();
-            let terminal_fh = session
-                .read(cx)
-                .active_terminal()
-                .map(|tv| tv.read(cx).focus_handle(cx));
-            if let Some(fh) = terminal_fh {
-                fh.focus(window, cx);
-            }
+            self.focus_front_tab(window, cx);
             if session.read(cx).pending_conflict.is_some() {
                 self.open_conflict_dialog(session.clone(), cx);
             }
@@ -856,6 +863,64 @@ impl AppView {
         } else {
             self.focus_handle.focus(window, cx);
         }
+    }
+
+    /// Give the keys to the tab in front: its terminal, the field it waits
+    /// on, or this view while it has neither. They must not stay on the tab
+    /// that was in front before: its elements are no longer drawn, and gpui
+    /// then hands every key to the window root, past the shortcuts here
+    /// (Cmd+1 did nothing while the tab in front was still connecting).
+    fn focus_front_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let front = self.tabs.get(self.active_tab).cloned();
+        self.focused_tab = front.as_ref().map(|session| session.entity_id());
+        match front.and_then(|session| session.read(cx).focus_target(cx)) {
+            Some(target) => target.focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
+    /// `focus_front_tab` for every way a tab can come to the front: a click
+    /// in the sidebar, a closed tab, a host opened from the list. A dialog
+    /// or an overlay keeps the keys until it closes.
+    fn focus_front_tab_if_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let front = self
+            .tabs
+            .get(self.active_tab)
+            .map(|session| session.entity_id());
+        if front == self.focused_tab || self.is_overlay_open(window, cx) {
+            return;
+        }
+        self.focus_front_tab(window, cx);
+    }
+
+    /// Show the shortcut hints once the modifier has been held a moment, and
+    /// hide them as soon as it is let go or joined by another one.
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Over the palette or the settings the hints would only shine through
+        // the dimmed window.
+        if !shortcut_hints::is_hint_modifier(&event.modifiers) || self.is_overlay_open(window, cx) {
+            self.hint_task = None;
+            shortcut_hints::set_shown(false, window, cx);
+            return;
+        }
+        if self.hint_task.is_some() || shortcut_hints::is_shown(cx) {
+            return;
+        }
+        self.hint_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(shortcut_hints::SHOW_DELAY)
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.hint_task = None;
+                shortcut_hints::set_shown(true, window, cx);
+            })
+            .ok();
+        }));
     }
 
     fn open_server_by_id(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -1967,7 +2032,13 @@ impl AppView {
 
         let mut copy = entry.clone();
         copy.id = Uuid::new_v4();
-        copy.label = format!("{} copy", entry.label);
+        // A host without a name is shown by its address, so its copy is too.
+        let name = if entry.label.is_empty() {
+            &entry.host
+        } else {
+            &entry.label
+        };
+        copy.label = format!("{name} copy");
         // A clone is a distinct host record: it has never connected, so drop
         // session-derived state that belongs to the original.
         copy.last_opened_at = None;
@@ -2229,9 +2300,14 @@ impl AppView {
         let form_for_dialog = form.clone();
         window.open_dialog(&mut *cx, move |dialog, _, _| {
             dialog_chrome(dialog)
-                .w(DIALOG_WIDE)
+                .w(DIALOG_FORM)
                 .child(form_for_dialog.clone())
         });
+        // A new host starts from its address; pasting `user@host:port` there
+        // fills the user and the port too.
+        if is_add {
+            form.update(cx, |form, cx| form.focus_host(window, cx));
+        }
     }
 
     /// Settings, the palette or a dialog sits on top of the main view.
@@ -2346,11 +2422,9 @@ impl AppView {
 
         let theme = cx.theme();
         let bg_elevated = theme.title_bar;
-        let bg = theme.background;
-        let border = theme.title_bar_border;
-        let border_focused = crate::theme::border_focused();
         let text_muted = theme.muted_foreground;
         let text_placeholder = crate::theme::text_placeholder();
+        let field = crate::theme::field();
 
         // Placed at the centre of the bar, whatever sits to its left and right.
         let palette_trigger = h_flex()
@@ -2358,27 +2432,21 @@ impl AppView {
             .absolute()
             .left(gpui::relative(0.5))
             .top(gpui::relative(0.5))
-            .h(px(22.))
-            .w(px(340.))
-            .px(px(8.))
-            .gap(px(6.))
+            .h(px(24.))
+            .w(px(360.))
+            .px(px(10.))
+            .gap(px(8.))
             .items_center()
-            .bg(bg)
-            .border_1()
-            .border_color(border)
-            .rounded(px(4.))
-            .text_size(px(11.5))
+            .bg(field)
+            .rounded(px(7.))
+            .text_size(px(12.5))
             .text_color(text_placeholder)
             .cursor_pointer()
-            .hover(|s| s.border_color(border_focused).text_color(text_muted))
-            .active(|s| {
-                s.bg(bg_elevated)
-                    .border_color(border_focused)
-                    .text_color(text_muted)
-            })
+            .hover(|s| s.bg(crate::theme::element()).text_color(text_muted))
+            .active(|s| s.bg(crate::theme::element_active()).text_color(text_muted))
             .child(
                 Icon::new(IconName::Search)
-                    .size(px(11.))
+                    .size(px(13.))
                     .text_color(text_placeholder),
             )
             .child(
@@ -2388,20 +2456,28 @@ impl AppView {
                     .truncate()
                     .child("Go to host, snippet or command"),
             )
-            .child(
+            // Lit up like the other shortcut hints while the modifier is held.
+            .child(if shortcut_hints::is_shown(cx) {
+                shortcut_hints::badge(PALETTE_SHORTCUT).into_any_element()
+            } else {
                 div()
                     .flex()
                     .items_center()
-                    .text_size(px(10.))
-                    .text_color(text_placeholder)
-                    .child(PALETTE_SHORTCUT),
-            )
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(field)
+                    .text_size(px(10.5))
+                    .text_color(text_muted)
+                    .child(PALETTE_SHORTCUT)
+                    .into_any_element()
+            })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)));
 
         // Pull palette trigger up & left by half its size via negative margins.
         // `.occlude()` makes its hitbox opaque so clicks land on it instead of
         // falling through to the draggable title-bar region beneath it.
-        let palette_trigger = palette_trigger.ml(px(-170.)).mt(px(-11.)).occlude();
+        let palette_trigger = palette_trigger.ml(px(-180.)).mt(px(-12.)).occlude();
 
         let update_mark = self.render_update_mark(cx);
 
@@ -2413,6 +2489,8 @@ impl AppView {
         #[cfg(not(target_os = "macos"))]
         let window_controls = window_chrome::window_controls(window);
 
+        // The title bar and the sidebar are one surface, so no line under it.
+        // macOS shows the traffic lights there; elsewhere the name sits there.
         let bar = h_flex()
             .relative()
             .w_full()
@@ -2421,15 +2499,15 @@ impl AppView {
             .pr(px(6.))
             .gap(px(8.))
             .bg(bg_elevated)
-            .border_b_1()
-            .border_color(border)
             .items_center()
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(text_muted)
-                    .child("flint"),
-            )
+            .when(cfg!(not(target_os = "macos")), |bar| {
+                bar.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(text_muted)
+                        .child("Flint"),
+                )
+            })
             .child(drag_region)
             // Right of the drag region, which shrinks to make room: the
             // search field is placed on its own and does not move.
@@ -2453,96 +2531,119 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = cx.theme().background;
-        let border = cx.theme().title_bar_border;
-        let tab_bar_bg = cx.theme().tab_bar;
+        self.focus_front_tab_if_changed(window, cx);
+        let chrome = crate::theme::chrome();
+        let panel = cx.theme().background;
+        let border = crate::theme::border();
         let muted_fg = cx.theme().muted_foreground;
-        let hover_bg = cx.theme().secondary_hover;
 
         let title_bar = self.render_title_bar(window, cx);
         let active_body = self.render_active_tab();
 
-        // Status bar: transient message wins; otherwise derive from active session.
-        let status_left: AnyElement = if !self.status.is_empty() {
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(11.))
-                .text_color(muted_fg)
-                .child(self.status.clone())
-                .into_any_element()
+        // A transient message wins; otherwise the front session's state. With
+        // neither, the strip is not drawn at all.
+        let status_left: Option<AnyElement> = if !self.status.is_empty() {
+            Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(muted_fg)
+                    .child(self.status.clone())
+                    .into_any_element(),
+            )
         } else {
-            match self.tabs.get(self.active_tab) {
-                Some(session) => {
-                    let s = session.read(cx);
-                    if s.browser.is_some() {
-                        let host_text = format!(
-                            "{}@{}:{}",
-                            s.conn_info.username, s.conn_info.host, s.conn_info.port
-                        );
-                        h_flex()
-                            .gap(px(6.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .size(px(5.))
-                                    .rounded_full()
-                                    .flex_none()
-                                    .bg(cx.theme().success),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(muted_fg)
-                                    .child(host_text),
-                            )
-                            .into_any_element()
-                    } else if s.disconnected.is_some() || s.has_connect_failure() {
-                        let label = if s.has_connect_failure() {
-                            "connection failed"
-                        } else {
-                            "disconnected"
-                        };
-                        h_flex()
-                            .gap(px(5.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .size(px(5.))
-                                    .rounded_full()
-                                    .flex_none()
-                                    .bg(cx.theme().danger),
-                            )
-                            .child(div().text_size(px(11.)).text_color(muted_fg).child(label))
-                            .into_any_element()
+            self.tabs.get(self.active_tab).map(|session| {
+                let s = session.read(cx);
+                if s.browser.is_some() {
+                    let host_text = format!(
+                        "{}@{}:{}",
+                        s.conn_info.username, s.conn_info.host, s.conn_info.port
+                    );
+                    h_flex()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .items_center()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().success)
+                                .child(
+                                    div()
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .flex_none()
+                                        .bg(cx.theme().success),
+                                )
+                                .child("Connected"),
+                        )
+                        .child(
+                            div()
+                                .font_family(crate::theme::MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(muted_fg)
+                                .child(host_text),
+                        )
+                        .into_any_element()
+                } else if s.disconnected.is_some() || s.has_connect_failure() {
+                    let label = if s.has_connect_failure() {
+                        "connection failed"
                     } else {
-                        h_flex()
-                            .gap(px(5.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .size(px(5.))
-                                    .rounded_full()
-                                    .flex_none()
-                                    .bg(cx.theme().warning),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(muted_fg)
-                                    .child("connecting…"),
-                            )
-                            .into_any_element()
-                    }
+                        "disconnected"
+                    };
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .flex_none()
+                                .bg(cx.theme().danger),
+                        )
+                        .child(div().text_size(px(12.)).text_color(muted_fg).child(label))
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .flex_none()
+                                .bg(cx.theme().warning),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(muted_fg)
+                                .child("Connecting…"),
+                        )
+                        .into_any_element()
                 }
-                None => div().into_any_element(),
-            }
+            })
         };
+
+        // The working area is a rounded card on the window surface. The
+        // status strip belongs to it and only shows when it has something.
+        let status_strip = status_left.map(|left| {
+            h_flex()
+                .flex_none()
+                .h(px(28.))
+                .px(px(14.))
+                .border_t_1()
+                .border_color(border)
+                .items_center()
+                .child(div().flex_1().min_w_0().overflow_hidden().child(left))
+        });
 
         v_flex()
             .size_full()
-            .bg(bg)
+            .bg(chrome)
             .track_focus(&self.focus_handle)
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
                 this.toggle_settings(window, cx);
             }))
@@ -2604,6 +2705,7 @@ impl Render for AppView {
             .child(
                 h_flex()
                     .flex_1()
+                    .min_h_0()
                     .items_stretch()
                     .overflow_hidden()
                     .child(self.sidebar.clone())
@@ -2612,6 +2714,12 @@ impl Render for AppView {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .mr(px(8.))
+                            .mb(px(8.))
+                            .rounded(px(crate::ui::PANEL_RADIUS))
+                            .border_1()
+                            .border_color(border)
+                            .bg(panel)
                             .overflow_hidden()
                             .child(
                                 div()
@@ -2619,71 +2727,8 @@ impl Render for AppView {
                                     .min_h_0()
                                     .overflow_hidden()
                                     .child(active_body),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .px(px(8.))
-                    .h(px(24.))
-                    .border_t_1()
-                    .border_color(border)
-                    .bg(tab_bar_bg)
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(status_left),
-                    )
-                    .child(
-                        div()
-                            .id("feedback-footer-btn")
-                            .tooltip(|window, cx| Tooltip::new("Send feedback").build(window, cx))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(hover_bg))
-                            .active(|s| s.bg(crate::theme::element_active()))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_feedback_dialog(window, cx)
-                            }))
-                            .child(
-                                gpui_component::Icon::empty()
-                                    .path("icons/message-square.svg")
-                                    .size_3()
-                                    .text_color(muted_fg),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("settings-footer-btn")
-                            .tooltip(|window, cx| {
-                                Tooltip::new("Settings")
-                                    .action(&ToggleSettings, None)
-                                    .build(window, cx)
-                            })
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(hover_bg))
-                            .active(|s| s.bg(crate::theme::element_active()))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
                             )
-                            .child(
-                                gpui_component::Icon::new(IconName::Settings)
-                                    .size_3()
-                                    .text_color(muted_fg),
-                            ),
+                            .children(status_strip),
                     ),
             )
             .when_some(self.settings_view.as_ref(), |el, sv| el.child(sv.clone()))
