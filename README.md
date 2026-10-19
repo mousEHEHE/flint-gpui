@@ -11,6 +11,8 @@ It is written in Rust with [GPUI](https://www.gpui.rs/), the UI framework from Z
 
 ![file manager and terminal](docs/session.png)
 
+![local and remote files over a terminal](docs/split.png)
+
 I work on it with my friend Opus. It works for me, but there are bugs for sure and many things are not done yet. Please don't expect too much.
 
 ## Download
