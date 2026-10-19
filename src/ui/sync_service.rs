@@ -30,6 +30,9 @@ const RETRY_DELAY: Duration = Duration::from_secs(60);
 /// A round that leaves work behind is followed by another right away, but
 /// only this many times: two devices editing one host must not spin forever.
 const MAX_ROUNDS_IN_A_ROW: u8 = 3;
+/// Coming back to the window checks the teams again, but not more often
+/// than this: switching apps back and forth must not hit the server.
+const REFRESH_AFTER: Duration = Duration::from_secs(30);
 
 pub enum SignIn {
     Idle,
@@ -217,7 +220,7 @@ impl SyncService {
                         ));
                     }
                 }
-                None => this.sync_now(cx),
+                None => this.refresh_all(cx),
             }
         })
         .detach();
@@ -281,7 +284,9 @@ impl SyncService {
             .read(cx)
             .manager()
             .is_some_and(VaultManager::has_unsynced_changes);
-        if is_pull_due || has_edits {
+        // A refresh asked for while a round was running is picked up here.
+        let is_refresh_owed = self.teams_checked.is_none();
+        if is_pull_due || has_edits || is_refresh_owed {
             self.rounds_left = MAX_ROUNDS_IN_A_ROW;
             self.run_round(cx);
         }
@@ -290,6 +295,35 @@ impl SyncService {
     pub fn sync_now(&mut self, cx: &mut Context<Self>) {
         self.rounds_left = MAX_ROUNDS_IN_A_ROW;
         self.run_round(cx);
+    }
+
+    /// Fetch the teams as well as the items. A plain round checks the teams
+    /// only every couple of minutes, so a host shared a moment ago would not
+    /// show up yet.
+    pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
+        self.teams_checked = None;
+        self.sync_now(cx);
+    }
+
+    /// `refresh_all` on the next tick. Right after a wake the network may
+    /// not be back yet.
+    pub fn refresh_soon(&mut self) {
+        self.teams_checked = None;
+    }
+
+    /// `refresh_all` for things that happen on their own, such as the window
+    /// coming to the front.
+    pub fn refresh_if_stale(&mut self, cx: &mut Context<Self>) {
+        if self.retry_after.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self
+            .teams_checked
+            .is_some_and(|at| at.elapsed() < REFRESH_AFTER)
+        {
+            return;
+        }
+        self.refresh_all(cx);
     }
 
     fn run_round(&mut self, cx: &mut Context<Self>) {
@@ -341,6 +375,17 @@ impl SyncService {
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let Ok(round) = round.recv().await else {
+                // Without this the round would look like it runs forever.
+                tracing::error!("sync round stopped without an answer");
+                this.update(cx, |this, cx| {
+                    if this.generation == generation {
+                        this.is_syncing = false;
+                        this.sync_error = Some("Sync stopped unexpectedly.".into());
+                        this.retry_after = Some(Instant::now() + RETRY_DELAY);
+                        cx.notify();
+                    }
+                })
+                .ok();
                 return;
             };
             this.update(cx, |this, cx| {
@@ -394,7 +439,9 @@ impl SyncService {
                 if self.is_settling {
                     self.rounds_left = self.rounds_left.max(1);
                 }
-                if has_more || self.is_settling {
+                // A refresh asked for while this round ran comes right after it.
+                let is_refresh_owed = self.teams_checked.is_none();
+                if has_more || self.is_settling || is_refresh_owed {
                     self.run_round(cx);
                 }
             }

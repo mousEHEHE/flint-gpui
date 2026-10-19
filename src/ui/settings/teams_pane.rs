@@ -18,6 +18,8 @@ use crate::account::team::Roster;
 use crate::ui::sync_service::{SyncService, TeamAction};
 use crate::ui::VaultState;
 
+use super::ago;
+
 pub struct TeamsPane {
     vault_state: Entity<VaultState>,
     service: Entity<SyncService>,
@@ -979,7 +981,29 @@ impl Render for TeamsPane {
         // Every button is off while an action runs; the one that started it spins.
         let is_spinning = move |id: &SharedString| is_busy && pressed.as_ref() == Some(id);
 
+        let status = match (&service.sync_error, service.is_syncing, service.last_synced) {
+            (_, true, _) => caption("Updating…".into()),
+            (Some(error), _, _) => caption(format!("Last sync failed: {error}")).text_color(danger),
+            (None, _, Some(at)) => caption(format!("Updated {}", ago(at))),
+            (None, _, None) => caption("Not synced yet".into()),
+        };
+        let refresh_row = h_flex().gap(px(10.)).items_center().child(status).child(
+            Button::new("teams-refresh")
+                .ghost()
+                .xsmall()
+                .icon(Icon::empty().path("icons/rotate-cw.svg"))
+                .loading_icon(Icon::empty().path("icons/rotate-cw.svg"))
+                .loading(service.is_syncing)
+                .disabled(service.is_syncing || is_busy)
+                .child("Refresh")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.service
+                        .update(cx, |service, cx| service.refresh_all(cx));
+                })),
+        );
+
         let mut pane = pane
+            .child(refresh_row)
             .child(note(
                 "Share hosts, and the keys they log in with, with other accounts. They are \
                  encrypted for members only; the sync service cannot read them or add anyone."

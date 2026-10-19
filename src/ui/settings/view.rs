@@ -21,6 +21,7 @@ use crate::preferences::{
     DEFAULT_TERMINAL_FONT_SIZE,
 };
 use crate::ui::server_form::read_key_file;
+use crate::ui::sync_service::SyncService;
 use crate::ui::terminal_palette::TerminalColors;
 use crate::ui::update_service::UpdateService;
 use crate::ui::{dialog_chrome, VaultState};
@@ -2886,6 +2887,10 @@ impl Render for SettingsView {
                             SettingsSection::Network => SettingsMode::ProxyList,
                             SettingsSection::About => SettingsMode::About,
                         };
+                        if matches!(section, SettingsSection::Sync | SettingsSection::Teams) {
+                            SyncService::global(cx)
+                                .update(cx, |service, cx| service.refresh_if_stale(cx));
+                        }
                         this.add_error = None;
                         this.edit_error = None;
                         cx.notify();

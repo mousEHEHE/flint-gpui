@@ -18,6 +18,8 @@ use crate::ui::sync_service::{SignIn, SyncService};
 use crate::ui::VaultState;
 use crate::vault::VaultError;
 
+use super::ago;
+
 pub struct SyncPane {
     vault_state: Entity<VaultState>,
     service: Entity<SyncService>,
@@ -231,16 +233,6 @@ fn delete_problem(error: &AccountError) -> String {
             "You own a team. Delete it or hand it over first (Settings, Teams).".into()
         }
         other => format!("The account was not deleted: {other}"),
-    }
-}
-
-/// "just now", "5 min ago", "2 h ago".
-fn ago(since: std::time::Instant) -> String {
-    let minutes = since.elapsed().as_secs() / 60;
-    match minutes {
-        0 => "just now".into(),
-        1..=59 => format!("{minutes} min ago"),
-        _ => format!("{} h ago", minutes / 60),
     }
 }
 
@@ -561,7 +553,8 @@ impl Render for SyncPane {
                                     .child("Sync now")
                                     .disabled(service.is_syncing)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.service.update(cx, |service, cx| service.sync_now(cx));
+                                        this.service
+                                            .update(cx, |service, cx| service.refresh_all(cx));
                                     })),
                             )
                             .child(sign_out_button("Sign out", cx)),

@@ -5,18 +5,20 @@ use crate::theme as flint_theme;
 use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use gpui::prelude::*;
 use gpui::{
-    div, px, svg, Anchor, App, ClipboardItem, Context, Entity, EventEmitter, Focusable,
-    MouseButton, MouseDownEvent, Window,
+    div, percentage, px, svg, Anchor, Animation, AnimationExt as _, App, ClipboardItem, Context,
+    Entity, EventEmitter, Focusable, MouseButton, MouseDownEvent, Transformation, Window,
 };
 use gpui_component::{
     h_flex,
     input::{Input, InputState},
+    tooltip::Tooltip,
     v_flex, ActiveTheme as _, Icon, IconName,
 };
 use uuid::Uuid;
 
 use crate::ui::host_icon::{host_icon, TILE_SIZE};
 use crate::ui::host_sharing;
+use crate::ui::sync_service::SyncService;
 use crate::ui::VaultState;
 use crate::vault::ServerEntrySummary;
 
@@ -73,6 +75,10 @@ pub struct ServersView {
     /// Hosts found in `~/.ssh/config`, counted once when the view is created.
     /// The empty state offers to import them; 0 until the scan finishes.
     ssh_config_host_count: usize,
+    /// The sync button was pressed and its round still runs. Rounds that
+    /// start on their own do not spin it: a short twitch every couple of
+    /// minutes looks like a glitch.
+    is_refreshing: bool,
 }
 
 impl EventEmitter<ServersViewEvent> for ServersView {}
@@ -97,6 +103,13 @@ impl ServersView {
         .detach();
 
         cx.observe(&vault_state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&SyncService::global(cx), |this, service, cx| {
+            if !service.read(cx).is_syncing {
+                this.is_refreshing = false;
+            }
+            cx.notify();
+        })
+        .detach();
 
         // The scan reads the config and every file it includes.
         cx.spawn(async move |this, cx| {
@@ -123,6 +136,7 @@ impl ServersView {
             group_filter: None,
             tag_filter: std::collections::HashSet::new(),
             ssh_config_host_count: 0,
+            is_refreshing: false,
         }
     }
 
@@ -269,6 +283,63 @@ impl ServersView {
     }
 
     /// Section heading for a host folder: name + count, quiet and small.
+    /// Shown only with a sync account: without one there is nothing to fetch.
+    fn render_sync_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let is_signed_in = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|vault| vault.sync_state())
+            .is_some_and(|state| state.session_token.is_some());
+        if !is_signed_in {
+            return None;
+        }
+        let service = SyncService::global(cx).read(cx);
+        let is_spinning = self.is_refreshing && service.is_syncing;
+        let tooltip: gpui::SharedString = match &service.sync_error {
+            Some(error) if !is_spinning => format!("Last sync failed: {error}").into(),
+            _ => "Sync now".into(),
+        };
+        let icon = Icon::empty()
+            .path("icons/rotate-cw.svg")
+            .size(px(14.))
+            .text_color(cx.theme().foreground);
+        let icon = if is_spinning {
+            icon.with_animation(
+                "sync-spin",
+                Animation::new(Duration::from_secs(1)).repeat(),
+                |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+            )
+            .into_any_element()
+        } else {
+            icon.into_any_element()
+        };
+        let button = h_flex()
+            .id("sync-hosts")
+            .size(px(28.))
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.))
+            .border_1()
+            .border_color(flint_theme::border())
+            .bg(flint_theme::field())
+            .when(!is_spinning, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.bg(flint_theme::element_hover()))
+                    .active(|s| s.bg(flint_theme::element_active()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let service = SyncService::global(cx);
+                        service.update(cx, |service, cx| service.refresh_all(cx));
+                        this.is_refreshing = service.read(cx).is_syncing;
+                        cx.notify();
+                    }))
+            })
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(icon);
+        Some(button.into_any_element())
+    }
+
     fn group_header(&self, name: &str, count: usize, cx: &App) -> gpui::AnyElement {
         h_flex()
             .w_full()
@@ -579,6 +650,8 @@ impl Render for ServersView {
             .and_then(|vm| vm.list_entries().ok())
             .map_or(0, |list| list.len());
 
+        let sync_button = self.render_sync_button(cx);
+
         // The one filled button on the screen.
         let add_server_btn = |id: &'static str| {
             h_flex()
@@ -689,6 +762,7 @@ impl Render for ServersView {
             )
             .child(div().flex_1())
             .child(search_field)
+            .children(sync_button)
             .child(
                 import_btn("import-hosts-header")
                     .child(Icon::empty().path("icons/download.svg").size(px(14.)))

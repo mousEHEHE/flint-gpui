@@ -13,6 +13,16 @@ pub fn init(cx: &mut App) {
     view::init(cx);
 }
 
+/// "just now", "5 min ago", "2 h ago".
+fn ago(since: std::time::Instant) -> String {
+    let minutes = since.elapsed().as_secs() / 60;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        _ => format!("{} h ago", minutes / 60),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Vault,

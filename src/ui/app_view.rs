@@ -32,6 +32,7 @@ use crate::ui::settings::{SettingsView, SettingsViewEvent};
 use crate::ui::sftp_browser::{RestorePaths, TransferKind};
 use crate::ui::shortcut_hints;
 use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
+use crate::ui::sync_service::SyncService;
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
 use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
 use crate::ui::update_service::{Download, UpdateService};
@@ -255,6 +256,8 @@ impl AppView {
             if !window.is_window_active() {
                 return;
             }
+            // A host shared while the user was away shows up when they come back.
+            SyncService::global(cx).update(cx, |service, cx| service.refresh_if_stale(cx));
             // A field, a file pane or a dialog that has the keys keeps them.
             // Otherwise they go to the terminal, so that coming back to flint
             // and pasting works without a click first.
@@ -1674,6 +1677,7 @@ impl AppView {
 
     /// Let every open server session react to the machine waking up.
     fn retry_sessions_after_wake(&mut self, cx: &mut Context<Self>) {
+        SyncService::global(cx).update(cx, |service, _| service.refresh_soon());
         for session in self.tabs.clone() {
             session.update(cx, |session, cx| session.retry_after_wake(cx));
         }
