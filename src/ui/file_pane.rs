@@ -448,6 +448,10 @@ pub struct FilePane {
     list_width: Pixels,
     /// Quick-filter substring. Empty means no filter. Set via the filter field.
     filter: String,
+    /// Indices into `entries` of the rows shown, see `update_visible`. Kept
+    /// because the list asks for it several times a frame, and filtering a
+    /// big folder takes about a millisecond.
+    visible: Rc<[usize]>,
     filter_input: Option<Entity<InputState>>,
     is_filtering: bool,
     /// Whether dotfiles are shown. Off by default, like Finder/Termius.
@@ -522,6 +526,7 @@ impl FilePane {
             dialog: None,
             list_width: px(600.),
             filter: String::new(),
+            visible: Rc::from([]),
             filter_input: None,
             is_filtering: false,
             show_hidden: false,
@@ -579,8 +584,13 @@ impl FilePane {
 
     /// Indices into `entries` (in sorted order) that pass the hidden-file and
     /// quick-filter rules. The virtualized list and keyboard nav both walk this.
-    fn visible_indices(&self) -> Vec<usize> {
-        visible_entry_indices(&self.entries, &self.filter, self.show_hidden)
+    fn visible_indices(&self) -> Rc<[usize]> {
+        self.visible.clone()
+    }
+
+    /// Call after `entries`, `filter` or `show_hidden` change.
+    fn update_visible(&mut self) {
+        self.visible = visible_entry_indices(&self.entries, &self.filter, self.show_hidden).into();
     }
 
     fn full_path(&self, name: &str) -> String {
@@ -591,9 +601,10 @@ impl FilePane {
     /// bottom.
     fn change_selection<R>(&mut self, change: impl FnOnce(&mut FileSelection, &[&str]) -> R) -> R {
         let entries = &self.entries;
-        let visible: Vec<&str> = visible_entry_indices(entries, &self.filter, self.show_hidden)
-            .into_iter()
-            .map(|ix| entries[ix].name.as_str())
+        let visible: Vec<&str> = self
+            .visible
+            .iter()
+            .map(|&ix| entries[ix].name.as_str())
             .collect();
         change(&mut self.selection, &visible)
     }
@@ -613,9 +624,9 @@ impl FilePane {
 
     /// The selected rows, top to bottom as shown.
     fn selected_entries(&self) -> Vec<&FileEntry> {
-        self.visible_indices()
-            .into_iter()
-            .map(|ix| &self.entries[ix])
+        self.visible
+            .iter()
+            .map(|&ix| &self.entries[ix])
             .filter(|e| self.selection.contains(&e.name))
             .collect()
     }
@@ -1046,6 +1057,7 @@ impl FilePane {
 
     fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
         self.show_hidden = !self.show_hidden;
+        self.update_visible();
         self.prune_selection();
         cx.notify();
     }
@@ -1057,6 +1069,7 @@ impl FilePane {
         if self.is_filtering {
             self.is_filtering = false;
             self.filter.clear();
+            self.update_visible();
             self.prune_selection();
             if let Some(input) = self.filter_input.as_ref().cloned() {
                 input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -1071,6 +1084,7 @@ impl FilePane {
             cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.filter = input.read(cx).value().to_string();
+                    this.update_visible();
                     this.prune_selection();
                     cx.notify();
                 }
@@ -1100,6 +1114,7 @@ impl FilePane {
     fn sort_entries(&mut self) {
         let (key, dir) = (self.sort_key, self.sort_dir);
         self.entries.sort_by(|a, b| cmp_entries(a, b, key, dir));
+        self.update_visible();
     }
 
     /// Header click: re-sort by `key`. Clicking the active column flips the
@@ -1180,6 +1195,7 @@ impl FilePane {
             return;
         }
         self.entries = entries;
+        self.update_visible();
         self.prune_selection();
         self.sync_preview(cx);
         if is_error_here {
@@ -2304,15 +2320,16 @@ impl Render for FilePane {
                 // with hundreds of entries. Item 0 is the "../" row when shown.
                 let view = cx.entity();
                 let item_count = self.visible_indices().len() + show_parent as usize;
+                // Built once a frame and shared: every selected row drags the
+                // whole selection, and the list calls back more than once.
+                let selected_items: Option<Rc<[EntryRef]>> =
+                    (self.selection.len() > 1).then(|| self.selected_items().into());
                 uniform_list(list_id, item_count, move |range, window, app| {
+                    let selected_items = selected_items.clone();
                     view.update(app, |this, cx| {
                         let has_focus = this.focus_handle.contains_focused(window, cx);
                         let pane_path = this.path.clone();
                         let kind = this.kind;
-                        // Built once and shared: every selected row drags the
-                        // whole selection.
-                        let selected_items: Option<Rc<[EntryRef]>> =
-                            (this.selection.len() > 1).then(|| this.selected_items().into());
                         let is_loading = this.is_loading;
                         let cols = visible_columns(this.list_width, kind.is_remote());
                         let visible = this.visible_indices();

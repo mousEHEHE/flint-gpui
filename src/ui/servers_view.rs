@@ -576,6 +576,7 @@ impl Render for ServersView {
             .manager()
             .and_then(|vm| vm.list_entries().ok())
             .unwrap_or_default();
+        let host_count = entries.len();
 
         // Every group and tag in use, for the filter bar's buttons.
         let mut all_groups: Vec<String> = entries
@@ -646,12 +647,6 @@ impl Render for ServersView {
         let accent_ink = theme.primary_foreground;
         let field = flint_theme::field();
         let selected_chip = flint_theme::element();
-        let host_count = self
-            .vault_state
-            .read(cx)
-            .manager()
-            .and_then(|vm| vm.list_entries().ok())
-            .map_or(0, |list| list.len());
 
         let sync_button = self.render_sync_button(cx);
 

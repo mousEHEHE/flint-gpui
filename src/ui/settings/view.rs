@@ -39,6 +39,27 @@ actions!(settings, [CloseSettings]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", CloseSettings, Some("Settings"))]);
+    list_terminal_fonts(cx);
+}
+
+/// The terminal fonts this machine has. `None` until the list is ready.
+struct InstalledTerminalFonts(Option<Vec<TerminalFont>>);
+
+impl gpui::Global for InstalledTerminalFonts {}
+
+/// Listing the system fonts takes tens of milliseconds, too long to do on
+/// the UI thread when Settings opens. It runs once, in the background.
+fn list_terminal_fonts(cx: &mut App) {
+    cx.set_global(InstalledTerminalFonts(None));
+    let text_system = cx.text_system().clone();
+    cx.spawn(async move |cx| {
+        let fonts = cx
+            .background_executor()
+            .spawn(async move { TerminalFont::available(&text_system.all_font_names()) })
+            .await;
+        cx.update(|cx| cx.set_global(InstalledTerminalFonts(Some(fonts))));
+    })
+    .detach();
 }
 
 pub enum SettingsViewEvent {
@@ -123,9 +144,6 @@ pub struct SettingsView {
     proxy_user: Entity<InputState>,
     proxy_pass: Entity<InputState>,
     proxy_error: Option<String>,
-    /// The terminal fonts this machine has. Listing system fonts is slow, so
-    /// it is done once when the dialog opens.
-    terminal_fonts: Vec<TerminalFont>,
     editor_command: Entity<InputState>,
     vault_pane: Entity<VaultPane>,
     sync_pane: Entity<SyncPane>,
@@ -147,6 +165,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&vault_state, |_, _, cx| cx.notify()).detach();
+        cx.observe_global::<InstalledTerminalFonts>(|_, cx| cx.notify())
+            .detach();
         // The About page shows how the last update check ended.
         cx.observe(&UpdateService::global(cx), |_, _, cx| cx.notify())
             .detach();
@@ -245,7 +265,6 @@ impl SettingsView {
                     .placeholder("optional")
             }),
             proxy_error: None,
-            terminal_fonts: TerminalFont::available(&cx.text_system().all_font_names()),
             editor_command,
             vault_pane,
             sync_pane,
@@ -1383,20 +1402,23 @@ impl SettingsView {
     fn render_terminal_fonts(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = Preferences::terminal_font(cx);
 
-        h_flex().flex_wrap().gap(px(4.)).children(
-            self.terminal_fonts
-                .clone()
-                .into_iter()
-                .enumerate()
-                .map(|(ix, font)| {
-                    select_chip(("terminal-font", ix), font.family(), font == current, cx)
-                        .font_family(font.family())
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            Preferences::update(cx, |prefs| prefs.terminal_font = font);
-                            cx.notify();
-                        }))
-                }),
-        )
+        // The bundled font is always there, so it shows while the list loads.
+        let fonts = cx
+            .try_global::<InstalledTerminalFonts>()
+            .and_then(|fonts| fonts.0.clone())
+            .unwrap_or_else(|| vec![TerminalFont::CascadiaCode]);
+
+        h_flex()
+            .flex_wrap()
+            .gap(px(4.))
+            .children(fonts.into_iter().enumerate().map(|(ix, font)| {
+                select_chip(("terminal-font", ix), font.family(), font == current, cx)
+                    .font_family(font.family())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        Preferences::update(cx, |prefs| prefs.terminal_font = font);
+                        cx.notify();
+                    }))
+            }))
     }
 
     fn render_terminal_schemes(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, AnyElement, AnyWindowHandle, App, Context, Entity, EntityId, FocusHandle,
-    Focusable, ModifiersChangedEvent, SystemNotification, Task, WeakEntity, Window,
+    Focusable, ModifiersChangedEvent, StyleRefinement, SystemNotification, Task, WeakEntity,
+    Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -31,7 +32,7 @@ use crate::ui::servers_view::{ServersView, ServersViewEvent};
 use crate::ui::settings::{SettingsView, SettingsViewEvent};
 use crate::ui::sftp_browser::{RestorePaths, TransferKind};
 use crate::ui::shortcut_hints;
-use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
+use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent, SIDEBAR_WIDTH};
 use crate::ui::sync_service::SyncService;
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
 use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
@@ -139,6 +140,9 @@ const PALETTE_SHORTCUT: &str = "Ctrl+Shift+P";
 
 /// How long after an unlock the "Check for updates?" question waits.
 const UPDATE_QUESTION_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+/// How long small vault changes, like the last folder of a host, wait before
+/// they are written. Folder changes come in bursts.
+const VAULT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Shown next to "Lock now" and the palette command. Must track the binding above.
 #[cfg(target_os = "macos")]
@@ -162,6 +166,8 @@ pub struct AppView {
     focused_tab: Option<EntityId>,
     /// Waits out `shortcut_hints::SHOW_DELAY` while the modifier is held.
     hint_task: Option<Task<()>>,
+    /// Writes the vault once small changes stop coming, see `save_vault_soon`.
+    vault_save_task: Option<Task<()>>,
     vault_state: Entity<VaultState>,
     servers_view: Entity<ServersView>,
     sidebar: Entity<Sidebar>,
@@ -282,6 +288,12 @@ impl AppView {
         })
         .detach();
 
+        cx.on_app_quit(|this, cx| {
+            this.save_vault_now(cx);
+            async {}
+        })
+        .detach();
+
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -289,6 +301,7 @@ impl AppView {
             focus_handle,
             focused_tab: None,
             hint_task: None,
+            vault_save_task: None,
             vault_state,
             servers_view,
             sidebar,
@@ -1084,6 +1097,25 @@ impl AppView {
         if let Some(Err(e)) = result {
             tracing::warn!(?e, "failed to record host open time");
         }
+        self.save_vault_soon(cx);
+    }
+
+    /// Write the small vault changes a moment after the last one.
+    fn save_vault_soon(&mut self, cx: &mut Context<Self>) {
+        self.vault_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VAULT_SAVE_DELAY).await;
+            this.update(cx, |this, cx| this.save_vault_now(cx)).ok();
+        }));
+    }
+
+    fn save_vault_now(&mut self, cx: &mut Context<Self>) {
+        self.vault_save_task = None;
+        let result = self
+            .vault_state
+            .update(cx, |vs, _| vs.manager_mut().map(|vm| vm.save_pending()));
+        if let Some(Err(e)) = result {
+            tracing::warn!(?e, "failed to save the vault");
+        }
     }
 
     /// Persist the per-server recency the command palette uses to surface
@@ -1469,6 +1501,7 @@ impl AppView {
                         if let Some(Err(e)) = result {
                             tracing::warn!(?e, "failed to persist detected OS");
                         }
+                        this.save_vault_soon(cx);
                     }
                 }
                 ServerSessionEvent::HostKeyAccepted {
@@ -1505,6 +1538,7 @@ impl AppView {
                         if let Some(Err(e)) = result {
                             tracing::warn!(?e, "failed to persist last SFTP folders");
                         }
+                        this.save_vault_soon(cx);
                     }
                 }
                 ServerSessionEvent::TransferFinished {
@@ -2528,7 +2562,11 @@ impl AppView {
     fn render_active_tab(&self) -> AnyElement {
         match self.tabs.get(self.active_tab) {
             Some(session) => session.clone().into_any_element(),
-            None => self.servers_view.clone().into_any_element(),
+            None => self
+                .servers_view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
         }
     }
 }
@@ -2712,7 +2750,17 @@ impl Render for AppView {
                     .min_h_0()
                     .items_stretch()
                     .overflow_hidden()
-                    .child(self.sidebar.clone())
+                    // Cached like the hosts view: a terminal frame or a
+                    // transfer tick redraws this view, and the sidebar has
+                    // not changed. The style repeats the sidebar's own size.
+                    .child(
+                        self.sidebar.clone().cached(
+                            StyleRefinement::default()
+                                .w(px(SIDEBAR_WIDTH))
+                                .flex_none()
+                                .h_full(),
+                        ),
+                    )
                     .child(
                         v_flex()
                             .flex_1()

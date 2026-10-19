@@ -2,8 +2,10 @@ use async_channel::{Receiver, Sender};
 use russh::Channel;
 use russh::ChannelMsg;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
 use crate::term_emulator::TermEmulator;
 
@@ -11,6 +13,15 @@ use crate::term_emulator::TermEmulator;
 /// fully covered), shell workers keep feeding output to the emulator but stop
 /// copying the screen for the UI, and send one fresh copy when it shows again.
 static IS_WINDOW_VISIBLE: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(true).0);
+
+/// The shortest time between two screen copies while output streams in. The
+/// UI draws one copy per frame and drops the rest, and a copy of a big screen
+/// costs more than parsing the output it shows.
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(4);
+
+pub fn is_window_visible() -> bool {
+    *IS_WINDOW_VISIBLE.borrow()
+}
 
 pub fn set_window_visible(is_visible: bool) {
     IS_WINDOW_VISIBLE.send_replace(is_visible);
@@ -326,6 +337,11 @@ pub async fn handle_shell_commands(
     let mut emulator = TermEmulator::new(initial_rows, initial_cols);
     let mut window_visibility = IS_WINDOW_VISIBLE.subscribe();
     let mut is_snapshot_stale = false;
+    // Output came in that the UI has not seen yet; the timer sends it.
+    let mut is_snapshot_due = false;
+    let mut last_snapshot_at = Instant::now();
+    let snapshot_timer = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(snapshot_timer);
 
     // Send initial empty snapshot so the UI has something to render immediately.
     let _ = event_tx
@@ -410,9 +426,19 @@ pub async fn handle_shell_commands(
                 }
             }
 
+            () = &mut snapshot_timer, if is_snapshot_due => {
+                is_snapshot_due = false;
+                if *window_visibility.borrow() {
+                    last_snapshot_at = Instant::now();
+                    let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
+                } else {
+                    is_snapshot_stale = true;
+                }
+            }
+
             msg = channel.wait() => {
                 match msg {
-                    Some(ChannelMsg::Data { data }) => {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                         emulator.advance(data.as_ref());
                         let replies = emulator.take_replies();
                         if !replies.is_empty() {
@@ -421,25 +447,16 @@ pub async fn handle_shell_commands(
                                 break;
                             }
                         }
-                        if *window_visibility.borrow() {
-                            let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
-                        } else {
+                        if !*window_visibility.borrow() {
                             is_snapshot_stale = true;
-                        }
-                    }
-                    Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        emulator.advance(data.as_ref());
-                        let replies = emulator.take_replies();
-                        if !replies.is_empty() {
-                            if let Err(e) = channel.data(replies.as_slice()).await {
-                                let _ = event_tx.send(ShellEvent::Error(format!("send reply: {e}"))).await;
-                                break;
-                            }
-                        }
-                        if *window_visibility.borrow() {
+                        } else if last_snapshot_at.elapsed() >= SNAPSHOT_INTERVAL {
+                            // A keystroke's echo goes out at once.
+                            is_snapshot_due = false;
+                            last_snapshot_at = Instant::now();
                             let _ = event_tx.send(ShellEvent::Snapshot(emulator.snapshot())).await;
-                        } else {
-                            is_snapshot_stale = true;
+                        } else if !is_snapshot_due {
+                            is_snapshot_due = true;
+                            snapshot_timer.as_mut().reset(last_snapshot_at + SNAPSHOT_INTERVAL);
                         }
                     }
                     Some(ChannelMsg::ExitStatus { .. })

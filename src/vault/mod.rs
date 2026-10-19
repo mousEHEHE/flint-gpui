@@ -86,6 +86,8 @@ pub struct VaultManager {
     /// Set while [`VaultManager::batch`] runs: record edits skip the file and
     /// one write happens at the end.
     is_deferring_saves: bool,
+    /// Small changes that wait for the next save, see `save_later`.
+    is_save_pending: bool,
 }
 
 impl std::fmt::Debug for VaultManager {
@@ -449,8 +451,26 @@ impl VaultManager {
 
     /// Zero the DEK and drop the vault state. The decrypted records are
     /// freed, not wiped.
-    pub fn lock(self) {
-        drop(self);
+    pub fn lock(mut self) {
+        if let Err(e) = self.save_pending() {
+            tracing::warn!(?e, "failed to save the vault before locking");
+        }
+    }
+
+    /// Write the small changes that `save_later` held back. Call it a moment
+    /// after they stop coming, and before the app quits.
+    pub fn save_pending(&mut self) -> Result<(), VaultError> {
+        if !self.is_save_pending {
+            return Ok(());
+        }
+        self.save()
+    }
+
+    /// For changes that are cheap to lose, like the last folder of a host.
+    /// A save flushes the disk and takes several milliseconds, too long to
+    /// do on every folder change.
+    fn save_later(&mut self) {
+        self.is_save_pending = true;
     }
 
     pub fn list_entries(&self) -> Result<Vec<ServerEntrySummary>, VaultError> {
@@ -556,7 +576,8 @@ impl VaultManager {
             return Ok(());
         }
         entry.os = Some(os);
-        self.save()
+        self.save_later();
+        Ok(())
     }
 
     /// Persist the host key fingerprint the user trusted for this entry
@@ -620,11 +641,13 @@ impl VaultManager {
         }
         entry.last_local_dir = Some(local);
         entry.last_remote_dir = Some(remote);
-        self.save()
+        self.save_later();
+        Ok(())
     }
 
     /// Record that a session was just opened to this host. Updates the
-    /// recency timestamp the sidebar uses to order "recent" hosts, then saves.
+    /// recency timestamp the sidebar uses to order "recent" hosts. It is
+    /// written with the next save.
     pub fn touch_entry_opened(&mut self, id: Uuid) -> Result<(), VaultError> {
         let id = self.current_id(id);
         let entry = self
@@ -634,7 +657,8 @@ impl VaultManager {
             .find(|e| e.id == id)
             .ok_or(VaultError::EntryNotFound(id))?;
         entry.last_opened_at = Some(unix_now() as i64);
-        self.save()
+        self.save_later();
+        Ok(())
     }
 
     /// Remove a host and drop every jump-host link pointing at it, so the hosts
@@ -1276,6 +1300,7 @@ impl VaultManager {
             enc_dek_by_recovery,
             payload,
             is_deferring_saves: false,
+            is_save_pending: false,
         }
     }
 
@@ -1297,7 +1322,7 @@ impl VaultManager {
         Ok(Zeroizing::new(arr))
     }
 
-    fn save(&self) -> Result<(), VaultError> {
+    fn save(&mut self) -> Result<(), VaultError> {
         if self.is_deferring_saves {
             return Ok(());
         }
@@ -1310,7 +1335,9 @@ impl VaultManager {
             enc_dek_by_recovery: self.enc_dek_by_recovery.clone(),
             enc_payload,
         };
-        storage::write_vault(&self.path, &vf)
+        storage::write_vault(&self.path, &vf)?;
+        self.is_save_pending = false;
+        Ok(())
     }
 
     fn encrypt_payload(dek: &[u8; 32], payload: &VaultPayload) -> Result<AeadBlob, VaultError> {

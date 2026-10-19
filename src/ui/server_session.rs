@@ -20,7 +20,7 @@ use crate::ui::transfer_rate::TransferRate;
 use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, App, AsyncApp, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable as _, MouseButton, Pixels, Task, WeakEntity, Window,
+    Focusable as _, MouseButton, Pixels, StyleRefinement, Task, WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -2116,7 +2116,13 @@ impl Render for ServerSession {
                         .overflow_hidden()
                         .child(terminal_view.clone()),
                 );
-            let files_block = div().size_full().overflow_hidden().child(browser.clone());
+            // Cached: terminal output redraws the session many times a second,
+            // and the file panes have not changed.
+            let files_block = div().size_full().overflow_hidden().child(
+                browser
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            );
 
             // The initial sizes only set the ratio: the panels are scaled to
             // fill whatever room there is. With the file panes hidden the

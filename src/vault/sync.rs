@@ -882,6 +882,7 @@ impl VaultManager {
             }
         }
 
+        let has_pushed = !result.pushed.is_empty();
         for pushed in result.pushed {
             if pushed.is_deleted {
                 ledger.items.remove(&pushed.id);
@@ -903,7 +904,10 @@ impl VaultManager {
         let started_at = ledger.cursor;
 
         self.put_back(result.vault_id, ledger);
-        self.save()?;
+        // Most rounds bring nothing new, and a save flushes the disk.
+        if changed > 0 || has_pushed || started_at != result.started_at {
+            self.save()?;
+        }
         let held = (!held.is_empty()).then(|| SyncResult {
             vault_id: result.vault_id,
             started_at,

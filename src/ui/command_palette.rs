@@ -258,6 +258,10 @@ pub struct CommandPalette {
     active_server_id: Option<Uuid>,
     /// Ids of the servers with an open tab, as strings. They get the green dot.
     connected_server_ids: std::collections::HashSet<String>,
+    /// The row count and section starts the last render showed. The arrow keys
+    /// work from these instead of building every row again.
+    shown_count: usize,
+    shown_sections: Vec<(SharedString, usize)>,
 }
 
 impl CommandPalette {
@@ -320,8 +324,12 @@ impl CommandPalette {
         cx.observe(&vault_state, |this, _, cx| this.select(0, cx))
             .detach();
 
-        cx.subscribe(&search, |this, _, _: &InputEvent, cx| this.select(0, cx))
-            .detach();
+        cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.select(0, cx);
+            }
+        })
+        .detach();
 
         Self {
             focus_handle,
@@ -333,6 +341,8 @@ impl CommandPalette {
             has_active_server,
             active_server_id,
             connected_server_ids,
+            shown_count: 0,
+            shown_sections: Vec::new(),
         }
     }
 
@@ -523,9 +533,8 @@ impl CommandPalette {
     /// Move the selection and scroll the list so the row stays in view.
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected_ix = ix;
-        let (_, sections) = self.items(cx);
         self.scroll_handle
-            .scroll_to_item(list_child_index(ix, &sections));
+            .scroll_to_item(list_child_index(ix, &self.shown_sections));
         cx.notify();
     }
 
@@ -536,8 +545,7 @@ impl CommandPalette {
     }
 
     fn handle_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        let len = self.items(cx).0.len();
-        if self.selected_ix + 1 < len {
+        if self.selected_ix + 1 < self.shown_count {
             self.select(self.selected_ix + 1, cx);
         }
     }
@@ -632,6 +640,8 @@ impl Render for CommandPalette {
 
         let (items, sections) = self.items(cx);
         let total = items.len();
+        self.shown_count = total;
+        self.shown_sections = sections.clone();
         let selected = self.selected_ix.min(total.saturating_sub(1));
 
         // Banner shown above the input in the picking modes.

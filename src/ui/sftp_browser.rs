@@ -45,7 +45,19 @@ const DRAGOUT_PREFETCH_MAX_FILE: u64 = 1024 * 1024;
 /// bandwidth spent on files that may never be dragged anywhere, so it is a
 /// budget rather than a per-file rule.
 const DRAGOUT_PREFETCH_BUDGET: u64 = 4 * 1024 * 1024;
+/// A folder of many tiny or empty files would fit the byte budget with
+/// thousands of copies, each with its own setup on the UI thread.
+const DRAGOUT_PREFETCH_MAX_FILES: usize = 64;
+/// What a tiny file counts against the budget: it costs a round trip and a
+/// file on disk even when it holds no bytes.
+const DRAGOUT_PREFETCH_MIN_COST: u64 = 4 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// Progress text changes faster than it can be read, and each change redraws
+/// the whole window.
+const STATUS_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+/// How many of the last visited folders the timer lists again. Older ones
+/// are listed again when the user goes back to them.
+const REFRESH_RECENT: usize = 10;
 /// A preview reached with the arrows waits this long before it reads, so
 /// passing over rows costs nothing.
 const PREVIEW_MOVE_DELAY: Duration = Duration::from_millis(120);
@@ -266,6 +278,9 @@ static NEXT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct SftpBrowser {
     _refresh_task: Task<()>,
+    /// When transfer progress last went to the status bar, see
+    /// `STATUS_PROGRESS_INTERVAL`.
+    progress_shown_at: Option<std::time::Instant>,
     /// Tracked by the left half while it shows a placeholder, not a pane.
     focus_handle: FocusHandle,
     local_pane: Entity<FilePane>,
@@ -370,6 +385,7 @@ impl RemoteSide {
         let paths: Vec<String> = self
             .visited_paths
             .iter()
+            .take(REFRESH_RECENT)
             .filter_map(|p| p.to_str().map(String::from))
             .collect();
         tracing::debug!(
@@ -530,9 +546,18 @@ impl SftpBrowser {
             this.on_local_event(event, cx);
         })
         .detach();
+        // The session draws this view from a cache, and the layout of the
+        // panes comes from the preferences.
+        cx.observe_global::<Preferences>(|_, cx| cx.notify())
+            .detach();
 
         let refresh_task = cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(REFRESH_INTERVAL).await;
+            // Nobody sees the panes. The next tick after the window shows
+            // again catches up.
+            if !crate::shell::is_window_visible() {
+                continue;
+            }
 
             let result = this.update(cx, |browser, _cx| {
                 [Side::Left, Side::Right]
@@ -557,6 +582,7 @@ impl SftpBrowser {
 
         let mut browser = Self {
             _refresh_task: refresh_task,
+            progress_shown_at: None,
             focus_handle: cx.focus_handle(),
             local_pane,
             right,
@@ -1005,6 +1031,13 @@ impl SftpBrowser {
                 if let Some(id) = id {
                     cx.emit(BrowserEvent::TransferProgress { id, done, total });
                 }
+                let is_recent = self
+                    .progress_shown_at
+                    .is_some_and(|at| at.elapsed() < STATUS_PROGRESS_INTERVAL);
+                if is_recent && done < total {
+                    return;
+                }
+                self.progress_shown_at = Some(std::time::Instant::now());
                 let msg = if total > 0 {
                     let pct = ((done as f64 / total as f64) * 100.0).min(100.0) as u32;
                     format!(
@@ -1905,10 +1938,14 @@ impl SftpBrowser {
 
         let mut budget = DRAGOUT_PREFETCH_BUDGET;
         let mut planned = Vec::new();
-        for entry in candidates {
-            if entry.size > budget {
+        // Files staged before count too, so a revisit checks no more files
+        // than a first visit.
+        for entry in candidates.into_iter().take(DRAGOUT_PREFETCH_MAX_FILES) {
+            let cost = entry.size.max(DRAGOUT_PREFETCH_MIN_COST);
+            if cost > budget {
                 break;
             }
+            budget -= cost;
             let remote = format!("{}/{}", parent.trim_end_matches('/'), entry.name);
             if self.right.pane.read(cx).has_fresh_staged(&remote) {
                 continue;
@@ -1916,7 +1953,6 @@ impl SftpBrowser {
             let Some(staged) = self.staging_target(&remote) else {
                 continue;
             };
-            budget -= entry.size;
             planned.push((remote, staged, entry.size, entry.mtime));
         }
         if planned.is_empty() {

@@ -17,7 +17,7 @@ use crate::ui::shortcut_hints;
 use crate::ui::VaultState;
 use crate::vault::ServerEntrySummary;
 
-const SIDEBAR_WIDTH: f32 = 232.;
+pub(crate) const SIDEBAR_WIDTH: f32 = 232.;
 const ROW_HEIGHT: f32 = 28.;
 const SIDEBAR_GROUP: &str = "sidebar-host-row";
 /// Cap on how many closed-but-recent hosts the RECENT zone shows. The full

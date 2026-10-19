@@ -18,7 +18,7 @@ use crate::ui::context_menu::{ContextMenu, ContextMenuItem};
 use crate::ui::keyboard_layout::bind_chord;
 use crate::ui::mouse_report::{encode_mouse_event, MouseButton as ReportButton, MouseEventKind};
 use crate::ui::terminal_element::{
-    clamp_to_grid, pixel_to_grid, CachedGrid, TerminalElement, LINE_HEIGHT_FACTOR,
+    clamp_to_grid, pixel_to_grid, CachedGrid, ShapedLines, TerminalElement, LINE_HEIGHT_FACTOR,
 };
 use crate::ui::terminal_keymap;
 use crate::ui::terminal_link::{self, TerminalLink};
@@ -133,6 +133,10 @@ pub struct TerminalView {
     /// the palette generation: a repaint that changes neither reuses it. Wrapped
     /// in `Rc` so reusing it is a refcount bump.
     pub(crate) cached_grid: Option<(u64, u32, Rc<CachedGrid>)>,
+    /// The lines shaped for the last grid, reused by the next one. Typing
+    /// changes one line, and shaping the whole screen again for it would
+    /// cost a frame.
+    pub(crate) shaped_lines: ShapedLines,
     pub(crate) focus_handle: FocusHandle,
     has_auto_focused: bool,
     pub(crate) last_size: Option<(u16, u16)>,
@@ -245,6 +249,7 @@ impl TerminalView {
             last_snapshot: None,
             snapshot_version: 0,
             cached_grid: None,
+            shaped_lines: ShapedLines::default(),
             focus_handle,
             has_auto_focused: false,
             last_size: None,

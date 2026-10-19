@@ -7,6 +7,7 @@ use gpui::{
     Window,
 };
 use gpui_component::ActiveTheme as _;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -119,6 +120,41 @@ pub struct GridLayout {
     pub bg_rects: Vec<LayoutRect>,
     pub text_runs: Vec<BatchedTextRun>,
     pub cursor: Option<CursorLayout>,
+}
+
+/// Shaped lines by their text. The same text in another style is a separate
+/// entry, so the list per text is almost always one long.
+#[derive(Default)]
+pub struct ShapedLines(HashMap<SharedString, Vec<ShapedEntry>>);
+
+struct ShapedEntry {
+    style: TextRun,
+    font_size: Pixels,
+    is_wide: bool,
+    shaped: ShapedLine,
+}
+
+impl ShapedLines {
+    fn get(&self, run: &BatchedTextRun) -> Option<ShapedLine> {
+        self.0.get(&run.text)?.iter().find_map(|entry| {
+            let is_same = entry.style == run.style
+                && entry.font_size == run.font_size
+                && entry.is_wide == run.is_wide;
+            is_same.then(|| entry.shaped.clone())
+        })
+    }
+
+    fn insert(&mut self, run: &BatchedTextRun, shaped: ShapedLine) {
+        self.0
+            .entry(run.text.clone())
+            .or_default()
+            .push(ShapedEntry {
+                style: run.style.clone(),
+                font_size: run.font_size,
+                is_wide: run.is_wide,
+                shaped,
+            });
+    }
 }
 
 /// A text run already shaped into glyphs, positioned by grid coordinates.
@@ -872,6 +908,10 @@ impl Element for TerminalElement {
         let cached = match source {
             GridSource::Cached(cached) => cached,
             GridSource::Fresh(grid) => {
+                let previous = self
+                    .view
+                    .update(cx, |view, _| std::mem::take(&mut view.shaped_lines));
+                let mut current = ShapedLines::default();
                 // Runs of plain spaces with no underline/strikethrough draw nothing,
                 // so skip shaping and emitting them. Terminals are mostly blank, so
                 // this drops the bulk of the screen. Positions are absolute via
@@ -890,15 +930,26 @@ impl Element for TerminalElement {
                         } else {
                             Some(cell_width)
                         };
+                        // A run repeated on screen is shaped once.
+                        let shaped = match current.get(run) {
+                            Some(shaped) => shaped,
+                            None => {
+                                let shaped = previous.get(run).unwrap_or_else(|| {
+                                    window.text_system().shape_line(
+                                        run.text.clone(),
+                                        run.font_size,
+                                        std::slice::from_ref(&run.style),
+                                        force_w,
+                                    )
+                                });
+                                current.insert(run, shaped.clone());
+                                shaped
+                            }
+                        };
                         ShapedRun {
                             line: run.line,
                             start_col: run.start_col,
-                            shaped: window.text_system().shape_line(
-                                run.text.clone(),
-                                run.font_size,
-                                std::slice::from_ref(&run.style),
-                                force_w,
-                            ),
+                            shaped,
                         }
                     })
                     .collect();
@@ -916,6 +967,7 @@ impl Element for TerminalElement {
                 });
                 self.view.update(cx, |view, _cx| {
                     view.cached_grid = Some((version, generation, cached.clone()));
+                    view.shaped_lines = current;
                 });
                 cached
             }
