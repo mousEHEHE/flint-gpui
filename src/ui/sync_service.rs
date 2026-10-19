@@ -170,8 +170,9 @@ enum Round {
     /// With the session token the round used.
     Synced(String, Vec<Result<SyncResult, ApiError>>),
     RecoveryTold(Result<Option<String>, ApiError>),
-    /// `None` when the account has no team keys, so it is in no team.
-    Teams(Result<Option<TeamsChecked>, TeamError>),
+    /// With the session token the round used. `None` when the account has
+    /// no team keys, so it is in no team.
+    Teams(String, Result<Option<TeamsChecked>, TeamError>),
 }
 
 /// Run blocking work on its own thread and hand the result to async code.
@@ -363,7 +364,8 @@ impl SyncService {
                 return Round::RecoveryTold(account::tell_recovery(&api, &recovery));
             }
             if let Some(context) = teams {
-                return Round::Teams(check_teams(&api, &context));
+                let token = context.session_token.clone();
+                return Round::Teams(token, check_teams(&api, &context));
             }
             let token = jobs[0].session_token.clone();
             let results = jobs
@@ -382,6 +384,9 @@ impl SyncService {
                         this.is_syncing = false;
                         this.sync_error = Some("Sync stopped unexpectedly.".into());
                         this.retry_after = Some(Instant::now() + RETRY_DELAY);
+                        if this.is_settling {
+                            this.settle(cx);
+                        }
                         cx.notify();
                     }
                 })
@@ -406,14 +411,14 @@ impl SyncService {
 
     fn finish_round(&mut self, round: Round, cx: &mut Context<Self>) {
         self.is_syncing = false;
-        let was_team_check = matches!(round, Round::Teams(_));
+        let was_team_check = matches!(round, Round::Teams(..));
         let outcome = self.vault_state.update(cx, |vault_state, cx| {
             // Locked while the round ran. Nothing is lost: the next round
             // after unlock fetches the same changes again.
             let Some(vault) = vault_state.manager_mut() else {
                 return Ok(false);
             };
-            if let Round::Teams(Ok(Some(checked))) = &round {
+            if let Round::Teams(_, Ok(Some(checked))) = &round {
                 self.join_requests = checked.join_requests.clone();
             }
             let (has_more, changed) = take_in(vault, round)?;
@@ -989,13 +994,17 @@ fn take_in(vault: &mut VaultManager, round: Round) -> Result<(bool, bool), Strin
             saved(vault.finish_recovery(session_token))?;
             Ok((is_signed_in, false))
         }
-        Round::Teams(Ok(Some(checked))) => {
+        Round::Teams(token, Err(TeamError::Api(e))) if e.is_session_ended() => {
+            saved(vault.end_session(&token))?;
+            Ok((false, false))
+        }
+        Round::Teams(_, Ok(Some(checked))) => {
             saved(vault.apply_teams(checked.update))?;
             // The items come next, in a round of their own.
             Ok((true, true))
         }
-        Round::Teams(Ok(None)) => Ok((true, false)),
-        Round::Teams(Err(e)) => Err(e.to_string()),
+        Round::Teams(_, Ok(None)) => Ok((true, false)),
+        Round::Teams(_, Err(e)) => Err(e.to_string()),
         Round::RecoveryTold(Err(e)) => Err(e.to_string()),
     }
 }
@@ -1151,5 +1160,18 @@ mod tests {
 
         assert_eq!(outcome, Err("refused: vault_not_found".to_string()));
         assert!(!vault.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_team_check_refused_for_the_session_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = vault_in_a_team(&dir);
+        let refusal = Err(TeamError::Api(refused(401, "unauthorized")));
+
+        let outcome = take_in(&mut vault, Round::Teams("token".into(), refusal));
+
+        assert_eq!(outcome, Ok((false, false)));
+        let state = vault.sync_state().unwrap();
+        assert_eq!(state.session_token, None);
     }
 }

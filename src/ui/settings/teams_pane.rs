@@ -45,6 +45,10 @@ pub struct TeamsPane {
     /// The vault whose deletion was just refused. Its form is still open and
     /// shows why, so the pane does not say it a second time at the top.
     failed_delete: Option<Uuid>,
+    /// The refresh button was pressed and its round still runs. Rounds that
+    /// start on their own do not spin it, like the sync button in the host
+    /// list.
+    is_refreshing: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -208,6 +212,9 @@ impl TeamsPane {
         let service = SyncService::global(cx);
         cx.observe(&service, |this, service, cx| {
             let service = service.read(cx);
+            if !service.is_syncing {
+                this.is_refreshing = false;
+            }
             if !service.is_team_busy {
                 this.note_delete_outcome(service.team_error.is_some());
                 this.pressed = None;
@@ -273,6 +280,7 @@ impl TeamsPane {
             pressed: None,
             handing_over: None,
             failed_delete: None,
+            is_refreshing: false,
         }
     }
 
@@ -981,11 +989,12 @@ impl Render for TeamsPane {
         // Every button is off while an action runs; the one that started it spins.
         let is_spinning = move |id: &SharedString| is_busy && pressed.as_ref() == Some(id);
 
-        let status = match (&service.sync_error, service.is_syncing, service.last_synced) {
-            (_, true, _) => caption("Updating…".into()),
+        let is_refreshing = self.is_refreshing && service.is_syncing;
+        let status = match (&service.sync_error, is_refreshing, service.last_synced) {
+            (_, true, _) => caption("Syncing…".into()),
             (Some(error), _, _) => caption(format!("Last sync failed: {error}")).text_color(danger),
-            (None, _, Some(at)) => caption(format!("Updated {}", ago(at))),
-            (None, _, None) => caption("Not synced yet".into()),
+            (None, _, Some(at)) => caption(format!("Synced {}.", ago(at))),
+            (None, _, None) => caption("Not synced yet.".into()),
         };
         let refresh_row = h_flex().gap(px(10.)).items_center().child(status).child(
             Button::new("teams-refresh")
@@ -993,12 +1002,14 @@ impl Render for TeamsPane {
                 .xsmall()
                 .icon(Icon::empty().path("icons/rotate-cw.svg"))
                 .loading_icon(Icon::empty().path("icons/rotate-cw.svg"))
-                .loading(service.is_syncing)
-                .disabled(service.is_syncing || is_busy)
+                .loading(is_refreshing)
+                .disabled(is_refreshing || is_busy)
                 .child("Refresh")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.service
                         .update(cx, |service, cx| service.refresh_all(cx));
+                    this.is_refreshing = this.service.read(cx).is_syncing;
+                    cx.notify();
                 })),
         );
 

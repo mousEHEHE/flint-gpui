@@ -5,14 +5,15 @@ use crate::theme as flint_theme;
 use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use gpui::prelude::*;
 use gpui::{
-    div, percentage, px, svg, Anchor, Animation, AnimationExt as _, App, ClipboardItem, Context,
-    Entity, EventEmitter, Focusable, MouseButton, MouseDownEvent, Transformation, Window,
+    div, px, svg, Anchor, App, ClipboardItem, Context, Entity, EventEmitter, Focusable,
+    MouseButton, MouseDownEvent, Window,
 };
 use gpui_component::{
     h_flex,
     input::{Input, InputState},
+    spinner::Spinner,
     tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Icon, IconName,
+    v_flex, ActiveTheme as _, Icon, IconName, Sizable as _,
 };
 use uuid::Uuid;
 
@@ -282,7 +283,6 @@ impl ServersView {
             }))
     }
 
-    /// Section heading for a host folder: name + count, quiet and small.
     /// Shown only with a sync account: without one there is nothing to fetch.
     fn render_sync_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let is_signed_in = self
@@ -297,22 +297,24 @@ impl ServersView {
         let service = SyncService::global(cx).read(cx);
         let is_spinning = self.is_refreshing && service.is_syncing;
         let tooltip: gpui::SharedString = match &service.sync_error {
-            Some(error) if !is_spinning => format!("Last sync failed: {error}").into(),
-            _ => "Sync now".into(),
+            _ if is_spinning => "Syncing…".into(),
+            Some(error) => format!("Last sync failed: {error}").into(),
+            None => "Sync now".into(),
         };
-        let icon = Icon::empty()
-            .path("icons/rotate-cw.svg")
-            .size(px(14.))
-            .text_color(cx.theme().foreground);
+        let icon = Icon::empty().path("icons/rotate-cw.svg");
         let icon = if is_spinning {
-            icon.with_animation(
-                "sync-spin",
-                Animation::new(Duration::from_secs(1)).repeat(),
-                |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-            )
-            .into_any_element()
+            Spinner::new()
+                .icon(icon)
+                .with_size(px(14.))
+                .color(cx.theme().foreground)
+                .into_any_element()
         } else {
-            icon.into_any_element()
+            let color = if service.sync_error.is_some() {
+                cx.theme().danger
+            } else {
+                cx.theme().foreground
+            };
+            icon.size(px(14.)).text_color(color).into_any_element()
         };
         let button = h_flex()
             .id("sync-hosts")
@@ -340,6 +342,7 @@ impl ServersView {
         Some(button.into_any_element())
     }
 
+    /// Section heading for a host folder: name + count, quiet and small.
     fn group_header(&self, name: &str, count: usize, cx: &App) -> gpui::AnyElement {
         h_flex()
             .w_full()
