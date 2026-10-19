@@ -3765,10 +3765,6 @@ fn add_listing_to_plan(
     }
 }
 
-/// Read `remote` on this server into `chunks`, for the worker of another
-/// server to write. A failure travels down the same channel. When the reader
-/// of the channel goes away this stops without a word: the other side has
-/// already reported why.
 /// The start of a file and its full size.
 pub struct FileHead {
     pub bytes: Vec<u8>,
@@ -3810,6 +3806,10 @@ async fn read_head(
     })
 }
 
+/// Read `remote` on this server into `chunks`, for the worker of another
+/// server to write. A failure travels down the same channel. When the reader
+/// of the channel goes away this stops without a word: the other side has
+/// already reported why.
 async fn read_file_into(
     sftp: &SftpSession,
     remote: &str,

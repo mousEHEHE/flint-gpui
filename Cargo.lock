@@ -1919,6 +1919,7 @@ dependencies = [
  "dirs 5.0.1",
  "ed25519-dalek",
  "futures",
+ "gif 0.14.2",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

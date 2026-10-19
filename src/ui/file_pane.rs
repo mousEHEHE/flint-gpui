@@ -439,6 +439,9 @@ pub struct FilePane {
     context_menu: Option<MenuTarget>,
     /// Space shows the lead row's file over the list.
     pub preview: Option<Entity<FilePreview>>,
+    /// A preview was dropped where no `Window` was at hand. Its text view
+    /// may have had the keys, so the next render gives them back.
+    is_refocus_pending: bool,
     dialog: Option<PaneDialog>,
     /// Last measured pane width, used to decide which columns fit. Updated by a
     /// canvas probe at prepaint. Starts wide so the first frame shows everything.
@@ -515,6 +518,7 @@ impl FilePane {
             is_editing_path: false,
             context_menu: None,
             preview: None,
+            is_refocus_pending: false,
             dialog: None,
             list_width: px(600.),
             filter: String::new(),
@@ -821,17 +825,23 @@ impl FilePane {
         cx.notify();
     }
 
-    /// The previewed file was deleted or renamed.
-    fn close_preview_if_gone(&mut self, cx: &App) {
-        let is_gone = self.preview.as_ref().is_some_and(|preview| {
-            !self
-                .entries
-                .iter()
-                .any(|e| e.name == preview.read(cx).name())
-        });
-        if is_gone {
+    /// After a new listing: drop the preview when its file was deleted or
+    /// renamed, and read it again when the file changed.
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = &self.preview else {
+            return;
+        };
+        let shown = preview.read(cx).entry();
+        let Some(entry) = self.entries.iter().find(|e| e.name == shown.name) else {
             self.preview = None;
+            self.is_refocus_pending = true;
+            return;
+        };
+        if entry.size == shown.size && entry.mtime == shown.mtime {
+            return;
         }
+        self.is_refocus_pending = true;
+        self.open_preview(false, cx);
     }
 
     /// Keys while the preview is up. Space and Escape close it, the arrows
@@ -844,23 +854,22 @@ impl FilePane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // The text view has the keys: it moves its own cursor and selects.
-        if !self.focus_handle.is_focused(window) {
-            if command == Some(PaneCommand::Cancel) {
-                self.close_preview(window, cx);
-                return true;
-            }
-            return false;
-        }
-        let is_space = event.keystroke.key == "space" && !event.keystroke.modifiers.modified();
+        let is_space = typed_text(&event.keystroke, event.prefer_character_input) == Some(" ");
         if is_space || command == Some(PaneCommand::Cancel) {
             self.close_preview(window, cx);
             return true;
         }
+        // The text view has the keys: it moves its own cursor and selects.
+        if !self.focus_handle.is_focused(window) {
+            return false;
+        }
         match command {
             Some(PaneCommand::Move { to, is_extending }) => {
+                let lead = self.selection.lead().map(str::to_owned);
                 self.move_selection(to, is_extending, cx);
-                self.open_preview(true, cx);
+                if self.selection.lead() != lead.as_deref() {
+                    self.open_preview(true, cx);
+                }
             }
             Some(PaneCommand::Open) => {
                 self.close_preview(window, cx);
@@ -1123,10 +1132,12 @@ impl FilePane {
         if path_changed {
             self.selection.clear();
             self.type_ahead.clear();
-            self.preview = None;
+            if self.preview.take().is_some() {
+                self.is_refocus_pending = true;
+            }
         } else {
             self.prune_selection();
-            self.close_preview_if_gone(cx);
+            self.sync_preview(cx);
         }
 
         if let Some(start) = self.animation_start.take() {
@@ -1170,7 +1181,7 @@ impl FilePane {
         }
         self.entries = entries;
         self.prune_selection();
-        self.close_preview_if_gone(cx);
+        self.sync_preview(cx);
         if is_error_here {
             self.list_error = None;
         }
@@ -1785,7 +1796,6 @@ impl FilePane {
         items
     }
 
-    /// Centered in-pane modal for the active [`PaneDialog`].
     /// Covers the whole pane, so nothing behind it can be clicked or dropped on.
     fn render_preview(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let preview = self.preview.clone()?;
@@ -1814,6 +1824,7 @@ impl FilePane {
         )
     }
 
+    /// Centered in-pane modal for the active [`PaneDialog`].
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let dialog = self.dialog.as_ref()?;
         let theme = cx.theme();
@@ -2019,6 +2030,10 @@ impl FilePane {
 
 impl Render for FilePane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Only when the keys went nowhere: another pane may hold them.
+        if std::mem::take(&mut self.is_refocus_pending) && window.focused(cx).is_none() {
+            window.focus(&self.focus_handle, cx);
+        }
         let popup = self.context_menu.clone().map(|target| {
             let items = self.menu_items(&target, cx);
             ContextMenu::new(

@@ -627,13 +627,13 @@ impl SftpBrowser {
 
     /// The other server in the left half, if one was chosen instead of this
     /// computer. Named on the switch that shows the half.
-    pub fn list_session_pane_again(&mut self, cx: &mut Context<Self>) {
-        self.right.list_again(cx);
-    }
-
     pub fn left_source_name(&self) -> Option<String> {
         let slot = self.peer.as_ref()?;
         Some(slot.connection.display_name().to_string())
+    }
+
+    pub fn list_session_pane_again(&mut self, cx: &mut Context<Self>) {
+        self.right.list_again(cx);
     }
 
     /// The handle that holds the keys when they are in the left half.
@@ -1261,8 +1261,7 @@ impl SftpBrowser {
                 let Some(remote) = self.side(side) else {
                     return;
                 };
-                // Not behind the listings and transfers of the primary channel.
-                let sftp = remote.prefetch.as_ref().unwrap_or(&remote.primary).clone();
+                let sftp = remote.primary.clone();
                 let (path, limit) = (path.clone(), *limit);
                 let read = async move { sftp.read_head(path, limit).await };
                 load_preview(&remote.pane.clone(), *is_after_move, read, cx);
