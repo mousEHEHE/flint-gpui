@@ -2411,7 +2411,7 @@ fn render_entry(
         IconName::File
     };
     let icon_color = if opens_as_folder { primary } else { dim_fg };
-    let size_str: SharedString = if opens_as_folder {
+    let size_str: SharedString = if opens_as_folder || entry.is_link_broken {
         "--".into()
     } else {
         fmt_size(entry.size).into()
@@ -2422,6 +2422,11 @@ fn render_entry(
         .link_target
         .as_ref()
         .map(|target| format!("\u{2192} {target}").into());
+    let target_color = if entry.is_link_broken {
+        danger
+    } else {
+        muted_fg
+    };
     let is_dim = name.starts_with('.');
     let name_color = if is_dim { muted_fg } else { fg };
 
@@ -2542,7 +2547,7 @@ fn render_entry(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(muted_fg)
+                        .text_color(target_color)
                         .child(target),
                 )
                 .into_any_element(),
@@ -2813,6 +2818,7 @@ mod tests {
             kind,
             link_target: None,
             is_link_to_dir: false,
+            is_link_broken: false,
         }
     }
 
@@ -2820,6 +2826,7 @@ mod tests {
         FileEntry {
             link_target: Some(target.into()),
             is_link_to_dir: true,
+            is_link_broken: false,
             ..entry(name, false, 0, 0, EntryKind::Symlink)
         }
     }

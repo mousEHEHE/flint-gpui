@@ -111,6 +111,10 @@ pub struct FileEntry {
     /// `is_dir` on purpose: delete and transfers read `is_dir`, and they must
     /// act on the link itself, never on the folder behind it.
     pub is_link_to_dir: bool,
+    /// The entry is a symlink whose target cannot be reached: missing, a
+    /// loop, or not ours to stat. Its `size` is then the length of the
+    /// target path, which means nothing to the user.
+    pub is_link_broken: bool,
 }
 
 impl FileEntry {
@@ -133,7 +137,10 @@ impl FileEntry {
     /// be reached (broken link, loop, no permission).
     pub fn set_link_target(&mut self, target: Option<String>, stat: Option<LinkTargetStat>) {
         self.link_target = target;
-        let Some(stat) = stat else { return };
+        let Some(stat) = stat else {
+            self.is_link_broken = true;
+            return;
+        };
         self.is_link_to_dir = stat.is_dir;
         if stat.is_dir {
             return;
@@ -3073,6 +3080,7 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> anyhow::Result<Vec<FileEntr
                 kind,
                 link_target: None,
                 is_link_to_dir: false,
+                is_link_broken: false,
             }
         })
         .collect();
@@ -5119,6 +5127,7 @@ mod tests {
             kind,
             link_target: None,
             is_link_to_dir: false,
+            is_link_broken: false,
         }
     }
 
@@ -5126,6 +5135,7 @@ mod tests {
         FileEntry {
             link_target: Some(target.into()),
             is_link_to_dir: true,
+            is_link_broken: false,
             ..file_entry(name, EntryKind::Symlink)
         }
     }
@@ -5188,6 +5198,7 @@ mod tests {
         link.set_link_target(Some("nowhere".into()), None);
         assert_eq!(link.link_target.as_deref(), Some("nowhere"));
         assert!(!link.opens_as_folder());
+        assert!(link.is_link_broken);
         assert_eq!(link.size, 11);
     }
 

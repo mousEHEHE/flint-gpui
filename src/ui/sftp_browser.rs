@@ -3074,6 +3074,7 @@ fn load_local_entries(path: &str) -> std::io::Result<Vec<crate::ssh::FileEntry>>
                 kind,
                 link_target: None,
                 is_link_to_dir: false,
+                is_link_broken: false,
             };
             if ft.is_symlink() {
                 let target = std::fs::read_link(e.path())
