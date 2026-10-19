@@ -1535,6 +1535,7 @@ fn cd_terminal_menu_item(path: String, cx: &mut Context<FilePane>) -> ContextMen
             cx.notify();
         }),
     )
+    .icon("icons/terminal.svg")
 }
 
 impl FilePane {
@@ -1576,32 +1577,38 @@ impl FilePane {
         }
 
         if is_remote {
-            items.push(ContextMenuItem::new(
-                "ctx-chmod",
-                "Permissions\u{2026}",
-                cx.listener({
-                    let entries = entries.to_vec();
-                    move |this, _, window, cx| {
-                        this.context_menu = None;
-                        this.open_chmod_dialog(&entries, window, cx);
-                    }
-                }),
-            ));
+            items.push(
+                ContextMenuItem::new(
+                    "ctx-chmod",
+                    "Permissions\u{2026}",
+                    cx.listener({
+                        let entries = entries.to_vec();
+                        move |this, _, window, cx| {
+                            this.context_menu = None;
+                            this.open_chmod_dialog(&entries, window, cx);
+                        }
+                    }),
+                )
+                .icon("icons/lock.svg"),
+            );
         }
 
         if let [entry] = entries {
-            items.push(ContextMenuItem::new(
-                "ctx-copy-path",
-                "Copy Path",
-                cx.listener({
-                    let path = entry.path.clone();
-                    move |this, _, _, cx| {
-                        this.context_menu = None;
-                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                        cx.notify();
-                    }
-                }),
-            ));
+            items.push(
+                ContextMenuItem::new(
+                    "ctx-copy-path",
+                    "Copy Path",
+                    cx.listener({
+                        let path = entry.path.clone();
+                        move |this, _, _, cx| {
+                            this.context_menu = None;
+                            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                            cx.notify();
+                        }
+                    }),
+                )
+                .icon("icons/clipboard-copy.svg"),
+            );
         }
 
         let delete_label = match entries {
@@ -1640,6 +1647,7 @@ impl FilePane {
                     cx.emit(FilePaneEvent::NavigateTo(path.clone()));
                 }),
             )
+            .icon("icons/folder-open.svg")
             .shortcut(hint::OPEN)];
         }
         let preview = ContextMenuItem::new(
@@ -1670,7 +1678,8 @@ impl FilePane {
                     cx.notify();
                 }
             }),
-        );
+        )
+        .icon("icons/file.svg");
         let open_with = ContextMenuItem::new(
             "ctx-open-with",
             "Open With\u{2026}",
@@ -1728,6 +1737,11 @@ impl FilePane {
                 cx.notify();
             }),
         )
+        .icon(match (self.kind, &self.transfer_target) {
+            (PaneKind::Local, _) => "icons/upload.svg",
+            (_, Some(_)) => "icons/copy.svg",
+            (_, None) => "icons/download.svg",
+        })
         .shortcut(hint::TRANSFER)
     }
 
@@ -1742,6 +1756,7 @@ impl FilePane {
                     this.open_new_folder_dialog(window, cx);
                 }),
             )
+            .icon("icons/folder-plus.svg")
             .shortcut(hint::NEW_FOLDER),
             ContextMenuItem::new(
                 "ctx-refresh",
@@ -1761,7 +1776,8 @@ impl FilePane {
                     cx.write_to_clipboard(ClipboardItem::new_string(this.path.clone()));
                     cx.notify();
                 }),
-            ),
+            )
+            .icon("icons/clipboard-copy.svg"),
         ];
         if self.kind == PaneKind::Session {
             items.push(cd_terminal_menu_item(self.path.clone(), cx));
