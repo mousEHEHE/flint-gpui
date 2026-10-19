@@ -6,6 +6,7 @@ pub mod create_vault_view;
 pub mod feedback_view;
 pub mod file_pane;
 pub mod file_pane_keys;
+pub mod file_preview;
 pub mod file_selection;
 pub mod forwards_popover;
 pub mod host_icon;

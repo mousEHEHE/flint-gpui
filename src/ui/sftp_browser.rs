@@ -24,7 +24,8 @@ use crate::file_edit::{FileEditSession, SyncState};
 use crate::file_open::OpenError;
 use crate::preferences::{Preferences, TerminalPosition};
 use crate::ssh::{
-    CancelFlag, DownloadResult, FileEntry, SftpEvent, SftpHandle, StageItem, TransferOutcome,
+    CancelFlag, DownloadResult, FileEntry, FileHead, SftpEvent, SftpHandle, StageItem,
+    TransferOutcome,
 };
 use crate::theme;
 use crate::ui::file_pane::{
@@ -45,6 +46,9 @@ const DRAGOUT_PREFETCH_MAX_FILE: u64 = 1024 * 1024;
 /// budget rather than a per-file rule.
 const DRAGOUT_PREFETCH_BUDGET: u64 = 4 * 1024 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// A preview reached with the arrows waits this long before it reads, so
+/// passing over rows costs nothing.
+const PREVIEW_MOVE_DELAY: Duration = Duration::from_millis(120);
 
 pub enum BrowserEvent {
     StatusChanged(String),
@@ -1107,6 +1111,16 @@ impl SftpBrowser {
             FilePaneEvent::HoverEntry(_) => {}
             FilePaneEvent::OpenFile(_) => {}
             FilePaneEvent::RequestOpenWith(_) => {}
+            FilePaneEvent::PreviewRequested {
+                path,
+                limit,
+                is_after_move,
+            } => {
+                let (path, limit) = (path.clone(), *limit);
+                let executor = cx.background_executor().clone();
+                let read = async move { executor.spawn(read_local_head(path, limit)).await };
+                load_preview(&self.local_pane.clone(), *is_after_move, read, cx);
+            }
             FilePaneEvent::TransferRequested { paths } => {
                 // Local pane: upload into the remote pane's current folder.
                 for path in paths {
@@ -1238,6 +1252,20 @@ impl SftpBrowser {
             }
             FilePaneEvent::EditInTerminal(path) if is_session => {
                 cx.emit(BrowserEvent::EditInTerminal(path.clone()));
+            }
+            FilePaneEvent::PreviewRequested {
+                path,
+                limit,
+                is_after_move,
+            } => {
+                let Some(remote) = self.side(side) else {
+                    return;
+                };
+                // Not behind the listings and transfers of the primary channel.
+                let sftp = remote.prefetch.as_ref().unwrap_or(&remote.primary).clone();
+                let (path, limit) = (path.clone(), *limit);
+                let read = async move { sftp.read_head(path, limit).await };
+                load_preview(&remote.pane.clone(), *is_after_move, read, cx);
             }
             FilePaneEvent::HoverEntry(maybe_path) => {
                 let Some(remote) = self.side_mut(side) else {
@@ -2762,6 +2790,47 @@ impl SftpBrowser {
             .child(body)
             .into_any_element()
     }
+}
+
+/// Read for the pane's preview and show the result there. The task is kept
+/// by the preview, so closing it or moving on cancels the read.
+fn load_preview(
+    pane: &Entity<FilePane>,
+    is_after_move: bool,
+    read: impl std::future::Future<Output = anyhow::Result<FileHead>> + 'static,
+    cx: &mut App,
+) {
+    let Some(preview) = pane.read(cx).preview.clone() else {
+        return;
+    };
+    let weak_preview = preview.downgrade();
+    let task = cx.spawn(async move |cx| {
+        if is_after_move {
+            cx.background_executor().timer(PREVIEW_MOVE_DELAY).await;
+        }
+        let result = read.await;
+        weak_preview
+            .update(cx, |preview, cx| preview.show(result, cx))
+            .ok();
+    });
+    preview.update(cx, |preview, _| preview.set_load(task));
+}
+
+async fn read_local_head(path: String, limit: usize) -> anyhow::Result<FileHead> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::metadata(&path)?;
+    if !metadata.is_file() {
+        anyhow::bail!("not a regular file");
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?
+        .take(limit as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(FileHead {
+        bytes,
+        size: metadata.len(),
+    })
 }
 
 const LEFT_NOT_CONNECTED: &str = "The left pane is not connected.";

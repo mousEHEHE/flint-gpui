@@ -132,6 +132,7 @@ fn us_key(key: &str) -> String {
 #[cfg(target_os = "macos")]
 pub mod hint {
     pub const OPEN: &str = "\u{21B5}";
+    pub const PREVIEW: &str = "\u{2423}";
     pub const RENAME: &str = "F2";
     pub const DELETE: &str = "\u{2318}\u{232B}";
     pub const TRANSFER: &str = "\u{2318}\u{21B5}";
@@ -142,6 +143,7 @@ pub mod hint {
 #[cfg(not(target_os = "macos"))]
 pub mod hint {
     pub const OPEN: &str = "Enter";
+    pub const PREVIEW: &str = "Space";
     pub const RENAME: &str = "F2";
     pub const DELETE: &str = "Del";
     pub const TRANSFER: &str = "F5";

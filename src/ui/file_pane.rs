@@ -26,6 +26,7 @@ use crate::ui::file_pane_keys::{
     self, hint, pane_command, type_ahead_match, typed_text, PaneCommand, RowMove, SwitchPane,
     TypeAhead,
 };
+use crate::ui::file_preview::{preview_plan, FilePreview, PreviewContent, PreviewPlan};
 use crate::ui::file_selection::{ClickKind, FileSelection};
 
 #[derive(Clone, Debug)]
@@ -210,6 +211,14 @@ pub enum FilePaneEvent {
     CdTerminalHere(String),
     /// Edit the file in a new terminal tab (session pane only).
     EditInTerminal(String),
+    /// The preview shows `path` and waits for its first `limit` bytes. After
+    /// a move through the rows the read waits a moment, in case the user is
+    /// only passing by.
+    PreviewRequested {
+        path: String,
+        limit: usize,
+        is_after_move: bool,
+    },
     /// The source pill was clicked: the user wants to choose what this pane shows.
     SourcePickerRequested,
 }
@@ -428,6 +437,8 @@ pub struct FilePane {
     path_input: Option<Entity<InputState>>,
     is_editing_path: bool,
     context_menu: Option<MenuTarget>,
+    /// Space shows the lead row's file over the list.
+    pub preview: Option<Entity<FilePreview>>,
     dialog: Option<PaneDialog>,
     /// Last measured pane width, used to decide which columns fit. Updated by a
     /// canvas probe at prepaint. Starts wide so the first frame shows everything.
@@ -503,6 +514,7 @@ impl FilePane {
             path_input: None,
             is_editing_path: false,
             context_menu: None,
+            preview: None,
             dialog: None,
             list_width: px(600.),
             filter: String::new(),
@@ -680,6 +692,11 @@ impl FilePane {
             .push(text, Instant::now())
             .map(str::to_owned)
         else {
+            // A space that does not continue a typed name.
+            if text == " " && !self.is_loading {
+                self.open_preview(false, cx);
+                return true;
+            }
             return false;
         };
         let position = self.change_selection(|selection, visible| {
@@ -752,6 +769,8 @@ impl FilePane {
         }
         let is_handled = if self.context_menu.is_some() || self.dialog.is_some() {
             self.run_overlay_command(command, window, cx)
+        } else if self.preview.is_some() {
+            self.run_preview_key(event, command, window, cx)
         } else if let Some(command) = command {
             self.run_command(command, window, cx)
         } else {
@@ -760,6 +779,97 @@ impl FilePane {
         if is_handled {
             cx.stop_propagation();
         }
+    }
+
+    /// Space shows the lead row without opening it. Folders get a note: the
+    /// preview stays up while the arrows pass over them.
+    fn open_preview(&mut self, is_after_move: bool, cx: &mut Context<Self>) {
+        // Dropping the old preview cancels its read.
+        self.preview = None;
+        cx.notify();
+        // The lead can sit on a row a Cmd/Ctrl-click just unselected.
+        let Some(name) = self
+            .selection
+            .lead()
+            .filter(|name| self.selection.contains(name))
+        else {
+            return;
+        };
+        let Some(entry) = self.entries.iter().find(|e| e.name == name).cloned() else {
+            return;
+        };
+        let path = format!("{}/{}", self.path.trim_end_matches('/'), entry.name);
+        let (content, limit) = match preview_plan(&entry) {
+            PreviewPlan::Ready(content) => (content, None),
+            PreviewPlan::Read { limit } => (PreviewContent::Loading, Some(limit)),
+        };
+        let preview_path = path.clone();
+        self.preview = Some(cx.new(|cx| FilePreview::new(preview_path, entry, content, cx)));
+        if let Some(limit) = limit {
+            cx.emit(FilePaneEvent::PreviewRequested {
+                path,
+                limit,
+                is_after_move,
+            });
+        }
+    }
+
+    fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview = None;
+        // The text view may have had the keys.
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// The previewed file was deleted or renamed.
+    fn close_preview_if_gone(&mut self, cx: &App) {
+        let is_gone = self.preview.as_ref().is_some_and(|preview| {
+            !self
+                .entries
+                .iter()
+                .any(|e| e.name == preview.read(cx).name())
+        });
+        if is_gone {
+            self.preview = None;
+        }
+    }
+
+    /// Keys while the preview is up. Space and Escape close it, the arrows
+    /// move to the next file, Enter opens the row. Other list commands would
+    /// act on rows the user cannot see, so they are swallowed.
+    fn run_preview_key(
+        &mut self,
+        event: &KeyDownEvent,
+        command: Option<PaneCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // The text view has the keys: it moves its own cursor and selects.
+        if !self.focus_handle.is_focused(window) {
+            if command == Some(PaneCommand::Cancel) {
+                self.close_preview(window, cx);
+                return true;
+            }
+            return false;
+        }
+        let is_space = event.keystroke.key == "space" && !event.keystroke.modifiers.modified();
+        if is_space || command == Some(PaneCommand::Cancel) {
+            self.close_preview(window, cx);
+            return true;
+        }
+        match command {
+            Some(PaneCommand::Move { to, is_extending }) => {
+                self.move_selection(to, is_extending, cx);
+                self.open_preview(true, cx);
+            }
+            Some(PaneCommand::Open) => {
+                self.close_preview(window, cx);
+                self.activate_selection(cx);
+            }
+            Some(_) => {}
+            None => return typed_text(&event.keystroke, event.prefer_character_input).is_some(),
+        }
+        true
     }
 
     /// A menu or a dialog is on top of the list. Escape closes it and Enter
@@ -1013,8 +1123,10 @@ impl FilePane {
         if path_changed {
             self.selection.clear();
             self.type_ahead.clear();
+            self.preview = None;
         } else {
             self.prune_selection();
+            self.close_preview_if_gone(cx);
         }
 
         if let Some(start) = self.animation_start.take() {
@@ -1058,6 +1170,7 @@ impl FilePane {
         }
         self.entries = entries;
         self.prune_selection();
+        self.close_preview_if_gone(cx);
         if is_error_here {
             self.list_error = None;
         }
@@ -1529,8 +1642,22 @@ impl FilePane {
             )
             .shortcut(hint::OPEN)];
         }
+        let preview = ContextMenuItem::new(
+            "ctx-preview",
+            "Preview",
+            cx.listener({
+                let name = entry.name.clone();
+                move |this, _, _, cx| {
+                    this.context_menu = None;
+                    this.selection.select_only(&name);
+                    this.open_preview(false, cx);
+                }
+            }),
+        )
+        .icon("icons/eye.svg")
+        .shortcut(hint::PREVIEW);
         if self.kind != PaneKind::Session {
-            return Vec::new();
+            return vec![preview];
         }
         let open = ContextMenuItem::new(
             "ctx-open",
@@ -1558,7 +1685,7 @@ impl FilePane {
         )
         .icon("icons/external-link.svg");
         if file_open::has_binary_extension(&path) {
-            return vec![open.shortcut(hint::OPEN), open_with];
+            return vec![open.shortcut(hint::OPEN), preview, open_with];
         }
 
         let command = Preferences::editor_command(cx);
@@ -1575,9 +1702,9 @@ impl FilePane {
         .icon("icons/square-terminal.svg");
         // The Enter hint goes on the item that Enter and double-click run.
         if Preferences::is_editor_default_open(cx) {
-            vec![edit.shortcut(hint::OPEN), open, open_with]
+            vec![edit.shortcut(hint::OPEN), preview, open, open_with]
         } else {
-            vec![open.shortcut(hint::OPEN), open_with, edit]
+            vec![open.shortcut(hint::OPEN), preview, open_with, edit]
         }
     }
 
@@ -1643,6 +1770,34 @@ impl FilePane {
     }
 
     /// Centered in-pane modal for the active [`PaneDialog`].
+    /// Covers the whole pane, so nothing behind it can be clicked or dropped on.
+    fn render_preview(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let preview = self.preview.clone()?;
+        Some(
+            div()
+                .id("file-preview")
+                .absolute()
+                .inset_0()
+                .flex()
+                .occlude()
+                .bg(cx.theme().background)
+                .child(preview)
+                .child(
+                    div().absolute().top(px(7.)).right(px(6.)).child(
+                        Button::new("close-preview")
+                            .ghost()
+                            .icon(Icon::empty().path("icons/x.svg"))
+                            .xsmall()
+                            .tooltip("Close preview (Space)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_preview(window, cx)),
+                            ),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let dialog = self.dialog.as_ref()?;
         let theme = cx.theme();
@@ -2206,6 +2361,7 @@ impl Render for FilePane {
                 )
                 .into_any_element()
             })
+            .children(self.render_preview(cx))
             .children(popup)
             .children(self.render_dialog(cx))
     }

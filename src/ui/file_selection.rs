@@ -38,7 +38,6 @@ impl FileSelection {
         self.names.is_empty()
     }
 
-    #[cfg(test)]
     pub fn lead(&self) -> Option<&str> {
         self.lead.as_deref()
     }

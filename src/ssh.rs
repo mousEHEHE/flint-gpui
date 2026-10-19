@@ -501,6 +501,12 @@ pub enum SftpCmd {
         cancel: CancelFlag,
         reply: tokio::sync::oneshot::Sender<anyhow::Result<UploadPlan>>,
     },
+    /// Read up to `limit` bytes from the start of `remote`, for a preview.
+    ReadHead {
+        remote: String,
+        limit: usize,
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<FileHead>>,
+    },
     /// Read `remote` into `chunks`, for the worker of another server to write.
     ReadFile {
         remote: String,
@@ -1039,6 +1045,21 @@ impl SftpHandle {
         self.cmd_tx
             .send(SftpCmd::StatFile {
                 remote,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("sftp channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("sftp reply dropped"))?
+    }
+
+    pub async fn read_head(&self, remote: String, limit: usize) -> anyhow::Result<FileHead> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(SftpCmd::ReadHead {
+                remote,
+                limit,
                 reply: reply_tx,
             })
             .await
@@ -1773,6 +1794,18 @@ async fn handle_sftp_commands(
                 let sftp = sftp.clone();
                 transfers.spawn_local(async move {
                     let _ = reply.send(plan_remote_copy(&sftp, &source, &target, &cancel).await);
+                });
+            }
+
+            SftpCmd::ReadHead {
+                remote,
+                limit,
+                reply,
+            } => {
+                let sftp = sftp.clone();
+                transfers.spawn_local(async move {
+                    let result = read_head(&sftp, &remote, limit, &reply).await;
+                    let _ = reply.send(result);
                 });
             }
 
@@ -3736,6 +3769,47 @@ fn add_listing_to_plan(
 /// server to write. A failure travels down the same channel. When the reader
 /// of the channel goes away this stops without a word: the other side has
 /// already reported why.
+/// The start of a file and its full size.
+pub struct FileHead {
+    pub bytes: Vec<u8>,
+    pub size: u64,
+}
+
+async fn read_head(
+    sftp: &SftpSession,
+    remote: &str,
+    limit: usize,
+    reply: &tokio::sync::oneshot::Sender<anyhow::Result<FileHead>>,
+) -> anyhow::Result<FileHead> {
+    use tokio::io::AsyncReadExt as _;
+
+    // Follows a symlink. A FIFO or a device would block the server's SFTP
+    // process on open, and with it every other request on this channel.
+    let attrs = sftp.metadata(remote).await?;
+    if !attrs.file_type().is_file() {
+        anyhow::bail!("not a regular file");
+    }
+    let mut file = sftp.open(remote).await?;
+    let mut bytes = Vec::new();
+    let mut buf = vec![0u8; TRANSFER_CHUNK];
+    while bytes.len() < limit {
+        // Nobody waits for the preview any more.
+        if reply.is_closed() {
+            anyhow::bail!("preview closed");
+        }
+        let wanted = buf.len().min(limit - bytes.len());
+        let n = file.read(&mut buf[..wanted]).await?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    Ok(FileHead {
+        bytes,
+        size: attrs.len(),
+    })
+}
+
 async fn read_file_into(
     sftp: &SftpSession,
     remote: &str,
