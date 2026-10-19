@@ -41,6 +41,10 @@ pub const TOGGLE_FILES_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "Ctrl+Shift+B"
 };
 
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// Which tab is active after the one at `closed` is removed, leaving
 /// `remaining` tabs. The active shell stays active; closing it moves to the
 /// tab that slid into its place.
@@ -83,6 +87,45 @@ impl ServerSession {
 
     /// Open one more shell on the live connection and show it.
     pub fn open_extra_terminal(&mut self, cx: &mut Context<Self>) {
+        self.open_terminal(None, cx);
+    }
+
+    /// Edit a remote file with the editor from the preferences, in a new tab.
+    /// Never in a tab that is open already: its shell may be busy, and the
+    /// keys would go to whatever runs there.
+    pub(crate) fn edit_in_terminal(&mut self, path: String, cx: &mut Context<Self>) {
+        let name = file_name(&path).to_string();
+        if self.terminals.len() >= MAX_TERMINALS {
+            cx.emit(ServerSessionEvent::StatusChanged(format!(
+                "Close a terminal tab to open {name}"
+            )));
+            return;
+        }
+        if !self.can_open_terminal() {
+            cx.emit(ServerSessionEvent::StatusChanged(format!(
+                "Can't open {name}: not connected"
+            )));
+            return;
+        }
+        let command = Preferences::editor_command(cx);
+        let Some(input) = crate::shell::editor_input(&command, &path) else {
+            cx.emit(ServerSessionEvent::StatusChanged(format!(
+                "Can't open {name} in the terminal: the name or the editor command has a \
+                 control character"
+            )));
+            return;
+        };
+        tracing::info!(
+            host = %self.conn_info.display_name(),
+            path,
+            command,
+            "editing a file in the terminal",
+        );
+        self.open_terminal(Some((input, path)), cx);
+    }
+
+    /// `startup` is typed into the new shell, and its path names the tab.
+    fn open_terminal(&mut self, startup: Option<(Vec<u8>, String)>, cx: &mut Context<Self>) {
         if !self.can_open_terminal() {
             return;
         }
@@ -103,9 +146,27 @@ impl ServerSession {
                 // A reconnect in the meantime replaced every shell. This one
                 // belongs to the old connection, so it is dropped.
                 Ok(_) if session.connection_generation != generation => {}
-                Ok(_) if !session.can_open_terminal() => {}
+                Ok(_) if !session.can_open_terminal() => {
+                    if let Some((_, path)) = startup {
+                        cx.emit(ServerSessionEvent::StatusChanged(format!(
+                            "Close a terminal tab to open {}",
+                            file_name(&path)
+                        )));
+                    }
+                }
                 Ok(shell) => {
+                    // The shell is not ready to read yet. The keys wait in the
+                    // terminal's input buffer until it is.
+                    let edited_file = startup.map(|(input, path)| {
+                        let shell = shell.clone();
+                        cx.background_spawn(async move { shell.send_input(input).await })
+                            .detach();
+                        path
+                    });
                     session.add_terminal(shell, cx);
+                    if let Some(terminal) = session.terminals.last() {
+                        terminal.update(cx, |view, _| view.edited_file = edited_file);
+                    }
                     session.active_terminal = session.terminals.len() - 1;
                     session.is_terminal_focus_pending = true;
                     tracing::info!(
@@ -168,6 +229,12 @@ impl ServerSession {
         else {
             return;
         };
+        // The editor may have saved the file, so its size and date changed.
+        if terminal.read(cx).edited_file.is_some() {
+            if let Some(browser) = &self.browser {
+                browser.update(cx, |browser, cx| browser.list_session_pane_again(cx));
+            }
+        }
         self.close_terminal(ix, cx);
     }
 
@@ -369,15 +436,27 @@ impl ServerSession {
             )
             .child("\u{00D7}");
 
+        let edited_file = self
+            .terminals
+            .get(ix)
+            .and_then(|terminal| terminal.read(cx).edited_file.clone());
+        let label = match &edited_file {
+            Some(path) => format!("{} {}", ix + 1, file_name(path)),
+            None => (ix + 1).to_string(),
+        };
+
         header_button(("terminal-tab", ix), cx)
             .gap(px(4.))
+            .when_some(edited_file, |el, path| {
+                el.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
+            })
             .when(is_active, |el| {
                 el.bg(theme::element())
                     .text_color(cx.theme().foreground)
                     .font_semibold()
             })
             .on_click(cx.listener(move |this, _, _, cx| this.activate_terminal(ix, cx)))
-            .child(SharedString::from((ix + 1).to_string()))
+            .child(div().max_w(px(140.)).truncate().child(label))
             .child(close)
             .into_any_element()
     }

@@ -59,8 +59,9 @@ fn main() {
 
             // Loaded before the vault so the unlock screen is already themed.
             let prefs = Preferences::load_or_default();
+            let theme_preference = prefs.theme;
             cx.set_global(prefs);
-            theme::apply_preference(prefs.theme, None, cx);
+            theme::apply_preference(theme_preference, None, cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
             cx.open_window(

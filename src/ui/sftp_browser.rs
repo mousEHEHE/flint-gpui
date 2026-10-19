@@ -99,6 +99,8 @@ pub enum BrowserEvent {
     },
     /// The user asked for the session's shell to change into this remote folder.
     CdTerminalHere(String),
+    /// Edit this remote file in a new terminal tab of the session.
+    EditInTerminal(String),
     /// The user wants to choose what the left pane shows.
     LeftSourcePickerRequested,
     /// Connect to the left server again, with a new password if one was typed.
@@ -621,6 +623,10 @@ impl SftpBrowser {
 
     /// The other server in the left half, if one was chosen instead of this
     /// computer. Named on the switch that shows the half.
+    pub fn list_session_pane_again(&mut self, cx: &mut Context<Self>) {
+        self.right.list_again(cx);
+    }
+
     pub fn left_source_name(&self) -> Option<String> {
         let slot = self.peer.as_ref()?;
         Some(slot.connection.display_name().to_string())
@@ -1124,7 +1130,9 @@ impl SftpBrowser {
                 cx.emit(BrowserEvent::LeftSourcePickerRequested);
             }
             // Remote-only items: the local menu never offers them.
-            FilePaneEvent::Chmod { .. } | FilePaneEvent::CdTerminalHere(_) => {}
+            FilePaneEvent::Chmod { .. }
+            | FilePaneEvent::CdTerminalHere(_)
+            | FilePaneEvent::EditInTerminal(_) => {}
         }
     }
 
@@ -1227,6 +1235,9 @@ impl SftpBrowser {
             }
             FilePaneEvent::CdTerminalHere(path) if is_session => {
                 cx.emit(BrowserEvent::CdTerminalHere(path.clone()));
+            }
+            FilePaneEvent::EditInTerminal(path) if is_session => {
+                cx.emit(BrowserEvent::EditInTerminal(path.clone()));
             }
             FilePaneEvent::HoverEntry(maybe_path) => {
                 let Some(remote) = self.side_mut(side) else {
@@ -1339,6 +1350,7 @@ impl SftpBrowser {
             | FilePaneEvent::OpenFile(_)
             | FilePaneEvent::RequestOpenWith(_)
             | FilePaneEvent::CdTerminalHere(_)
+            | FilePaneEvent::EditInTerminal(_)
             | FilePaneEvent::SourcePickerRequested => {}
         }
     }

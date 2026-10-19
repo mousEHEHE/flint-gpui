@@ -25,6 +25,22 @@ impl std::fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
+/// Files a text editor in a terminal has no use for. They keep opening on this
+/// computer even when files are set to open in the terminal.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "heic", "tif", "tiff", "psd", "pdf", "zip",
+    "gz", "tgz", "xz", "bz2", "zst", "7z", "tar", "rar", "mp3", "wav", "flac", "ogg", "mp4", "mkv",
+    "mov", "avi", "webm", "iso", "img", "dmg", "exe", "dll", "so", "o", "a", "class", "jar", "pyc",
+    "sqlite", "db", "woff", "woff2", "ttf", "otf", "docx", "xlsx", "pptx",
+];
+
+pub fn has_binary_extension(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+}
+
 /// The key under which an app association is remembered for `file`.
 ///
 /// Normally the lowercase extension (e.g. `"yml"`). Files with no extension
@@ -236,8 +252,17 @@ pub fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::association_key;
+    use super::{association_key, has_binary_extension};
     use std::path::Path;
+
+    #[test]
+    fn binary_extension_ignores_case_and_text_files() {
+        assert!(has_binary_extension("/srv/logo.PNG"));
+        assert!(has_binary_extension("/srv/backup.tar.gz"));
+        assert!(!has_binary_extension("/etc/nginx/nginx.conf"));
+        assert!(!has_binary_extension("/srv/Dockerfile"));
+        assert!(!has_binary_extension("/srv/.gz"));
+    }
 
     #[test]
     fn association_key_uses_lowercased_extension() {

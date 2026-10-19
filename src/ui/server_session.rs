@@ -426,9 +426,17 @@ async fn drive_connection(
                             Ok(shell) => {
                                 // A reconnect brings back as many terminal
                                 // tabs as the session had, each a fresh shell.
+                                // Not the editor tabs: the editor is gone, and
+                                // an empty shell named after the file would
+                                // mislead.
                                 let extra_count = this
-                                    .update(cx, |session, _| {
-                                        session.terminals.len().saturating_sub(1)
+                                    .update(cx, |session, cx| {
+                                        session
+                                            .terminals
+                                            .iter()
+                                            .filter(|t| t.read(cx).edited_file.is_none())
+                                            .count()
+                                            .saturating_sub(1)
                                     })
                                     .unwrap_or(0);
                                 let mut shells = vec![shell];
@@ -501,6 +509,9 @@ async fn drive_connection(
                                 }
                                 BrowserEvent::CdTerminalHere(path) => {
                                     this.cd_terminal_to(path, cx);
+                                }
+                                BrowserEvent::EditInTerminal(path) => {
+                                    this.edit_in_terminal(path.clone(), cx);
                                 }
                                 BrowserEvent::RequestPickerForFile { extension, local } => {
                                     cx.emit(ServerSessionEvent::PickerRequested {

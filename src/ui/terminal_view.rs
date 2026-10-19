@@ -123,6 +123,8 @@ pub(crate) struct ScrollbarGeom {
 pub struct TerminalView {
     _event_task: Task<()>,
     pub(crate) shell: ShellHandle,
+    /// The remote file this tab was opened to edit. Its name goes on the tab.
+    pub(crate) edited_file: Option<String>,
     pub last_snapshot: Option<TermSnapshot>,
     /// Bumped each time `last_snapshot` is replaced; used to invalidate the
     /// cached grid layout in the terminal element.
@@ -239,6 +241,7 @@ impl TerminalView {
         Self {
             _event_task: event_task,
             shell,
+            edited_file: None,
             last_snapshot: None,
             snapshot_version: 0,
             cached_grid: None,

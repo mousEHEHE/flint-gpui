@@ -18,6 +18,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::file_open;
+use crate::preferences::Preferences;
+use crate::shell;
 use crate::ssh::{EntryKind, FileEntry};
 use crate::ui::file_pane_keys::{
     self, hint, pane_command, type_ahead_match, typed_text, PaneCommand, RowMove, SwitchPane,
@@ -205,6 +208,8 @@ pub enum FilePaneEvent {
     },
     /// Move this session's shell into the folder (remote pane only).
     CdTerminalHere(String),
+    /// Edit the file in a new terminal tab (session pane only).
+    EditInTerminal(String),
     /// The source pill was clicked: the user wants to choose what this pane shows.
     SourcePickerRequested,
 }
@@ -733,7 +738,7 @@ impl FilePane {
             cx.emit(FilePaneEvent::NavigateTo(path));
         } else if self.kind == PaneKind::Session {
             let path = format!("{}/{}", self.path.trim_end_matches('/'), entry.name);
-            cx.emit(FilePaneEvent::OpenFile(path));
+            open_file(path, cx);
         }
     }
 
@@ -1396,6 +1401,16 @@ fn transfer_menu_label(verb: &str, target: Option<&str>, count: usize) -> String
     }
 }
 
+/// Double-click or Enter on a file of the session pane. Binary files open on
+/// this computer even when files are set to open in the terminal.
+fn open_file(path: String, cx: &mut Context<FilePane>) {
+    if Preferences::is_editor_default_open(cx) && !file_open::has_binary_extension(&path) {
+        cx.emit(FilePaneEvent::EditInTerminal(path));
+    } else {
+        cx.emit(FilePaneEvent::OpenFile(path));
+    }
+}
+
 /// "cd Terminal Here": the session's shell changes into `path`.
 fn cd_terminal_menu_item(path: String, cx: &mut Context<FilePane>) -> ContextMenuItem {
     ContextMenuItem::new(
@@ -1517,31 +1532,53 @@ impl FilePane {
         if self.kind != PaneKind::Session {
             return Vec::new();
         }
-        vec![
-            ContextMenuItem::new(
-                "ctx-open",
-                "Open",
-                cx.listener({
-                    let path = path.clone();
-                    move |this, _, _, cx| {
-                        this.context_menu = None;
-                        cx.emit(FilePaneEvent::OpenFile(path.clone()));
-                        cx.notify();
-                    }
-                }),
-            )
-            .shortcut(hint::OPEN),
-            ContextMenuItem::new(
-                "ctx-open-with",
-                "Open With\u{2026}",
-                cx.listener(move |this, _, _, cx| {
+        let open = ContextMenuItem::new(
+            "ctx-open",
+            "Open",
+            cx.listener({
+                let path = path.clone();
+                move |this, _, _, cx| {
+                    this.context_menu = None;
+                    cx.emit(FilePaneEvent::OpenFile(path.clone()));
+                    cx.notify();
+                }
+            }),
+        );
+        let open_with = ContextMenuItem::new(
+            "ctx-open-with",
+            "Open With\u{2026}",
+            cx.listener({
+                let path = path.clone();
+                move |this, _, _, cx| {
                     this.context_menu = None;
                     cx.emit(FilePaneEvent::RequestOpenWith(path.clone()));
                     cx.notify();
-                }),
-            )
-            .icon("icons/external-link.svg"),
-        ]
+                }
+            }),
+        )
+        .icon("icons/external-link.svg");
+        if file_open::has_binary_extension(&path) {
+            return vec![open.shortcut(hint::OPEN), open_with];
+        }
+
+        let command = Preferences::editor_command(cx);
+        let editor = shell::editor_name(&command).unwrap_or("Terminal");
+        let edit = ContextMenuItem::new(
+            "ctx-edit-in-terminal",
+            format!("Edit in {editor}"),
+            cx.listener(move |this, _, _, cx| {
+                this.context_menu = None;
+                cx.emit(FilePaneEvent::EditInTerminal(path.clone()));
+                cx.notify();
+            }),
+        )
+        .icon("icons/square-terminal.svg");
+        // The Enter hint goes on the item that Enter and double-click run.
+        if Preferences::is_editor_default_open(cx) {
+            vec![edit.shortcut(hint::OPEN), open, open_with]
+        } else {
+            vec![open.shortcut(hint::OPEN), open_with, edit]
+        }
     }
 
     /// The transfer toward the other pane. Folders go along: every direction
@@ -2502,7 +2539,7 @@ fn render_entry(
                         };
                         if !e.opens_as_folder() {
                             let path = format!("{}/{}", this.path.trim_end_matches('/'), e.name);
-                            cx.emit(FilePaneEvent::OpenFile(path));
+                            open_file(path, cx);
                         }
                     }
                 }),

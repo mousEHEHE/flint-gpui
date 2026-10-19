@@ -490,9 +490,97 @@ pub fn cd_input(path: &str) -> Option<Vec<u8>> {
     Some(format!("\x05\x15 cd -- {}\r", shell_quote(path)).into_bytes())
 }
 
+/// The keys that make a new interactive shell edit `path` with `command`, and
+/// leave once the editor quits cleanly. `{path}` in the command marks where the
+/// quoted path goes; without it the path goes at the end.
+///
+/// `path` is absolute, so it cannot read as an option. `None` when the path or
+/// the command has a control character, as in `cd_input`.
+pub fn editor_input(command: &str, path: &str) -> Option<Vec<u8>> {
+    let command = command.trim();
+    if command.is_empty() || path.is_empty() {
+        return None;
+    }
+    if command.chars().chain(path.chars()).any(char::is_control) {
+        return None;
+    }
+    let quoted = shell_quote(path);
+    let line = if command.contains(PATH_PLACEHOLDER) {
+        command.replace(PATH_PLACEHOLDER, &quoted)
+    } else {
+        format!("{command} {quoted}")
+    };
+    // `&& exit` closes the tab after a clean quit. A missing editor or an
+    // error leaves the shell open, so the message stays on screen.
+    Some(format!(" {line} && exit\r").into_bytes())
+}
+
+pub const PATH_PLACEHOLDER: &str = "{path}";
+
+/// What to call the editor in menus: the program name of `command`, or `None`
+/// when there is no plain one to show.
+pub fn editor_name(command: &str) -> Option<&str> {
+    // `TERM=xterm vim` names vim, `/usr/bin/nvim -R` names nvim.
+    let program = command
+        .split_whitespace()
+        .find(|word| !word.contains('='))?;
+    let name = program.rsplit('/').next()?;
+    (!name.is_empty() && name != PATH_PLACEHOLDER).then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn editor_line(command: &str, path: &str) -> String {
+        String::from_utf8(editor_input(command, path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn editor_input_puts_the_quoted_path_at_the_end() {
+        assert_eq!(
+            editor_line("vim", "/etc/nginx/nginx.conf"),
+            " vim '/etc/nginx/nginx.conf' && exit\r"
+        );
+        assert_eq!(
+            editor_line("  nvim -R ", "/srv/my app/it's.conf"),
+            r" nvim -R '/srv/my app/it'\''s.conf' && exit".to_string() + "\r"
+        );
+        assert_eq!(
+            editor_line("nano", "/srv/папка/$(reboot).txt"),
+            " nano '/srv/папка/$(reboot).txt' && exit\r"
+        );
+    }
+
+    #[test]
+    fn editor_input_fills_every_placeholder() {
+        assert_eq!(
+            editor_line("sudoedit {path}", "/etc/hosts"),
+            " sudoedit '/etc/hosts' && exit\r"
+        );
+        assert_eq!(
+            editor_line("cp {path} /tmp/x && vim {path}", "/a b"),
+            " cp '/a b' /tmp/x && vim '/a b' && exit\r"
+        );
+    }
+
+    #[test]
+    fn editor_input_refuses_control_characters_and_empty_input() {
+        assert!(editor_input("vim", "/srv/a\nrm -rf ~").is_none());
+        assert!(editor_input("vim\nrm -rf ~", "/srv/a").is_none());
+        assert!(editor_input("vim", "").is_none());
+        assert!(editor_input("  ", "/srv/a").is_none());
+    }
+
+    #[test]
+    fn editor_name_is_the_program() {
+        assert_eq!(editor_name("vim"), Some("vim"));
+        assert_eq!(editor_name("/usr/bin/nvim -R"), Some("nvim"));
+        assert_eq!(editor_name("TERM=xterm vim {path}"), Some("vim"));
+        assert_eq!(editor_name("sudoedit {path}"), Some("sudoedit"));
+        assert_eq!(editor_name("{path}"), None);
+        assert_eq!(editor_name(""), None);
+    }
 
     fn typed(path: &str) -> String {
         String::from_utf8(cd_input(path).unwrap()).unwrap()

@@ -17,6 +17,9 @@ pub const MAX_TERMINAL_FONT_SIZE: f32 = 40.0;
 /// Holding the zoom shortcut repeats many times a second.
 const FONT_SIZE_SAVE_DELAY: Duration = Duration::from_millis(400);
 
+/// Almost every host has it, as vim or as the vi it stands in for.
+pub const DEFAULT_EDITOR_COMMAND: &str = "vim";
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePreference {
@@ -37,8 +40,8 @@ impl ThemePreference {
     }
 }
 
-/// The terminal font. A fixed list keeps `Preferences` a `Copy` value and
-/// keeps proportional fonts, which break the cell grid, out of the terminal.
+/// The terminal font. A fixed list keeps proportional fonts, which break the
+/// cell grid, out of the terminal.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalFont {
@@ -166,7 +169,7 @@ pub enum TerminalPosition {
 
 /// Every field carries a serde default so a file written by an older build
 /// still loads.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
     pub theme: ThemePreference,
@@ -200,6 +203,14 @@ pub struct Preferences {
     /// uploads come from Finder or Explorer.
     #[serde(default)]
     pub is_second_pane_shown: bool,
+    /// The command that edits a remote file in a terminal tab. Read it
+    /// through `Preferences::editor_command`, which fills in an empty one.
+    #[serde(default = "default_editor_command")]
+    pub editor_command: String,
+    /// Double-click and Enter on a remote file run `editor_command` instead
+    /// of opening the file on this computer.
+    #[serde(default)]
+    pub is_editor_default_open: bool,
 }
 
 /// The update answer the raw file holds. Read on its own so that a file that
@@ -218,6 +229,10 @@ fn update_checks_in(data: &[u8]) -> Option<UpdateChecks> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_editor_command() -> String {
+    DEFAULT_EDITOR_COMMAND.to_string()
 }
 
 fn default_terminal_font_size() -> f32 {
@@ -245,6 +260,8 @@ impl Default for Preferences {
             update_checks: None,
             terminal_position: TerminalPosition::default(),
             is_second_pane_shown: false,
+            editor_command: default_editor_command(),
+            is_editor_default_open: false,
         }
     }
 }
@@ -301,6 +318,21 @@ impl Preferences {
     pub fn is_second_pane_shown(cx: &gpui::App) -> bool {
         cx.try_global::<Self>()
             .is_some_and(|prefs| prefs.is_second_pane_shown)
+    }
+
+    pub fn editor_command(cx: &gpui::App) -> String {
+        let command = cx
+            .try_global::<Self>()
+            .map_or("", |prefs| prefs.editor_command.trim());
+        if command.is_empty() {
+            return DEFAULT_EDITOR_COMMAND.to_string();
+        }
+        command.to_string()
+    }
+
+    pub fn is_editor_default_open(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.is_editor_default_open)
     }
 
     /// Change the preferences and write them to disk. The change has already
@@ -576,6 +608,23 @@ mod tests {
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back.terminal_position, TerminalPosition::Beside);
         assert!(back.is_second_pane_shown);
+    }
+
+    #[test]
+    fn editor_settings_default_when_missing_and_round_trip() {
+        let old: Preferences = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(old.editor_command, DEFAULT_EDITOR_COMMAND);
+        assert!(!old.is_editor_default_open);
+
+        let changed = Preferences {
+            editor_command: "sudoedit {path}".to_string(),
+            is_editor_default_open: true,
+            ..Preferences::default()
+        };
+        let json = serde_json::to_string(&changed).unwrap();
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.editor_command, "sudoedit {path}");
+        assert!(back.is_editor_default_open);
     }
 
     #[test]

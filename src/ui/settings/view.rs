@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::preferences::{
     Preferences, TerminalFont, TerminalScheme, ThemePreference, UpdateChecks,
-    DEFAULT_TERMINAL_FONT_SIZE,
+    DEFAULT_EDITOR_COMMAND, DEFAULT_TERMINAL_FONT_SIZE,
 };
 use crate::ui::server_form::read_key_file;
 use crate::ui::sync_service::SyncService;
@@ -126,6 +126,7 @@ pub struct SettingsView {
     /// The terminal fonts this machine has. Listing system fonts is slow, so
     /// it is done once when the dialog opens.
     terminal_fonts: Vec<TerminalFont>,
+    editor_command: Entity<InputState>,
     vault_pane: Entity<VaultPane>,
     sync_pane: Entity<SyncPane>,
     teams_pane: Entity<TeamsPane>,
@@ -177,6 +178,20 @@ impl SettingsView {
 
         let snippet_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("filter snippets…"));
+
+        let editor_command = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(DEFAULT_EDITOR_COMMAND)
+                .default_value(Preferences::editor_command(cx))
+        });
+        cx.subscribe(&editor_command, |_, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let command = input.read(cx).value().trim().to_string();
+                Preferences::update(cx, |prefs| prefs.editor_command = command);
+                cx.notify();
+            }
+        })
+        .detach();
 
         let sync_pane = cx.new(|cx| SyncPane::new(vault_state.clone(), window, cx));
         let teams_pane = cx.new(|cx| TeamsPane::new(vault_state.clone(), window, cx));
@@ -231,6 +246,7 @@ impl SettingsView {
             }),
             proxy_error: None,
             terminal_fonts: TerminalFont::available(&cx.text_system().all_font_names()),
+            editor_command,
             vault_pane,
             sync_pane,
             teams_pane,
@@ -1241,6 +1257,71 @@ impl SettingsView {
             .child(self.render_terminal_schemes(cx))
             .child(group_title("Typing", cx).mt(px(6.)))
             .child(self.render_terminal_typing(cx))
+            .child(group_title("Editing remote files", cx).mt(px(6.)))
+            .child(self.render_terminal_editor(cx))
+    }
+
+    fn render_terminal_editor(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted_fg = cx.theme().muted_foreground;
+        let caption = move |text: &'static str| {
+            div()
+                .max_w(px(520.))
+                .text_size(px(11.5))
+                .text_color(muted_fg)
+                .child(text)
+        };
+        let current = Preferences::editor_command(cx);
+
+        v_flex()
+            .gap(px(6.))
+            .child(
+                h_flex()
+                    .gap(px(4.))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(220.))
+                            .mr(px(4.))
+                            .child(Input::new(&self.editor_command).small()),
+                    )
+                    .children(["vim", "nvim", "nano"].into_iter().enumerate().map(
+                        |(ix, preset)| {
+                            select_chip(("terminal-editor", ix), preset, current == preset, cx)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.editor_command.update(cx, |input, cx| {
+                                        input.set_value(preset, window, cx)
+                                    });
+                                    Preferences::update(cx, |prefs| {
+                                        prefs.editor_command = preset.to_string()
+                                    });
+                                    cx.notify();
+                                }))
+                        },
+                    )),
+            )
+            .child(caption(
+                "Runs on the host in a new terminal tab, from the right-click menu of a \
+                 file. {path} marks where the file goes, as in sudoedit {path}. Without \
+                 it the file goes at the end.",
+            ))
+            .child(
+                Checkbox::new("terminal-editor-default")
+                    .mt(px(4.))
+                    .checked(Preferences::is_editor_default_open(cx))
+                    .label("Open files in this editor on double-click and Enter")
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let is_default = *checked;
+                        Preferences::update(cx, |prefs| prefs.is_editor_default_open = is_default);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                caption(
+                    "Images, archives and other binary files still open on this computer. \
+                 Open and Open With stay in the right-click menu.",
+                )
+                .pl(px(22.)),
+            )
     }
 
     fn render_terminal_font_size(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
