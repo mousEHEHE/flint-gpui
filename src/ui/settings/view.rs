@@ -1284,7 +1284,7 @@ impl SettingsView {
                             .mr(px(4.))
                             .child(Input::new(&self.editor_command).small()),
                     )
-                    .children(["vim", "nvim", "nano"].into_iter().enumerate().map(
+                    .children(["vim", "vi", "nvim", "nano"].into_iter().enumerate().map(
                         |(ix, preset)| {
                             select_chip(("terminal-editor", ix), preset, current == preset, cx)
                                 .on_click(cx.listener(move |this, _, window, cx| {

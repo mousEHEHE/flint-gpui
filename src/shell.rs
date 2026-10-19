@@ -459,9 +459,10 @@ pub async fn handle_shell_commands(
     }
 }
 
-/// Quote `text` as one shell word. Works in POSIX shells and in fish: a single
-/// quote and a backslash are written outside the quotes, because fish reads a
-/// backslash inside single quotes as an escape.
+/// Quote `text` as one shell word. Works in POSIX shells, fish and csh: a
+/// single quote, a backslash and a `!` are written outside the quotes. Fish
+/// reads a backslash inside single quotes as an escape, and csh expands `!`
+/// history even inside single quotes.
 fn shell_quote(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('\'');
@@ -469,6 +470,7 @@ fn shell_quote(text: &str) -> String {
         match character {
             '\'' => quoted.push_str(r"'\''"),
             '\\' => quoted.push_str(r"'\\'"),
+            '!' => quoted.push_str(r"'\!'"),
             other => quoted.push(other),
         }
     }
@@ -504,6 +506,14 @@ pub fn editor_input(command: &str, path: &str) -> Option<Vec<u8>> {
     if command.chars().chain(path.chars()).any(char::is_control) {
         return None;
     }
+    // A quoted placeholder would put our quoted path inside the user's quotes,
+    // where `$(...)` in a file name would run. Drop such quotes first.
+    let command = command
+        .replace("\"{path}\"", PATH_PLACEHOLDER)
+        .replace("'{path}'", PATH_PLACEHOLDER);
+    if is_placeholder_in_quotes(&command) {
+        return None;
+    }
     let quoted = shell_quote(path);
     let line = if command.contains(PATH_PLACEHOLDER) {
         command.replace(PATH_PLACEHOLDER, &quoted)
@@ -517,6 +527,20 @@ pub fn editor_input(command: &str, path: &str) -> Option<Vec<u8>> {
 
 pub const PATH_PLACEHOLDER: &str = "{path}";
 
+/// Whether any `{path}` comes after an odd number of quotes, so it sits inside
+/// a quoted string.
+fn is_placeholder_in_quotes(command: &str) -> bool {
+    command.match_indices(PATH_PLACEHOLDER).any(|(index, _)| {
+        let before = &command[..index];
+        let single_quotes = before.matches('\'').count();
+        let double_quotes = before.matches('"').count();
+        single_quotes % 2 == 1 || double_quotes % 2 == 1
+    })
+}
+
+/// Commands that run another program. Their name says nothing about the editor.
+const WRAPPER_COMMANDS: [&str; 6] = ["sudo", "doas", "env", "nice", "command", "exec"];
+
 /// What to call the editor in menus: the program name of `command`, or `None`
 /// when there is no plain one to show.
 pub fn editor_name(command: &str) -> Option<&str> {
@@ -525,7 +549,8 @@ pub fn editor_name(command: &str) -> Option<&str> {
         .split_whitespace()
         .find(|word| !word.contains('='))?;
     let name = program.rsplit('/').next()?;
-    (!name.is_empty() && name != PATH_PLACEHOLDER).then_some(name)
+    let is_plain = !name.is_empty() && name != PATH_PLACEHOLDER;
+    (is_plain && !WRAPPER_COMMANDS.contains(&name)).then_some(name)
 }
 
 #[cfg(test)]
@@ -565,6 +590,25 @@ mod tests {
     }
 
     #[test]
+    fn editor_input_drops_quotes_around_the_placeholder() {
+        assert_eq!(
+            editor_line("vim \"{path}\"", "/srv/$(id).txt"),
+            " vim '/srv/$(id).txt' && exit\r"
+        );
+        assert_eq!(
+            editor_line("vim '{path}'", "/srv/$(id).txt"),
+            " vim '/srv/$(id).txt' && exit\r"
+        );
+    }
+
+    #[test]
+    fn editor_input_refuses_a_placeholder_inside_quotes() {
+        assert!(editor_input("sh -c \"vim {path}\"", "/srv/$(id)").is_none());
+        assert!(editor_input("sh -c 'vim {path}'", "/srv/$(id)").is_none());
+        assert!(editor_input("vim \"x\" {path}", "/srv/a").is_some());
+    }
+
+    #[test]
     fn editor_input_refuses_control_characters_and_empty_input() {
         assert!(editor_input("vim", "/srv/a\nrm -rf ~").is_none());
         assert!(editor_input("vim\nrm -rf ~", "/srv/a").is_none());
@@ -579,6 +623,12 @@ mod tests {
         assert_eq!(editor_name("TERM=xterm vim {path}"), Some("vim"));
         assert_eq!(editor_name("sudoedit {path}"), Some("sudoedit"));
         assert_eq!(editor_name("{path}"), None);
+        assert_eq!(editor_name("sudo vim"), None);
+        assert_eq!(editor_name("/usr/bin/doas nano"), None);
+        assert_eq!(editor_name("env TERM=xterm vim"), None);
+        assert_eq!(editor_name("nice vim"), None);
+        assert_eq!(editor_name("command vim"), None);
+        assert_eq!(editor_name("exec vim"), None);
         assert_eq!(editor_name(""), None);
     }
 
@@ -595,7 +645,7 @@ mod tests {
     fn cd_input_keeps_shell_syntax_inside_quotes() {
         assert_eq!(
             typed("/srv/my app/$(reboot);`id` && !x *"),
-            "\x05\x15 cd -- '/srv/my app/$(reboot);`id` && !x *'\r"
+            "\x05\x15 cd -- '/srv/my app/$(reboot);`id` && '\\!'x *'\r"
         );
         assert_eq!(typed("/srv/-rf"), "\x05\x15 cd -- '/srv/-rf'\r");
         assert_eq!(typed("/srv/папка"), "\x05\x15 cd -- '/srv/папка'\r");
@@ -609,6 +659,7 @@ mod tests {
         // A trailing backslash must not swallow the closing quote in fish.
         assert_eq!(shell_quote("dir\\"), r"'dir'\\''");
         assert_eq!(shell_quote(r#"a"b"#), r#"'a"b'"#);
+        assert_eq!(shell_quote("notes!.txt"), r"'notes'\!'.txt'");
     }
 
     #[test]

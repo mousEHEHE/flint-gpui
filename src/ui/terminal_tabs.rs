@@ -41,6 +41,16 @@ pub const TOGGLE_FILES_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "Ctrl+Shift+B"
 };
 
+/// Why a file cannot open in a new tab: every tab is taken, or the session is
+/// not connected.
+fn full_or_offline_status(terminal_count: usize, name: &str) -> String {
+    if terminal_count >= MAX_TERMINALS {
+        format!("Close a terminal tab to open {name}")
+    } else {
+        format!("Can't open {name}: not connected")
+    }
+}
+
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -95,15 +105,10 @@ impl ServerSession {
     /// keys would go to whatever runs there.
     pub(crate) fn edit_in_terminal(&mut self, path: String, cx: &mut Context<Self>) {
         let name = file_name(&path).to_string();
-        if self.terminals.len() >= MAX_TERMINALS {
-            cx.emit(ServerSessionEvent::StatusChanged(format!(
-                "Close a terminal tab to open {name}"
-            )));
-            return;
-        }
         if !self.can_open_terminal() {
-            cx.emit(ServerSessionEvent::StatusChanged(format!(
-                "Can't open {name}: not connected"
+            cx.emit(ServerSessionEvent::StatusChanged(full_or_offline_status(
+                self.terminals.len(),
+                &name,
             )));
             return;
         }
@@ -148,9 +153,9 @@ impl ServerSession {
                 Ok(_) if session.connection_generation != generation => {}
                 Ok(_) if !session.can_open_terminal() => {
                     if let Some((_, path)) = startup {
-                        cx.emit(ServerSessionEvent::StatusChanged(format!(
-                            "Close a terminal tab to open {}",
-                            file_name(&path)
+                        cx.emit(ServerSessionEvent::StatusChanged(full_or_offline_status(
+                            session.terminals.len(),
+                            file_name(&path),
                         )));
                     }
                 }
@@ -209,6 +214,12 @@ impl ServerSession {
         if self.terminals.len() < 2 || ix >= self.terminals.len() {
             return;
         }
+        // The editor may have saved the file, so its size and date changed.
+        if self.terminals[ix].read(cx).edited_file.is_some() {
+            if let Some(browser) = &self.browser {
+                browser.update(cx, |browser, cx| browser.list_session_pane_again(cx));
+            }
+        }
         let was_active = ix == self.active_terminal;
         self.terminals.remove(ix);
         self.active_terminal = active_after_close(self.active_terminal, ix, self.terminals.len());
@@ -229,12 +240,6 @@ impl ServerSession {
         else {
             return;
         };
-        // The editor may have saved the file, so its size and date changed.
-        if terminal.read(cx).edited_file.is_some() {
-            if let Some(browser) = &self.browser {
-                browser.update(cx, |browser, cx| browser.list_session_pane_again(cx));
-            }
-        }
         self.close_terminal(ix, cx);
     }
 
@@ -380,8 +385,16 @@ impl ServerSession {
                 strip = strip.child(self.render_terminal_tab(ix, cx));
             }
         } else {
+            let edited_file = self
+                .active_terminal()
+                .and_then(|terminal| terminal.read(cx).edited_file.clone());
+            let label = match &edited_file {
+                Some(path) => file_name(path).to_string(),
+                None => "Terminal".to_string(),
+            };
             strip = strip.child(
                 h_flex()
+                    .id("terminal-single-tab")
                     .h(px(26.))
                     .px(px(9.))
                     .gap(px(6.))
@@ -391,7 +404,10 @@ impl ServerSession {
                     .text_size(px(12.5))
                     .text_color(cx.theme().foreground)
                     .child(terminal_icon())
-                    .child("Terminal"),
+                    .child(div().max_w(px(140.)).truncate().child(label))
+                    .when_some(edited_file, |el, path| {
+                        el.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
+                    }),
             );
         }
         if self.can_open_terminal() {

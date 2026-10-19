@@ -17,7 +17,8 @@ pub const MAX_TERMINAL_FONT_SIZE: f32 = 40.0;
 /// Holding the zoom shortcut repeats many times a second.
 const FONT_SIZE_SAVE_DELAY: Duration = Duration::from_millis(400);
 
-/// Almost every host has it, as vim or as the vi it stands in for.
+/// Most hosts have vim. Minimal images often have only vi, which is a preset
+/// in the settings.
 pub const DEFAULT_EDITOR_COMMAND: &str = "vim";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
