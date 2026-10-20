@@ -89,16 +89,33 @@ struct LoadedFile {
     hosts: Vec<LoadedHost>,
     snippets: Vec<ImportedSnippet>,
     skipped: Vec<String>,
+    /// Notes on how complete the read is, such as Termius still running.
+    warnings: Vec<String>,
 }
 
 /// The error text is user-facing.
 fn load_termius_file(path: &Path) -> Result<LoadedFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let import = parse_termius_export(&text)?;
+    loaded_file_from_import(parse_termius_export(&text)?, Vec::new())
+}
+
+/// Read the installed Termius directly. Same shape as a loaded file so the UI
+/// treats both the same way. Windows only: see `crate::termius_local`.
+#[cfg(windows)]
+fn load_installed_termius() -> Result<LoadedFile, String> {
+    let installed = crate::termius_local::import_from_installed_termius()?;
+    loaded_file_from_import(installed.import, installed.warnings)
+}
+
+fn loaded_file_from_import(
+    import: crate::import::TermiusImport,
+    warnings: Vec<String>,
+) -> Result<LoadedFile, String> {
     Ok(LoadedFile {
         hosts: import.hosts.into_iter().map(load_host).collect(),
         snippets: import.snippets,
         skipped: import.skipped,
+        warnings,
     })
 }
 
@@ -112,6 +129,11 @@ pub struct ImportView {
     file_error: Option<String>,
     /// Records of the loaded export file that could not be read.
     file_skipped: Vec<String>,
+    /// Notes on how complete the last Termius read is.
+    file_warnings: Vec<String>,
+    /// A read of the installed Termius is running.
+    #[cfg(windows)]
+    is_reading_termius: bool,
 }
 
 impl EventEmitter<ImportViewEvent> for ImportView {}
@@ -141,6 +163,9 @@ impl ImportView {
             is_scanning: true,
             file_error: None,
             file_skipped: Vec::new(),
+            file_warnings: Vec::new(),
+            #[cfg(windows)]
+            is_reading_termius: false,
         }
     }
 
@@ -280,6 +305,37 @@ impl ImportView {
         .detach();
     }
 
+    /// Read the Termius installed on this computer and add its hosts and
+    /// snippets as candidates. All disk and keychain access runs off the main
+    /// thread. Like picking a file, this replaces any previous Termius rows.
+    #[cfg(windows)]
+    fn pick_installed_termius(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A second read would show a second Keychain prompt.
+        if self.is_reading_termius {
+            return;
+        }
+        self.is_reading_termius = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async { load_installed_termius() })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.is_reading_termius = false;
+                match loaded {
+                    Ok(file) => this.add_file_candidates(file, window, cx),
+                    Err(e) => {
+                        this.file_error = Some(e);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn add_file_candidates(
         &mut self,
         file: LoadedFile,
@@ -297,6 +353,7 @@ impl ImportView {
             tracing::warn!(skipped = ?file.skipped, "termius export: some records were skipped");
         }
         self.file_skipped = file.skipped;
+        self.file_warnings = file.warnings;
         self.candidates
             .retain(|c| c.host.source != ImportSource::Termius);
         let existing = Self::existing_addresses(&self.vault_state, cx);
@@ -736,6 +793,15 @@ impl Render for ImportView {
             );
         }
 
+        for warning in &self.file_warnings {
+            card = card.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.warning)
+                    .child(warning.clone()),
+            );
+        }
+
         if let Some(summary) = skipped_summary(&self.file_skipped) {
             card = card.child(
                 div()
@@ -758,16 +824,38 @@ impl Render for ImportView {
         } else {
             toolbar.child(div())
         };
-        toolbar = toolbar.child(
+        let mut actions = h_flex().gap(px(6.));
+        // Reading an installed Termius only works on Windows: see
+        // `crate::termius_local`. Elsewhere, only the file import is offered.
+        #[cfg(windows)]
+        {
+            actions = actions.child(
+                Button::new("import-termius-installed")
+                    .ghost()
+                    .small()
+                    .loading(self.is_reading_termius)
+                    .disabled(self.is_reading_termius)
+                    .child("Import from Termius on this computer")
+                    .tooltip(
+                        "Read the Termius installed here directly. \
+                         Needs access to its data and the system keychain.",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.pick_installed_termius(window, cx);
+                    })),
+            );
+        }
+        actions = actions.child(
             Button::new("import-termius-file")
                 .ghost()
                 .small()
                 .child("Load termius-export JSON…")
-                .tooltip("flint's own JSON format. Termius itself has no export.")
+                .tooltip("flint's own termius-export JSON format.")
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.pick_termius_file(window, cx);
                 })),
         );
+        toolbar = toolbar.child(actions);
         card = card.child(toolbar);
 
         if total > 0 {

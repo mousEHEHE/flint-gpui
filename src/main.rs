@@ -23,6 +23,12 @@ mod shell;
 mod ssh;
 mod ssh_target;
 mod term_emulator;
+// Reads the Termius app's local database. Only Windows stores the vault key
+// in a form flint can use; on macOS and Linux a signed-in Termius encrypts its
+// hosts with an account key that is not kept locally, so the feature is
+// Windows only. The termius-export JSON importer works on every platform.
+#[cfg(windows)]
+mod termius_local;
 mod theme;
 mod ui;
 mod update;
