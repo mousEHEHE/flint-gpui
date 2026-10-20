@@ -97,11 +97,12 @@ fn atomic_write_unix(path: &Path, data: &[u8]) -> Result<(), VaultError> {
 
     std::fs::rename(&tmp, path)?;
 
-    // fsync the parent directory so the rename survives a crash
+    // fsync the parent directory so the rename survives a crash. Best effort:
+    // the file is in place, and some file systems (e.g. FAT) can't do this.
     if let Some(parent) = path.parent() {
-        let dir = std::fs::File::open(parent)?;
-        // best-effort; some file systems (e.g. FAT) don't support dir fsync
-        let _ = dir.sync_all();
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
     }
 
     Ok(())
