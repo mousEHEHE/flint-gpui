@@ -50,7 +50,10 @@ Sync of your own hosts is free. Teams are free now too. But if a lot of people s
 
 You need [rustup](https://rustup.rs/). The right toolchain installs itself on first build.
 
+The SSH, terminal and vault code is in [flint-core](https://github.com/mousEHEHE/flint-core). The build takes it from the folder next to this one, so clone both:
+
 ```sh
+git clone https://github.com/mousEHEHE/flint-core
 git clone https://github.com/mousEHEHE/flint-gpui
 cd flint-gpui
 cargo build --release --locked

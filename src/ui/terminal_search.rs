@@ -3,7 +3,7 @@
 //! The bar sits over the top-right corner of the terminal. Typing highlights
 //! every hit on the visible rows; Enter / Shift+Enter walk all hits in the whole
 //! scrollback and scroll them into view. The matching itself happens in the shell
-//! worker, which owns the terminal buffer: see [`crate::term_emulator`].
+//! worker, which owns the terminal buffer: see [`flint_core::term_emulator`].
 
 use gpui::prelude::*;
 use gpui::{

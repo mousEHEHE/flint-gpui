@@ -161,7 +161,7 @@ fn is_trailing_noise(url: &[char]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term_emulator::TermEmulator;
+    use flint_core::term_emulator::TermEmulator;
 
     /// A 6-row terminal of the given width holding `text`.
     fn snapshot_of(columns: u16, text: &str) -> TermSnapshot {

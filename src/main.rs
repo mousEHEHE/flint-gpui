@@ -8,21 +8,14 @@ use gpui::{
 };
 use gpui_component::{theme::ThemeMode, Root};
 
-mod account;
 mod app_discovery;
 mod assets;
-mod connection;
 mod file_associations;
 mod file_edit;
 mod file_open;
-mod forward;
 mod import;
 mod logging;
 mod preferences;
-mod shell;
-mod ssh;
-mod ssh_target;
-mod term_emulator;
 // Reads the Termius app's local database. Only Windows stores the vault key
 // in a form flint can use; on macOS and Linux a signed-in Termius encrypts its
 // hosts with an account key that is not kept locally, so the feature is
@@ -32,13 +25,15 @@ mod termius_local;
 mod theme;
 mod ui;
 mod update;
-mod vault;
 mod version;
 
+use flint_core::{account, connection, shell, ssh, ssh_target, vault};
 use preferences::{Preferences, ThemePreference};
 use ui::root_view::RootView;
 
 fn main() {
+    flint_core::app::set_version(version::CURRENT);
+
     vault::memory::disable_core_dumps();
 
     logging::init();
