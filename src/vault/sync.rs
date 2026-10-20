@@ -1049,7 +1049,11 @@ impl VaultManager {
             return false;
         }
 
+        let is_news_of_a_team = self.is_news_of_a_team(&theirs);
         self.payload.put_record(theirs);
+        if is_news_of_a_team {
+            self.note_behind_on_teams();
+        }
         if let Some(state) = &mut self.payload.sync {
             match scope {
                 Some(vault_id) => state.shared.insert(item.id, vault_id),
@@ -1068,6 +1072,20 @@ impl VaultManager {
             );
         }
         true
+    }
+
+    /// A pin or join for a team this device does not know yet. The last team
+    /// check could not trust that team without it.
+    fn is_news_of_a_team(&self, record: &Record) -> bool {
+        let team_id = match record {
+            Record::Team(pin) => pin.team_id,
+            Record::Join(join) => join.team_id,
+            _ => return false,
+        };
+        self.payload
+            .sync
+            .as_ref()
+            .is_some_and(|state| !state.teams.contains_key(&team_id))
     }
 
     /// What the code that talks to the server needs to know about this
@@ -1110,6 +1128,13 @@ impl VaultManager {
     pub fn note_behind_on_teams(&mut self) {
         if let Some(state) = &mut self.payload.sync {
             state.is_behind_on_teams = true;
+        }
+    }
+
+    /// No team keys, so no team check can help. Otherwise items never sync.
+    pub fn forget_behind_on_teams(&mut self) {
+        if let Some(state) = &mut self.payload.sync {
+            state.is_behind_on_teams = false;
         }
     }
 
@@ -2479,6 +2504,67 @@ mod tests {
         assert_eq!(server.sync(&mut second), 1);
         assert_eq!(labels(&second), ["web"]);
         assert!(!second.has_unsynced_changes());
+    }
+
+    fn pin_of(team_id: Uuid) -> TeamPin {
+        TeamPin {
+            team_id,
+            seq: 1,
+            hash: [3; 32],
+        }
+    }
+
+    #[test]
+    fn a_pin_for_a_team_not_seen_here_asks_for_a_team_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = synced_vault(&dir, "first.bin");
+        let mut second = second_device(&dir, &first);
+        let mut server = FakeServer::default();
+        first.payload.team_pins.push(pin_of(Uuid::new_v4()));
+        server.sync(&mut first);
+
+        server.sync(&mut second);
+
+        assert_eq!(second.payload.team_pins.len(), 1);
+        assert!(second.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_join_for_a_team_not_seen_here_asks_for_a_team_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = synced_vault(&dir, "first.bin");
+        let mut second = second_device(&dir, &first);
+        let mut server = FakeServer::default();
+        let join = PendingJoin {
+            id: Uuid::new_v4(),
+            team_id: Uuid::new_v4(),
+            secret: [5; 32],
+            inviter_key: None,
+        };
+        first.add_join(join).unwrap();
+        server.sync(&mut first);
+
+        server.sync(&mut second);
+
+        assert_eq!(second.pending_joins(), 1);
+        assert!(second.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_pin_for_a_team_seen_here_asks_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = synced_vault(&dir, "first.bin");
+        let mut second = second_device(&dir, &first);
+        let mut server = FakeServer::default();
+        let team_id = Uuid::new_v4();
+        join_team(&mut second, team_id, &[]);
+        first.payload.team_pins.push(pin_of(team_id));
+        server.sync(&mut first);
+
+        server.sync(&mut second);
+
+        assert_eq!(second.payload.team_pins.len(), 1);
+        assert!(!second.is_behind_on_teams());
     }
 
     #[test]

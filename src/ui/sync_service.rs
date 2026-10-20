@@ -18,8 +18,8 @@ use crate::account::{self, AccountError, Api, ApiError, GitHubStep, OAuthError};
 use crate::preferences::Preferences;
 use crate::ui::VaultState;
 use crate::vault::sync::{
-    AdoptedAccount, InviteSecret, PendingJoin, Registration, SyncResult, SyncState, TeamContext,
-    TeamUpdate, TeamsUpdate,
+    AdoptedAccount, InviteSecret, PendingJoin, Registration, SyncJob, SyncResult, SyncState,
+    TeamContext, TeamUpdate, TeamsUpdate,
 };
 use crate::vault::{NewVaultKeys, RecoveryPhrase, VaultError, VaultManager};
 
@@ -64,6 +64,9 @@ pub struct SyncService {
     unsaved_vault: Option<(Arc<GitHubStep>, Box<UnsavedVault>)>,
     pub is_syncing: bool,
     pub last_synced: Option<Instant>,
+    /// The rounds chained after unlock or sign-in still run. A team vault
+    /// often comes only in the third.
+    is_first_series: bool,
     pub sync_error: Option<String>,
     retry_after: Option<Instant>,
     rounds_left: u8,
@@ -232,6 +235,11 @@ impl SyncService {
         cx.global::<GlobalSyncService>().0.clone()
     }
 
+    /// While true, an empty host list may only mean they have not arrived yet.
+    pub fn is_first_sync_running(&self) -> bool {
+        self.is_syncing && self.is_first_series
+    }
+
     fn new(vault_state: Entity<VaultState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&vault_state, |this, vault_state, cx| {
             let is_unlocked = vault_state.read(cx).manager().is_some();
@@ -240,6 +248,9 @@ impl SyncService {
             if !just_unlocked {
                 return;
             }
+            // A new session pulls its personal vault first again. See `is_first_pull`.
+            this.last_synced = None;
+            this.is_first_series = true;
             // For users who signed in before the flag existed.
             if vault_state
                 .read(cx)
@@ -289,6 +300,7 @@ impl SyncService {
             unsaved_vault: None,
             is_syncing: false,
             last_synced: None,
+            is_first_series: false,
             sync_error: None,
             retry_after: None,
             rounds_left: 0,
@@ -387,14 +399,15 @@ impl SyncService {
             return;
         }
         // Teams before items: a vault whose key changed cannot be read until
-        // the new key is here.
+        // the new key is here. The first pull of a session is the exception.
         let is_teams_due = vault.is_behind_on_teams()
             || self
                 .teams_checked
                 .is_none_or(|at| at.elapsed() >= PULL_INTERVAL);
+        let is_personal_first = is_first_pull(self.last_synced.is_some(), &jobs);
         let teams = vault
             .team_context()
-            .filter(|_| is_teams_due && recovery.is_none());
+            .filter(|_| is_teams_due && recovery.is_none() && !is_personal_first);
         if teams.is_some() {
             self.teams_checked = Some(Instant::now());
         }
@@ -404,7 +417,7 @@ impl SyncService {
         cx.notify();
 
         let round = in_background(move || {
-            let api = Api::new();
+            let api = Api::shared();
             if let Some(recovery) = recovery {
                 return Round::RecoveryTold(account::tell_recovery(&api, &recovery));
             }
@@ -427,6 +440,7 @@ impl SyncService {
                 this.update(cx, |this, cx| {
                     if this.generation == generation {
                         this.is_syncing = false;
+                        this.is_first_series = false;
                         this.sync_error = Some("Sync stopped unexpectedly.".into());
                         this.retry_after = Some(Instant::now() + RETRY_DELAY);
                         if this.is_settling {
@@ -457,6 +471,7 @@ impl SyncService {
     fn finish_round(&mut self, round: Round, cx: &mut Context<Self>) {
         self.is_syncing = false;
         let was_team_check = matches!(round, Round::Teams(..));
+        let was_team_check_ok = matches!(round, Round::Teams(_, Ok(Some(_))));
         let outcome = self.vault_state.update(cx, |vault_state, cx| {
             // Locked while the round ran. Nothing is lost: the next round
             // after unlock fetches the same changes again.
@@ -489,6 +504,11 @@ impl SyncService {
                 if self.is_settling {
                     self.rounds_left = self.rounds_left.max(1);
                 }
+                // A team pin from the last pull may bring a team vault to pull.
+                // Only a check that worked chains a round, so this cannot loop.
+                if was_team_check_ok {
+                    self.rounds_left = self.rounds_left.max(1);
+                }
                 // A refresh asked for while this round ran comes right after it.
                 let is_refresh_owed = self.teams_checked.is_none();
                 if has_more || self.is_settling || is_refresh_owed {
@@ -503,6 +523,10 @@ impl SyncService {
                     self.settle(cx);
                 }
             }
+        }
+        // No round chained: the series is over.
+        if !self.is_syncing {
+            self.is_first_series = false;
         }
         cx.notify();
     }
@@ -524,7 +548,7 @@ impl SyncService {
             let open_browser = |url| {
                 let _ = tx.try_send(SignInEvent::OpenBrowser(url));
             };
-            let step = account::github_sign_in(&Api::new(), open_browser, &is_cancelled);
+            let step = account::github_sign_in(&Api::shared(), open_browser, &is_cancelled);
             let _ = tx.try_send(SignInEvent::Done(step));
         });
 
@@ -597,7 +621,7 @@ impl SyncService {
         let opened = in_background({
             let step = step.clone();
             move || {
-                let api = Api::new();
+                let api = Api::shared();
                 if step.is_new {
                     account::register(&api, &step, &slot, &password)
                         .map(|(registration, phrase)| Opened::Registered(registration, phrase))
@@ -841,7 +865,8 @@ impl SyncService {
                 Some(Err(_)) => return Err("Wrong master password.".to_string()),
                 None => None,
             };
-            run_team_action(&Api::new(), &context, auth_key, action).map_err(|e| team_problem(&e))
+            run_team_action(&Api::shared(), &context, auth_key, action)
+                .map_err(|e| team_problem(&e))
         });
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -971,6 +996,7 @@ impl SyncService {
         }
         self.is_syncing = false;
         self.last_synced = None;
+        self.is_first_series = true;
         self.sync_error = None;
         self.retry_after = None;
         self.rounds_left = 0;
@@ -985,11 +1011,17 @@ impl SyncService {
     }
 }
 
+/// Personal vault first: it holds the team pins a teams check needs. Only
+/// once per session, as an empty vault never moves its cursor.
+fn is_first_pull(has_synced_this_session: bool, jobs: &[SyncJob]) -> bool {
+    !has_synced_this_session && jobs.first().is_some_and(|job| job.cursor == 0)
+}
+
 /// Best effort: a session left open holds nothing this device still uses.
 fn log_out_quietly(token: Option<String>) {
     let Some(token) = token else { return };
     std::thread::spawn(move || {
-        if let Err(e) = Api::new().logout(&token) {
+        if let Err(e) = Api::shared().logout(&token) {
             tracing::warn!(error = %e, "could not close the sync session on the server");
         }
     });
@@ -1005,7 +1037,7 @@ fn create_vault_for(
     if path.exists() {
         return Err(PreVaultError::VaultExists);
     }
-    let api = Api::new();
+    let api = Api::shared();
     if step.is_new {
         let (keys, phrase) = NewVaultKeys::generate(password).map_err(AccountError::Vault)?;
         let state = account::register_new_vault(&api, step, &keys)?;
@@ -1254,8 +1286,15 @@ fn take_in(vault: &mut VaultManager, round: Round) -> Result<(bool, bool), Strin
             // The items come next, in a round of their own.
             Ok((true, true))
         }
-        Round::Teams(_, Ok(None)) => Ok((true, false)),
-        Round::Teams(_, Err(e)) => Err(e.to_string()),
+        Round::Teams(_, Ok(None)) => {
+            vault.forget_behind_on_teams();
+            Ok((true, false))
+        }
+        Round::Teams(_, Err(e)) => {
+            // Otherwise every round retries the team check and items never sync.
+            vault.forget_behind_on_teams();
+            Err(e.to_string())
+        }
         Round::RecoveryTold(Err(e)) => Err(e.to_string()),
     }
 }
@@ -1492,5 +1531,68 @@ mod tests {
         assert_eq!(outcome, Ok((false, false)));
         let state = vault.sync_state().unwrap();
         assert_eq!(state.session_token, None);
+    }
+
+    #[test]
+    fn an_account_without_team_keys_stops_asking_for_team_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = vault_in_a_team(&dir);
+        vault.note_behind_on_teams();
+
+        let outcome = take_in(&mut vault, Round::Teams("token".into(), Ok(None)));
+
+        assert_eq!(outcome, Ok((true, false)));
+        assert!(!vault.is_behind_on_teams());
+    }
+
+    #[test]
+    fn a_failed_team_check_lets_the_next_round_sync_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, _) = vault_in_a_team(&dir);
+        vault.note_behind_on_teams();
+        let failure = Err(TeamError::Untrusted(
+            "the team keys on the server do not open",
+        ));
+
+        let outcome = take_in(&mut vault, Round::Teams("token".into(), failure));
+
+        assert!(outcome.is_err());
+        assert!(!vault.is_behind_on_teams());
+    }
+
+    fn personal_job_at(cursor: u64) -> SyncJob {
+        SyncJob {
+            session_token: "token".into(),
+            vault_id: Uuid::nil(),
+            key_version: 1,
+            cursor,
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_vault_that_never_pulled_pulls_its_personal_vault_before_the_teams() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _) = vault_in_a_team(&dir);
+
+        assert!(is_first_pull(false, &vault.begin_sync()));
+    }
+
+    #[test]
+    fn an_empty_personal_vault_goes_first_only_once_per_session() {
+        let jobs = vec![personal_job_at(0)];
+
+        assert!(is_first_pull(false, &jobs));
+        assert!(!is_first_pull(true, &jobs));
+    }
+
+    #[test]
+    fn a_vault_that_pulled_before_checks_the_teams_first() {
+        assert!(!is_first_pull(false, &[personal_job_at(66)]));
+    }
+
+    #[test]
+    fn no_jobs_is_not_a_first_pull() {
+        assert!(!is_first_pull(false, &[]));
     }
 }

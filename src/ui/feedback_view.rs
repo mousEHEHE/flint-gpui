@@ -96,7 +96,7 @@ impl FeedbackView {
         let kind = self.kind;
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.try_send(Api::new().send_feedback(&token, kind, &text));
+            let _ = tx.try_send(Api::shared().send_feedback(&token, kind, &text));
         });
         cx.spawn(async move |this, cx| {
             let Ok(sent) = rx.recv().await else { return };

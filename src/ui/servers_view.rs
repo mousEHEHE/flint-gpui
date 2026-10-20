@@ -283,15 +283,21 @@ impl ServersView {
             }))
     }
 
-    /// Shown only with a sync account: without one there is nothing to fetch.
-    fn render_sync_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let is_signed_in = self
-            .vault_state
+    fn is_signed_in(&self, cx: &App) -> bool {
+        self.vault_state
             .read(cx)
             .manager()
             .and_then(|vault| vault.sync_state())
-            .is_some_and(|state| state.session_token.is_some());
-        if !is_signed_in {
+            .is_some_and(|state| state.session_token.is_some())
+    }
+
+    fn is_loading_hosts(&self, cx: &App) -> bool {
+        self.is_signed_in(cx) && SyncService::global(cx).read(cx).is_first_sync_running()
+    }
+
+    /// Only with a sync account.
+    fn render_sync_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.is_signed_in(cx) {
             return None;
         }
         let service = SyncService::global(cx).read(cx);
@@ -859,7 +865,18 @@ impl Render for ServersView {
             bar
         });
 
-        let body = if filtered.is_empty() && is_search_empty && !has_filters {
+        let is_list_empty = filtered.is_empty() && is_search_empty && !has_filters;
+        let body = if is_list_empty && self.is_loading_hosts(cx) {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(muted_fg)
+                .child("Loading your hosts…")
+                .into_any_element()
+        } else if is_list_empty {
             v_flex()
                 .flex_1()
                 .items_center()

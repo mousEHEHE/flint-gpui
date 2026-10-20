@@ -387,7 +387,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running test server"]
     fn two_devices_share_one_account() {
-        let api = Api::new();
+        let api = Api::shared();
         let dir = tempfile::tempdir().unwrap();
         let github_id: u32 = rand::thread_rng().gen_range(1..u32::MAX / 2);
 
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running test server"]
     fn a_team_keeps_several_vaults_and_chooses_who_sees_each() {
-        let api = Api::new();
+        let api = Api::shared();
         let dir = tempfile::tempdir().unwrap();
         let TwoVaults {
             mut owner,
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running test server"]
     fn managers_hold_every_vault_and_a_deleted_vault_leaves_copies() {
-        let api = Api::new();
+        let api = Api::shared();
         let dir = tempfile::tempdir().unwrap();
         let TwoVaults {
             mut owner,
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running test server"]
     fn a_deletion_and_a_move_not_sent_yet_survive_a_new_vault_key() {
-        let api = Api::new();
+        let api = Api::shared();
         let dir = tempfile::tempdir().unwrap();
         let TwoVaults {
             mut owner,
@@ -936,7 +936,7 @@ mod tests {
     #[test]
     #[ignore = "needs a running test server"]
     fn a_team_shares_a_host_and_takes_it_back_from_a_removed_member() {
-        let api = Api::new();
+        let api = Api::shared();
         let dir = tempfile::tempdir().unwrap();
         let (mut owner, owner_keys) = member(&api, &dir, "owner.bin");
         let (mut guest, guest_keys) = member(&api, &dir, "guest.bin");

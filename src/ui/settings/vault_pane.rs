@@ -228,7 +228,7 @@ impl VaultPane {
                     // The account first: if it refuses, nothing has changed anywhere.
                     if let Some(session) = session {
                         let change = new_slot.account_change(slot.kdf_params());
-                        account::change_password(&Api::new(), &session, &change)?;
+                        account::change_password(&Api::shared(), &session, &change)?;
                     }
                     Ok(new_slot)
                 });
@@ -285,7 +285,7 @@ impl VaultPane {
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let made =
-                account::new_recovery_phrase(&Api::new(), session.as_deref(), &slot, &password);
+                account::new_recovery_phrase(&Api::shared(), session.as_deref(), &slot, &password);
             let _ = tx.try_send(made);
         });
 

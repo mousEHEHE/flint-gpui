@@ -1,6 +1,7 @@
 //! The sync server's HTTP API. Blocking: call it from a worker thread.
 
-use std::time::Duration;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -15,6 +16,11 @@ use crate::vault::sync::{OutgoingChange, PulledItem};
 const DEFAULT_URL: &str = "https://flint.mouse.pw:8443/api/v1";
 /// Points the app at another server, for development.
 const URL_VARIABLE: &str = "FLINT_API_URL";
+/// Idle sockets older than this are not reused: ureq cannot spot one that
+/// died while the computer slept or changed networks.
+const MAX_IDLE: Duration = Duration::from_secs(60);
+
+static SHARED: Mutex<Option<(Api, SystemTime)>> = Mutex::new(None);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -45,6 +51,7 @@ impl ApiError {
     }
 }
 
+#[derive(Clone)]
 pub struct Api {
     agent: ureq::Agent,
     base_url: String,
@@ -123,14 +130,25 @@ pub fn base_url() -> String {
 }
 
 impl Api {
-    pub fn new() -> Self {
-        let base_url = base_url();
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
-            .user_agent(&format!("Flint/{}", crate::version::CURRENT))
-            .build();
-        Self { agent, base_url }
+    fn new() -> Self {
+        Self {
+            agent: new_agent(),
+            base_url: base_url(),
+        }
+    }
+
+    pub fn shared() -> Api {
+        let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = SystemTime::now();
+        let api = match shared.take() {
+            Some((api, last_taken)) if is_fresh(last_taken, now) => api,
+            _ => {
+                tracing::debug!("new api connection pool");
+                Api::new()
+            }
+        };
+        *shared = Some((api.clone(), now));
+        api
     }
 
     pub fn config(&self) -> Result<ServerConfig, ApiError> {
@@ -572,22 +590,75 @@ impl Api {
         token: Option<&str>,
         body: Option<&Value>,
     ) -> Result<ureq::Response, ApiError> {
-        let mut request = self
-            .agent
-            .request(method, &format!("{}{path}", self.base_url));
-        if let Some(token) = token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
-        }
-        let answer = match body {
-            Some(body) => request.send_json(body),
-            None => request.call(),
+        let started = std::time::Instant::now();
+        let answer = if method == "GET" {
+            self.get_with_retry(path, token)
+        } else {
+            // Only a GET uses the pool: ureq does not resend other requests on
+            // a dead socket, and the server may already have got them.
+            let request = self.request(&new_agent(), method, path, token);
+            answer_of(match body {
+                Some(body) => request.send_json(body),
+                None => request.call(),
+            })
         };
-        match answer {
-            Ok(response) => Ok(response),
-            Err(ureq::Error::Status(status, response)) => Err(refusal(status, response)),
-            Err(ureq::Error::Transport(transport)) => Err(ApiError::Network(transport.to_string())),
+        tracing::debug!(
+            method,
+            path,
+            elapsed_ms = started.elapsed().as_millis(),
+            "api request"
+        );
+        answer
+    }
+
+    fn get_with_retry(&self, path: &str, token: Option<&str>) -> Result<ureq::Response, ApiError> {
+        match self.request(&self.agent, "GET", path, token).call() {
+            // ureq does not retry a dead pooled socket itself. Drop the pool,
+            // as the other sockets are likely dead too.
+            Err(ureq::Error::Transport(transport)) if transport.kind() == ureq::ErrorKind::Io => {
+                tracing::debug!(path, error = %transport, "retrying on a new connection");
+                *SHARED.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                answer_of(self.request(&new_agent(), "GET", path, token).call())
+            }
+            answer => answer_of(answer),
         }
     }
+
+    fn request(
+        &self,
+        agent: &ureq::Agent,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+    ) -> ureq::Request {
+        let request = agent.request(method, &format!("{}{path}", self.base_url));
+        match token {
+            Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+            None => request,
+        }
+    }
+}
+
+fn answer_of(answer: Result<ureq::Response, ureq::Error>) -> Result<ureq::Response, ApiError> {
+    match answer {
+        Ok(response) => Ok(response),
+        Err(ureq::Error::Status(status, response)) => Err(refusal(status, response)),
+        Err(ureq::Error::Transport(transport)) => Err(ApiError::Network(transport.to_string())),
+    }
+}
+
+fn new_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .user_agent(&format!("Flint/{}", crate::version::CURRENT))
+        .build()
+}
+
+/// Wall-clock time, because `Instant` stops while a Mac sleeps.
+fn is_fresh(last_taken: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(last_taken)
+        .is_ok_and(|idle| idle < MAX_IDLE)
 }
 
 /// A vault item as the server sends it.
@@ -876,5 +947,24 @@ impl RosterSubmission {
             "rotations": rotations,
             "confirmations": confirmations,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reuses_connections_only_while_fresh() {
+        let taken = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert!(is_fresh(taken, taken + Duration::from_secs(5)));
+        assert!(!is_fresh(taken, taken + MAX_IDLE));
+        assert!(!is_fresh(taken, taken + Duration::from_secs(3_600)));
+    }
+
+    #[test]
+    fn clock_going_back_is_not_fresh() {
+        let taken = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert!(!is_fresh(taken, taken - Duration::from_secs(5)));
     }
 }

@@ -408,6 +408,7 @@ fn check_team(
         details.join_confirmation.as_deref(),
     )?
     else {
+        tracing::debug!(team = %team_id, "no trusted roster or accepted join for this team yet, skipping it");
         return Ok(None);
     };
     let mut body = chain[start].body.clone();
@@ -1408,7 +1409,7 @@ mod tests {
         roster.members[1].vault_ids.push(second.vault_id);
 
         let submission =
-            sign_with_keys(&Api::new(), &context, &owner, &team, roster, None).unwrap();
+            sign_with_keys(&Api::shared(), &context, &owner, &team, roster, None).unwrap();
 
         assert!(submission.rotations.is_empty());
         assert_eq!(submission.wraps.len(), 1);
@@ -1445,7 +1446,7 @@ mod tests {
         roster.members[0].vault_ids.push(new.vault_id);
 
         let submission =
-            sign_with_keys(&Api::new(), &context, &owner, &team, roster, Some(&new)).unwrap();
+            sign_with_keys(&Api::shared(), &context, &owner, &team, roster, Some(&new)).unwrap();
 
         assert!(submission.rotations.is_empty());
         let wrapped_for: Vec<(Uuid, Uuid)> = submission

@@ -133,7 +133,7 @@ impl SyncPane {
         let asked_with = token.clone();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let api = Api::new();
+            let api = Api::shared();
             let devices = sign_out
                 .map_or(Ok(()), |id| api.revoke_session(&token, id))
                 .and_then(|()| api.sessions(&token));
@@ -188,7 +188,7 @@ impl SyncPane {
         std::thread::spawn(move || {
             let password = SecretString::new(password);
             let _ = tx.try_send(account::delete_account(
-                &Api::new(),
+                &Api::shared(),
                 &token,
                 &slot,
                 &password,
