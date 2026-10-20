@@ -234,18 +234,23 @@ impl NewPasswordSlot {
     }
 }
 
-impl VaultManager {
-    /// Create a new vault. Returns the manager and a 24-word recovery phrase.
-    /// Show the phrase to the user exactly once.
-    pub fn create(
-        path: &Path,
-        password: &SecretString,
-    ) -> Result<(Self, RecoveryPhrase), VaultError> {
-        Self::create_with_params(path, password, KdfParams::default())
+/// Made in memory, so an account can be registered before anything is written.
+pub struct NewVaultKeys {
+    dek: Zeroizing<[u8; 32]>,
+    pub(crate) kdf_salt: [u8; 32],
+    pub(crate) kdf_params: KdfParams,
+    pub(crate) enc_dek_by_password: AeadBlob,
+    pub(crate) enc_dek_by_recovery: AeadBlob,
+    pub(crate) auth_key: Zeroizing<[u8; 32]>,
+    pub(crate) recovery_auth_key: Zeroizing<[u8; 32]>,
+}
+
+impl NewVaultKeys {
+    pub fn generate(password: &SecretString) -> Result<(Self, RecoveryPhrase), VaultError> {
+        Self::generate_with_params(password, KdfParams::default())
     }
 
-    pub(crate) fn create_with_params(
-        path: &Path,
+    pub(crate) fn generate_with_params(
         password: &SecretString,
         kdf_params: KdfParams,
     ) -> Result<(Self, RecoveryPhrase), VaultError> {
@@ -264,6 +269,64 @@ impl VaultManager {
         let (recovery_phrase, recovery_entropy) = RecoveryPhrase::generate();
         let enc_dek_by_recovery = crypto::encrypt(&recovery_entropy, dek.as_ref());
 
+        let keys = Self {
+            dek,
+            kdf_salt,
+            kdf_params,
+            enc_dek_by_password,
+            enc_dek_by_recovery,
+            auth_key: Zeroizing::new(sync::auth_key(&kek)),
+            recovery_auth_key: Zeroizing::new(sync::recovery_auth_key(&recovery_entropy)),
+        };
+        Ok((keys, recovery_phrase))
+    }
+}
+
+impl VaultManager {
+    /// Create a new vault. Returns the manager and a 24-word recovery phrase.
+    /// Show the phrase to the user exactly once.
+    pub fn create(
+        path: &Path,
+        password: &SecretString,
+    ) -> Result<(Self, RecoveryPhrase), VaultError> {
+        Self::create_with_params(path, password, KdfParams::default())
+    }
+
+    pub(crate) fn create_with_params(
+        path: &Path,
+        password: &SecretString,
+        kdf_params: KdfParams,
+    ) -> Result<(Self, RecoveryPhrase), VaultError> {
+        let (keys, phrase) = NewVaultKeys::generate_with_params(password, kdf_params)?;
+        let NewVaultKeys {
+            dek,
+            kdf_salt,
+            kdf_params,
+            enc_dek_by_password,
+            enc_dek_by_recovery,
+            ..
+        } = keys;
+        let manager = Self::write_new(
+            path,
+            &dek,
+            kdf_salt,
+            kdf_params,
+            enc_dek_by_password,
+            enc_dek_by_recovery,
+            None,
+        )?;
+        Ok((manager, phrase))
+    }
+
+    fn write_new(
+        path: &Path,
+        dek: &[u8; 32],
+        kdf_salt: [u8; 32],
+        kdf_params: KdfParams,
+        enc_dek_by_password: AeadBlob,
+        enc_dek_by_recovery: AeadBlob,
+        sync: Option<sync::SyncState>,
+    ) -> Result<Self, VaultError> {
         let payload = VaultPayload {
             entries: Vec::new(),
             keys: Vec::new(),
@@ -272,11 +335,11 @@ impl VaultManager {
             tags: Vec::new(),
             proxies: Vec::new(),
             proxy_routing: ProxyRouting::default(),
-            sync: None,
+            sync,
             team_pins: Vec::new(),
             joins: Vec::new(),
         };
-        let enc_payload = Self::encrypt_payload(&dek, &payload)?;
+        let enc_payload = Self::encrypt_payload(dek, &payload)?;
 
         let vault_file = VaultFile {
             version: VAULT_VERSION,
@@ -288,16 +351,15 @@ impl VaultManager {
         };
         storage::write_vault(path, &vault_file)?;
 
-        let manager = Self::new_with_dek(
+        Ok(Self::new_with_dek(
             path,
-            &dek,
+            dek,
             kdf_salt,
             kdf_params,
             enc_dek_by_password,
             enc_dek_by_recovery,
             payload,
-        );
-        Ok((manager, recovery_phrase))
+        ))
     }
 
     /// Unlock an existing vault with the master password.
@@ -1433,6 +1495,19 @@ mod tests {
     fn make_vault(dir: &std::path::Path) -> (VaultManager, RecoveryPhrase) {
         let path = dir.join("vault.bin");
         VaultManager::create_with_params(&path, &pw("hunter2"), fast_kdf()).unwrap()
+    }
+
+    #[test]
+    fn new_keys_give_the_auth_keys_the_server_checks() {
+        let (keys, phrase) =
+            NewVaultKeys::generate_with_params(&pw("hunter2"), fast_kdf()).unwrap();
+
+        let kek = crypto::derive_kek(b"hunter2", &keys.kdf_salt, &fast_kdf()).unwrap();
+        assert_eq!(*keys.auth_key, sync::auth_key(&kek));
+        assert_eq!(
+            *keys.recovery_auth_key,
+            sync::recovery_auth_key(&phrase.to_bytes())
+        );
     }
 
     fn test_entry() -> ServerEntry {

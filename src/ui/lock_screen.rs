@@ -35,7 +35,7 @@ pub fn column() -> Div {
     v_flex().w(COLUMN_WIDTH).gap(px(8.))
 }
 
-pub fn header(title: &'static str, subtitle: Option<&'static str>, cx: &App) -> Div {
+pub fn header(title: impl Into<SharedString>, subtitle: Option<&'static str>, cx: &App) -> Div {
     v_flex()
         .gap(px(4.))
         .pb(px(4.))
@@ -43,7 +43,7 @@ pub fn header(title: &'static str, subtitle: Option<&'static str>, cx: &App) -> 
             div()
                 .text_size(px(16.))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .child(title),
+                .child(title.into()),
         )
         .when_some(subtitle, |el, subtitle| {
             el.child(note(subtitle, cx.theme().muted_foreground))

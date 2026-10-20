@@ -16,8 +16,8 @@ use crate::vault::sync::{
     self, AdoptedAccount, RecoveryJob, Registration, SyncJob, SyncResult, SyncState,
 };
 use crate::vault::{
-    crypto, AccountPasswordChange, NewRecoverySlot, PasswordSlot, RecoveryPhrase, VaultError,
-    VaultManager,
+    crypto, AccountPasswordChange, NewRecoverySlot, NewVaultKeys, PasswordSlot, RecoveryPhrase,
+    VaultError, VaultManager,
 };
 
 pub use api::{Api, ApiError, GitHubStep};
@@ -100,6 +100,29 @@ pub fn register(
         ),
     };
     Ok((registration, phrase))
+}
+
+/// Unlike `register`, this keeps the vault's own recovery phrase.
+pub fn register_new_vault(
+    api: &Api,
+    step: &GitHubStep,
+    keys: &NewVaultKeys,
+) -> Result<SyncState, AccountError> {
+    let session = api.register(&api::NewAccount {
+        ticket: &step.ticket,
+        kdf_salt: &keys.kdf_salt,
+        kdf_params: &keys.kdf_params,
+        auth_key: &keys.auth_key,
+        recovery_auth_key: &keys.recovery_auth_key,
+        enc_dek_by_password: &keys.enc_dek_by_password,
+        enc_dek_by_recovery: &keys.enc_dek_by_recovery,
+    })?;
+    Ok(SyncState::new(
+        session.user_id,
+        step.github_login.clone(),
+        session.session_token,
+        session.vault_id,
+    ))
 }
 
 /// Sign in to an existing account with its password. A wrong password comes

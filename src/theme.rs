@@ -568,6 +568,12 @@ fn apply_theme(cx: &mut App) {
     t.button_primary_active     = p.accent_active;
     t.button_primary_foreground = p.accent_ink;
 
+    // Unset, these fall back to a stock grey that looks muddy on our background.
+    t.button_secondary            = p.element;
+    t.button_secondary_hover      = p.element_hover;
+    t.button_secondary_active     = p.element_active;
+    t.button_secondary_foreground = p.text;
+
     t.secondary            = p.surface;
     t.secondary_hover      = p.element_hover;
     t.secondary_active     = p.element_active;

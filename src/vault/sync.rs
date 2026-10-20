@@ -6,6 +6,7 @@
 //! [`VaultManager::finish_round`] takes the answers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -16,7 +17,7 @@ use super::format::{
     AeadBlob, Group, KdfParams, ProxyDef, ProxyRouting, ServerEntry, Snippet, SshKey, Tag,
     VaultPayload,
 };
-use super::{crypto, AuthMethod, VaultError, VaultManager};
+use super::{crypto, AuthMethod, NewVaultKeys, VaultError, VaultManager};
 
 /// The server refuses a larger item, and one refused item fails its whole batch.
 pub const MAX_ITEM_BYTES: usize = 64 * 1024;
@@ -1550,6 +1551,36 @@ impl VaultManager {
         saved
     }
 
+    /// Opens with the account password and recovery phrase.
+    pub fn create_from_account(path: &Path, account: AdoptedAccount) -> Result<Self, VaultError> {
+        Self::write_new(
+            path,
+            &account.dek,
+            account.kdf_salt,
+            account.kdf_params,
+            account.enc_dek_by_password,
+            account.enc_dek_by_recovery,
+            Some(account.state),
+        )
+    }
+
+    /// Borrows `keys`, so a failed write can retry with the same phrase.
+    pub fn create_registered(
+        path: &Path,
+        keys: &NewVaultKeys,
+        state: &SyncState,
+    ) -> Result<Self, VaultError> {
+        Self::write_new(
+            path,
+            &keys.dek,
+            keys.kdf_salt,
+            keys.kdf_params.clone(),
+            keys.enc_dek_by_password.clone(),
+            keys.enc_dek_by_recovery.clone(),
+            Some(state.clone()),
+        )
+    }
+
     /// Record that the vault was just recovered with the phrase, so the account
     /// can be told. Called before the first save under the new password.
     pub(super) fn note_recovery(
@@ -2923,5 +2954,60 @@ mod tests {
             vault.sync_state().unwrap().session_token.as_deref(),
             Some("fresh")
         );
+    }
+
+    #[test]
+    fn a_vault_made_from_an_account_opens_with_its_password_and_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let password = SecretString::new("pw".into());
+        let (account_vault, phrase) =
+            VaultManager::create_with_params(&dir.path().join("a.bin"), &password, fast_kdf())
+                .unwrap();
+        let slot = account_vault.password_slot();
+        let account = AdoptedAccount {
+            dek: slot.open(&password).unwrap().dek,
+            kdf_salt: slot.kdf_salt(),
+            kdf_params: slot.kdf_params().clone(),
+            enc_dek_by_password: slot.enc_dek_by_password().clone(),
+            enc_dek_by_recovery: account_vault.enc_dek_by_recovery.clone(),
+            state: SyncState::new(Uuid::nil(), "alice".into(), "token".into(), Uuid::nil()),
+        };
+
+        let path = dir.path().join("b.bin");
+        let vault = VaultManager::create_from_account(&path, account).unwrap();
+        assert!(vault.sync_state().is_some());
+        vault.lock();
+
+        VaultManager::unlock_with_password(&path, &password).unwrap();
+        VaultManager::unlock_with_recovery_with_params(
+            &path,
+            &phrase,
+            &SecretString::new("new".into()),
+            fast_kdf(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_registered_vault_opens_with_its_password_and_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let password = SecretString::new("pw".into());
+        let (keys, phrase) = NewVaultKeys::generate_with_params(&password, fast_kdf()).unwrap();
+        let user_id = Uuid::new_v4();
+        let state = SyncState::new(user_id, "alice".into(), "token".into(), Uuid::new_v4());
+
+        let path = dir.path().join("vault.bin");
+        let vault = VaultManager::create_registered(&path, &keys, &state).unwrap();
+        assert_eq!(vault.sync_state().unwrap().user_id, user_id);
+        vault.lock();
+
+        VaultManager::unlock_with_password(&path, &password).unwrap();
+        VaultManager::unlock_with_recovery_with_params(
+            &path,
+            &phrase,
+            &SecretString::new("new".into()),
+            fast_kdf(),
+        )
+        .unwrap();
     }
 }

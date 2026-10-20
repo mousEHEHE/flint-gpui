@@ -15,6 +15,7 @@ pub mod import_view;
 pub mod keyboard_layout;
 pub mod lock_screen;
 pub mod mouse_report;
+pub mod onboarding_view;
 pub mod passphrase_prompt;
 pub mod peer_link;
 pub mod phrase_panel;

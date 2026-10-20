@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::account::api::DeviceSession;
 use crate::account::{self, AccountError, Api};
+use crate::preferences::Preferences;
 use crate::ui::sync_service::{SignIn, SyncService};
 use crate::ui::VaultState;
 use crate::vault::VaultError;
@@ -202,6 +203,7 @@ impl SyncPane {
                         tracing::info!("sync account deleted");
                         this.is_confirming_delete = false;
                         this.devices = None;
+                        Preferences::update(cx, |prefs| prefs.has_account = false);
                         this.service.update(cx, |service, cx| service.sign_out(cx));
                     }
                     Err(e) => this.delete_error = Some(delete_problem(&e)),

@@ -212,6 +212,10 @@ pub struct Preferences {
     /// of opening the file on this computer.
     #[serde(default)]
     pub is_editor_default_open: bool,
+    /// An onboarding hint only, never for security. Kept after sign-out and
+    /// vault deletion. Set by `load_from`, see `has_account_in`.
+    #[serde(default)]
+    pub has_account: bool,
 }
 
 /// The update answer the raw file holds. Read on its own so that a file that
@@ -226,6 +230,11 @@ fn update_checks_in(data: &[u8]) -> Option<UpdateChecks> {
         return Some(answer);
     }
     (file["is_update_check_enabled"] == false).then_some(UpdateChecks::Manual)
+}
+
+/// Read from the raw file, like `update_checks_in`.
+fn has_account_in(data: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(data).is_ok_and(|file| file["has_account"] == true)
 }
 
 fn default_true() -> bool {
@@ -263,6 +272,7 @@ impl Default for Preferences {
             is_second_pane_shown: false,
             editor_command: default_editor_command(),
             is_editor_default_open: false,
+            has_account: false,
         }
     }
 }
@@ -336,6 +346,12 @@ impl Preferences {
             .is_some_and(|prefs| prefs.is_editor_default_open)
     }
 
+    /// False when the preferences were never loaded.
+    pub fn has_account(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.has_account)
+    }
+
     /// Change the preferences and write them to disk. The change has already
     /// taken effect in memory, so a failed write is logged and not surfaced.
     pub fn update(cx: &mut gpui::App, change: impl FnOnce(&mut Self)) {
@@ -406,6 +422,7 @@ impl Preferences {
         });
         Self {
             update_checks: update_checks_in(&data),
+            has_account: has_account_in(&data),
             ..prefs
         }
     }
@@ -556,6 +573,26 @@ mod tests {
             None
         );
         assert_eq!(load("not json").update_checks, None);
+    }
+
+    #[test]
+    fn the_account_flag_stays_when_the_rest_of_the_file_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            Preferences::load_from(&path)
+        };
+
+        let future = load(r#"{"terminal_scheme":"from-the-future","has_account":true}"#);
+        assert!(future.has_account);
+        assert_eq!(future.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
+
+        assert!(load(r#"{"has_account":true}"#).has_account);
+        assert!(!load(r#"{"has_account":false}"#).has_account);
+        assert!(!load(r#"{"theme":"light"}"#).has_account);
+        assert!(!load(r#"{"terminal_scheme":7}"#).has_account);
+        assert!(!load("not json").has_account);
     }
 
     #[test]

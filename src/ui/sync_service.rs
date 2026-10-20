@@ -3,6 +3,7 @@
 //! sign-in, so closing Settings while the browser is open does not lose it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,12 +15,13 @@ use uuid::Uuid;
 use crate::account::api::JoinRequest;
 use crate::account::team::{self, Roster, TeamError, TeamKeys};
 use crate::account::{self, AccountError, Api, ApiError, GitHubStep, OAuthError};
+use crate::preferences::Preferences;
 use crate::ui::VaultState;
 use crate::vault::sync::{
-    AdoptedAccount, InviteSecret, PendingJoin, Registration, SyncResult, TeamContext, TeamUpdate,
-    TeamsUpdate,
+    AdoptedAccount, InviteSecret, PendingJoin, Registration, SyncResult, SyncState, TeamContext,
+    TeamUpdate, TeamsUpdate,
 };
-use crate::vault::{RecoveryPhrase, VaultError, VaultManager};
+use crate::vault::{NewVaultKeys, RecoveryPhrase, VaultError, VaultManager};
 
 /// How often the vault is checked for edits to send.
 const TICK: Duration = Duration::from_secs(20);
@@ -57,6 +59,9 @@ pub struct SyncService {
     /// it, with a recovery phrase the user has not seen, so it is installed
     /// and the phrase shown as soon as the vault opens again.
     owed_registration: Option<(Registration, RecoveryPhrase)>,
+    /// A new account whose vault write failed. The server has its recovery
+    /// phrase, so a retry must use these same keys.
+    unsaved_vault: Option<(Arc<GitHubStep>, Box<UnsavedVault>)>,
     pub is_syncing: bool,
     pub last_synced: Option<Instant>,
     pub sync_error: Option<String>,
@@ -166,6 +171,37 @@ enum Opened {
     Adopted(AdoptedAccount),
 }
 
+/// A vault made on this device from a flint account.
+enum Created {
+    Opened(VaultManager),
+    /// A new account. The user has not seen this phrase yet.
+    WithPhrase(VaultManager, RecoveryPhrase),
+}
+
+enum PreVaultError {
+    /// Nothing was written.
+    Account(AccountError),
+    /// Nothing was sent to the server.
+    VaultExists,
+    /// Signed in, but the vault file was not written.
+    NotSaved(VaultError),
+    /// Registered, but not written. The keys come back for a retry.
+    RegisteredNotSaved(VaultError, Box<UnsavedVault>),
+}
+
+/// Accepted by the server, not yet written to disk.
+struct UnsavedVault {
+    keys: NewVaultKeys,
+    state: SyncState,
+    phrase: RecoveryPhrase,
+}
+
+impl From<AccountError> for PreVaultError {
+    fn from(error: AccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
 enum Round {
     /// With the session token the round used.
     Synced(String, Vec<Result<SyncResult, ApiError>>),
@@ -203,6 +239,14 @@ impl SyncService {
             this.was_unlocked = is_unlocked;
             if !just_unlocked {
                 return;
+            }
+            // For users who signed in before the flag existed.
+            if vault_state
+                .read(cx)
+                .manager()
+                .is_some_and(|manager| manager.sync_state().is_some())
+            {
+                set_has_account(cx);
             }
             match this.owed_registration.take() {
                 Some((registration, phrase)) => {
@@ -242,6 +286,7 @@ impl SyncService {
             attempt: 0,
             generation: 0,
             owed_registration: None,
+            unsaved_vault: None,
             is_syncing: false,
             last_synced: None,
             sync_error: None,
@@ -517,6 +562,10 @@ impl SyncService {
     }
 
     pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, unsaved)) = self.unsaved_vault.take() {
+            tracing::warn!("dropping a new sync account whose vault was never saved");
+            log_out_quietly(unsaved.state.session_token.clone());
+        }
         self.is_cancelled.store(true, Ordering::Relaxed);
         self.attempt += 1;
         self.sign_in = SignIn::Idle;
@@ -578,6 +627,9 @@ impl SyncService {
         opened: Result<Opened, AccountError>,
         cx: &mut Context<Self>,
     ) {
+        if opened.is_ok() {
+            set_has_account(cx);
+        }
         let is_locked = self.vault_state.read(cx).manager().is_none();
         let opened = match opened {
             Ok(Opened::Registered(registration, phrase)) if is_locked => {
@@ -605,21 +657,159 @@ impl SyncService {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "sync sign-in failed");
-                // Another password will not help these: GitHub has to be asked again.
-                let is_stale = matches!(
-                    &e,
-                    AccountError::Api(api)
-                        if matches!(api.code(), Some("ticket_invalid" | "account_exists"))
-                );
-                self.sign_in = if is_stale {
-                    SignIn::Idle
-                } else {
-                    SignIn::Password(step.clone())
-                };
-                self.sign_in_error = Some(sign_in_problem(&e, step.is_new));
+                self.show_sign_in_error(&step, &e);
             }
         }
         cx.notify();
+    }
+
+    fn show_sign_in_error(&mut self, step: &Arc<GitHubStep>, error: &AccountError) {
+        // Another password will not help these: GitHub has to be asked again.
+        let is_stale = matches!(
+            error,
+            AccountError::Api(api)
+                if matches!(api.code(), Some("ticket_invalid" | "account_exists"))
+        );
+        self.sign_in = if is_stale {
+            SignIn::Idle
+        } else {
+            SignIn::Password(step.clone())
+        };
+        self.sign_in_error = Some(sign_in_problem(error, step.is_new));
+    }
+
+    /// Only before a vault exists; `submit_password` is for an open vault.
+    pub fn create_vault_with_account(&mut self, password: SecretString, cx: &mut Context<Self>) {
+        let SignIn::Password(step) = &self.sign_in else {
+            return;
+        };
+        let step = step.clone();
+        if !matches!(self.vault_state.read(cx), VaultState::Locked) {
+            return;
+        }
+
+        self.sign_in = SignIn::Working(step.clone());
+        self.sign_in_error = None;
+        cx.notify();
+
+        let created = in_background({
+            let step = step.clone();
+            move || {
+                let path = crate::vault::default_vault_path().map_err(AccountError::Vault)?;
+                create_vault_for(&path, &step, &password)
+            }
+        });
+        self.await_created_vault(step, created, cx);
+    }
+
+    pub fn has_unsaved_vault(&self) -> bool {
+        self.unsaved_vault.is_some()
+    }
+
+    pub fn save_unsaved_vault(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.sign_in, SignIn::Idle)
+            || !matches!(self.vault_state.read(cx), VaultState::Locked)
+        {
+            return;
+        }
+        let Some((step, unsaved)) = self.unsaved_vault.take() else {
+            return;
+        };
+
+        self.sign_in = SignIn::Working(step.clone());
+        self.sign_in_error = None;
+        cx.notify();
+
+        let created = in_background(move || retry_registered(*unsaved));
+        self.await_created_vault(step, created, cx);
+    }
+
+    fn await_created_vault(
+        &self,
+        step: Arc<GitHubStep>,
+        created: async_channel::Receiver<Result<Created, PreVaultError>>,
+        cx: &mut Context<Self>,
+    ) {
+        // No attempt check: a vault that comes back is already on disk and
+        // must be shown.
+        cx.spawn(async move |this, cx| {
+            let Ok(created) = created.recv().await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.finish_vault_with_account(step, created, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_vault_with_account(
+        &mut self,
+        step: Arc<GitHubStep>,
+        created: Result<Created, PreVaultError>,
+        cx: &mut Context<Self>,
+    ) {
+        match created {
+            Ok(created) => self.show_created_vault(&step, created, cx),
+            Err(PreVaultError::Account(e)) => {
+                tracing::warn!(error = %e, "sign-in before a vault failed");
+                self.show_sign_in_error(&step, &e);
+            }
+            Err(PreVaultError::VaultExists) => {
+                tracing::warn!("a vault appeared before the sign-in could make one");
+                // No error: the unlock screen shows the vault that is there.
+                self.sign_in = SignIn::Idle;
+                self.sign_in_error = None;
+                // RootView checks the disk again.
+                self.vault_state.update(cx, |_, cx| cx.notify());
+            }
+            Err(PreVaultError::NotSaved(e)) => {
+                tracing::error!(?e, "signed in, but the vault was not saved");
+                self.sign_in = SignIn::Idle;
+                self.sign_in_error =
+                    Some(format!("Signed in, but the vault could not be saved: {e}."));
+                // A failed write may leave a file. RootView shows it, so nothing overwrites it.
+                self.vault_state.update(cx, |_, cx| cx.notify());
+            }
+            Err(PreVaultError::RegisteredNotSaved(e, unsaved)) => {
+                tracing::error!(?e, "account created, but the vault was not saved");
+                set_has_account(cx);
+                self.unsaved_vault = Some((step, unsaved));
+                self.sign_in = SignIn::Idle;
+                self.sign_in_error = Some(format!(
+                    "Your flint account was created, but the vault could not be saved: {e}. \
+                     Fix the problem, then try again."
+                ));
+                self.vault_state.update(cx, |_, cx| cx.notify());
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_created_vault(&mut self, step: &GitHubStep, created: Created, cx: &mut Context<Self>) {
+        self.sign_in = SignIn::Idle;
+        if !matches!(self.vault_state.read(cx), VaultState::Locked) {
+            // RootView finds the file on disk.
+            tracing::error!("a vault was made from the account, but another one is open");
+            return;
+        }
+        tracing::info!(login = %step.github_login, is_new = step.is_new, "vault made from the sync account");
+        set_has_account(cx);
+        self.sync_error = None;
+        self.retry_after = None;
+        // The vault state observer runs the first round.
+        self.vault_state.update(cx, |vault_state, cx| {
+            *vault_state = match created {
+                Created::Opened(manager) => VaultState::Unlocked { manager },
+                Created::WithPhrase(manager, phrase) => VaultState::AwaitingPhraseConfirmation {
+                    manager,
+                    phrase,
+                    is_rotation: false,
+                },
+            };
+            cx.notify();
+        });
     }
 
     /// Do something with a team. `password` is the master password: needed
@@ -758,15 +948,7 @@ impl SyncService {
         // No account here (or a locked vault): a sign-in that is under way
         // is not this account's, and its answer must still land.
         let Some(token) = signed_out else { return };
-        if let Some(token) = token {
-            // Best effort: a session that stays open on the server holds
-            // nothing this device still uses.
-            std::thread::spawn(move || {
-                if let Err(e) = Api::new().logout(&token) {
-                    tracing::warn!(error = %e, "could not close the sync session on the server");
-                }
-            });
-        }
+        log_out_quietly(token);
         self.forget_account(cx);
     }
 
@@ -801,6 +983,75 @@ impl SyncService {
         self.join_requests.clear();
         cx.notify();
     }
+}
+
+/// Best effort: a session left open holds nothing this device still uses.
+fn log_out_quietly(token: Option<String>) {
+    let Some(token) = token else { return };
+    std::thread::spawn(move || {
+        if let Err(e) = Api::new().logout(&token) {
+            tracing::warn!(error = %e, "could not close the sync session on the server");
+        }
+    });
+}
+
+/// Blocks on Argon2id and the network.
+fn create_vault_for(
+    path: &Path,
+    step: &GitHubStep,
+    password: &SecretString,
+) -> Result<Created, PreVaultError> {
+    // Before any request, so an existing vault is never replaced.
+    if path.exists() {
+        return Err(PreVaultError::VaultExists);
+    }
+    let api = Api::new();
+    if step.is_new {
+        let (keys, phrase) = NewVaultKeys::generate(password).map_err(AccountError::Vault)?;
+        let state = account::register_new_vault(&api, step, &keys)?;
+        return save_registered(
+            path,
+            UnsavedVault {
+                keys,
+                state,
+                phrase,
+            },
+        );
+    }
+    // A wrong password fails here, before anything is written.
+    let account = account::sign_in(&api, step, password)?;
+    let token = account.state.session_token.clone();
+    VaultManager::create_from_account(path, account)
+        .map(Created::Opened)
+        .map_err(|e| {
+            log_out_quietly(token);
+            PreVaultError::NotSaved(e)
+        })
+}
+
+/// On failure the keys come back and the session stays open for a retry.
+fn save_registered(path: &Path, unsaved: UnsavedVault) -> Result<Created, PreVaultError> {
+    match VaultManager::create_registered(path, &unsaved.keys, &unsaved.state) {
+        Ok(manager) => Ok(Created::WithPhrase(manager, unsaved.phrase)),
+        Err(e) => Err(PreVaultError::RegisteredNotSaved(e, Box::new(unsaved))),
+    }
+}
+
+fn retry_registered(unsaved: UnsavedVault) -> Result<Created, PreVaultError> {
+    let path = match crate::vault::default_vault_path() {
+        Ok(path) => path,
+        Err(e) => return Err(PreVaultError::RegisteredNotSaved(e, Box::new(unsaved))),
+    };
+    retry_registered_at(&path, unsaved)
+}
+
+fn retry_registered_at(path: &Path, unsaved: UnsavedVault) -> Result<Created, PreVaultError> {
+    // Checked again: a vault made since then is never replaced.
+    if path.exists() {
+        log_out_quietly(unsaved.state.session_token.clone());
+        return Err(PreVaultError::VaultExists);
+    }
+    save_registered(path, unsaved)
 }
 
 /// Fetch and check the account's teams, and who waits to join them.
@@ -1013,6 +1264,12 @@ fn is_team_news(error: &ApiError) -> bool {
     matches!(error.code(), Some("key_rotated" | "vault_not_found"))
 }
 
+fn set_has_account(cx: &mut App) {
+    if !Preferences::has_account(cx) {
+        Preferences::update(cx, |prefs| prefs.has_account = true);
+    }
+}
+
 fn install(vault_state: &mut VaultState, opened: Opened) -> Result<(), VaultError> {
     let Some(vault) = vault_state.manager_mut() else {
         return Err(VaultError::Io(std::io::Error::other(
@@ -1160,6 +1417,68 @@ mod tests {
 
         assert_eq!(outcome, Err("refused: vault_not_found".to_string()));
         assert!(!vault.is_behind_on_teams());
+    }
+
+    #[test]
+    fn signing_in_before_a_vault_stops_when_a_vault_file_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.bin");
+        std::fs::write(&path, b"not a vault").unwrap();
+        // A ticket the server would refuse: the test fails if it is sent.
+        let step = GitHubStep {
+            ticket: "no-such-ticket".into(),
+            is_new: false,
+            github_login: "alice".into(),
+            kdf: None,
+        };
+
+        let created = create_vault_for(&path, &step, &SecretString::new("pw".into()));
+
+        assert!(matches!(created, Err(PreVaultError::VaultExists)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a vault");
+    }
+
+    #[test]
+    fn a_new_account_vault_that_failed_to_save_is_written_with_the_same_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let kdf = KdfParams {
+            m_cost: 256,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let password = SecretString::new("pw".into());
+        let (keys, phrase) = NewVaultKeys::generate_with_params(&password, kdf.clone()).unwrap();
+        let words = phrase.expose_words().to_string();
+        let state = SyncState::new(Uuid::new_v4(), "alice".into(), "token".into(), Uuid::nil());
+        // A file where the vault's folder should be, so the write fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+
+        let failed = save_registered(
+            &blocker.join("vault.bin"),
+            UnsavedVault {
+                keys,
+                state,
+                phrase,
+            },
+        );
+        let Err(PreVaultError::RegisteredNotSaved(_, unsaved)) = failed else {
+            panic!("the write should fail and hand the keys back");
+        };
+        let path = dir.path().join("vault.bin");
+        let Ok(Created::WithPhrase(vault, phrase)) = retry_registered_at(&path, *unsaved) else {
+            panic!("the second write should succeed");
+        };
+
+        assert_eq!(phrase.expose_words(), words);
+        vault.lock();
+        VaultManager::unlock_with_recovery_with_params(
+            &path,
+            &phrase,
+            &SecretString::new("new".into()),
+            kdf,
+        )
+        .unwrap();
     }
 
     #[test]
