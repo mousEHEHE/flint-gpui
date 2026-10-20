@@ -227,8 +227,8 @@ impl SettingsView {
         Self {
             focus_handle,
             vault_state,
-            active_section: SettingsSection::Keys,
-            mode: SettingsMode::KeysList,
+            active_section: SettingsSection::Vault,
+            mode: SettingsMode::Vault,
             selected_key_id: None,
             key_search,
             pubkey_cache: None,
