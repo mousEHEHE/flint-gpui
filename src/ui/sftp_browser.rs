@@ -52,6 +52,10 @@ const DRAGOUT_PREFETCH_MAX_FILES: usize = 64;
 /// file on disk even when it holds no bytes.
 const DRAGOUT_PREFETCH_MIN_COST: u64 = 4 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// How many folders above the one on screen are listed ahead. Going up is a
+/// likely next step; far up a deep path, folders are rarely visited and can
+/// be big.
+const PREFETCHED_ANCESTORS: usize = 8;
 /// Progress text changes faster than it can be read, and each change redraws
 /// the whole window.
 const STATUS_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -359,7 +363,7 @@ impl RemoteSide {
         pane.update(cx, |pane, cx| pane.set_loading(cx));
         primary.list_dir(start_dir.clone());
 
-        Self {
+        let mut remote = Self {
             connection,
             pane,
             primary,
@@ -373,7 +377,9 @@ impl RemoteSide {
             running_ops: Rc::default(),
             _poll_tasks: poll_tasks,
             _subscription: subscription,
-        }
+        };
+        remote.prefetch_ancestors(&start_dir);
+        remote
     }
 
     /// The folders to re-list in the background, with the channel to ask on.
@@ -461,6 +467,26 @@ impl RemoteSide {
             self.pane
                 .update(cx, |pane, cx| pane.refresh_entries(entries, cx));
         }
+    }
+
+    /// List the folders above `path` ahead, nearest first, so going up shows
+    /// them at once. A session often starts deep, where nothing above is known.
+    fn prefetch_ancestors(&mut self, path: &str) {
+        let Some(prefetch) = self.prefetch.clone() else {
+            return;
+        };
+        let ancestors: Vec<String> = ancestors_to_prefetch(path)
+            .into_iter()
+            .filter(|ancestor| !self.is_in_flight(ancestor) && self.cache_get(ancestor).is_none())
+            .map(String::from)
+            .collect();
+        if ancestors.is_empty() {
+            return;
+        }
+        for ancestor in &ancestors {
+            self.mark_in_flight(ancestor);
+        }
+        prefetch.prefetch_dirs(ancestors);
     }
 
     fn trigger_prefetch_for(&mut self, parent: &str, entries: &[FileEntry]) {
@@ -1225,6 +1251,7 @@ impl SftpBrowser {
                 let Some(remote) = self.side_mut(side) else {
                     return;
                 };
+                remote.prefetch_ancestors(path);
                 let cached = remote.cache_get(path).cloned();
                 if let Some(entries) = cached {
                     remote.pending_navigation = None;
@@ -3053,6 +3080,17 @@ fn flint_cache_root(kind: &str, connection_id: &str) -> Option<PathBuf> {
 }
 
 /// Compares folders as paths, so a trailing slash does not matter.
+/// The folders above `path`, nearest first, as far up as prefetching goes.
+fn ancestors_to_prefetch(path: &str) -> Vec<&str> {
+    std::path::Path::new(path)
+        .ancestors()
+        .skip(1)
+        .take(PREFETCHED_ANCESTORS)
+        .filter_map(|ancestor| ancestor.to_str())
+        .filter(|ancestor| !ancestor.is_empty())
+        .collect()
+}
+
 fn is_same_dir(a: &str, b: &str) -> bool {
     std::path::Path::new(a) == std::path::Path::new(b)
 }
@@ -3273,6 +3311,19 @@ mod tests {
                 ListFailureReport::InPane
             );
         }
+    }
+
+    #[test]
+    fn the_folders_above_are_prefetched_nearest_first() {
+        assert_eq!(
+            ancestors_to_prefetch("/srv/app/releases"),
+            ["/srv/app", "/srv", "/"]
+        );
+        assert!(ancestors_to_prefetch("/").is_empty());
+        assert_eq!(
+            ancestors_to_prefetch("/a/b/c/d/e/f/g/h/i/j").len(),
+            PREFETCHED_ANCESTORS
+        );
     }
 
     #[test]
