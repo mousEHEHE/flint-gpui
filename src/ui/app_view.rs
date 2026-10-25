@@ -14,9 +14,9 @@ use gpui_component::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::connection::{Connection, ResolvedProxy};
+use crate::connection::Connection;
 use crate::file_associations::{FileAssociations, SharedFileAssociations};
-use crate::ssh::{AuthCredential, ForwardState, SshHop, SshRoute, TransferOutcome};
+use crate::ssh::{AuthCredential, ForwardState, SshRoute, TransferOutcome};
 use crate::ssh_target::{find_saved_host, find_saved_jump_host, SshTarget};
 use crate::ui::app_picker::{AppPicker, AppPickerEvent};
 use crate::ui::command_palette::{CommandPalette, CommandPaletteEvent, PaletteCommand};
@@ -40,7 +40,8 @@ use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
 use crate::ui::{dialog_chrome, VaultState, DIALOG_FORM, DIALOG_NARROW, DIALOG_WIDE};
-use crate::vault::{AuthMethod, ProxyKind, ServerEntry, SnippetBody};
+use crate::vault::{AuthMethod, ServerEntry, SnippetBody};
+use flint_core::route::{self, CredentialIssue};
 
 actions!(
     app_view,
@@ -1155,52 +1156,37 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let credential = match &entry.auth {
-            AuthMethod::Password(p) => AuthCredential::Password(Zeroizing::new(p.clone())),
-            AuthMethod::PrivateKey { key_id } => {
-                let key_data = self
-                    .vault_state
-                    .read(cx)
-                    .manager()
-                    .and_then(|vm| vm.get_key(*key_id).ok())
-                    .map(|k| {
-                        (
-                            k.name.clone(),
-                            Zeroizing::new(k.pem.clone()),
-                            k.passphrase.clone(),
-                        )
-                    });
-                match key_data {
-                    Some((key_name, pem, passphrase)) => {
-                        // The connection would fail at key decode, so ask for
-                        // the passphrase first. The answer goes into the
-                        // credential, so reconnects do not ask again.
-                        if let Some(issue) =
-                            crate::ssh::check_key_passphrase(&pem, passphrase.as_deref())
-                        {
-                            self.show_passphrase_prompt(
-                                entry, intent, key_name, pem, issue, window, cx,
-                            );
-                            return;
-                        }
-                        AuthCredential::PrivateKey {
-                            pem,
-                            passphrase: passphrase.map(Zeroizing::new),
-                        }
-                    }
-                    None => {
-                        if matches!(intent, ConnectIntent::OpenTab) {
-                            self.forget_pending_snippet(entry.id);
-                        }
-                        self.set_status(
-                            "SSH key not found. Reassign it in Settings.".to_string(),
-                            cx,
-                        );
-                        return;
-                    }
+        let credential = match self.vault_state.read(cx).manager() {
+            Some(vm) => route::target_credential(vm, &entry),
+            None => {
+                if matches!(intent, ConnectIntent::OpenTab) {
+                    self.forget_pending_snippet(entry.id);
                 }
+                self.set_status("The vault is locked.".to_string(), cx);
+                return;
             }
-            AuthMethod::Agent => AuthCredential::Agent,
+        };
+        let credential = match credential {
+            Ok(credential) => credential,
+            // The answer goes into the credential, so reconnects do not ask again.
+            Err(CredentialIssue::Passphrase {
+                key_name,
+                pem,
+                issue,
+            }) => {
+                self.show_passphrase_prompt(entry, intent, key_name, pem, issue, window, cx);
+                return;
+            }
+            Err(CredentialIssue::KeyMissing) => {
+                if matches!(intent, ConnectIntent::OpenTab) {
+                    self.forget_pending_snippet(entry.id);
+                }
+                self.set_status(
+                    "SSH key not found. Reassign it in Settings.".to_string(),
+                    cx,
+                );
+                return;
+            }
         };
 
         self.finish_connect(entry, credential, intent, window, cx);
@@ -1299,59 +1285,8 @@ impl AppView {
         });
     }
 
-    /// Resolve a hop's credential from the vault without prompting. A jump
-    /// host cannot ask the user for a passphrase mid-chain, so an unusable key
-    /// is an error naming the host instead.
-    fn resolve_credential(&self, entry: &ServerEntry, cx: &App) -> Result<AuthCredential, String> {
-        let key_id = match &entry.auth {
-            AuthMethod::Password(p) => {
-                return Ok(AuthCredential::Password(Zeroizing::new(p.clone())))
-            }
-            AuthMethod::Agent => return Ok(AuthCredential::Agent),
-            AuthMethod::PrivateKey { key_id } => *key_id,
-        };
-        let name = if entry.label.is_empty() {
-            &entry.host
-        } else {
-            &entry.label
-        };
-        let key = self
-            .vault_state
-            .read(cx)
-            .manager()
-            .and_then(|vm| vm.get_key(key_id).ok())
-            .ok_or_else(|| format!("SSH key for '{name}' not found. Reassign it in Settings."))?;
-        if let Some(issue) = crate::ssh::check_key_passphrase(&key.pem, key.passphrase.as_deref()) {
-            return Err(match issue {
-                crate::ssh::KeyIssue::MissingPassphrase => format!(
-                    "'{name}' uses an encrypted key. Save its passphrase with the key in Settings."
-                ),
-                crate::ssh::KeyIssue::WrongPassphrase => {
-                    format!("The saved passphrase no longer decrypts '{name}'s key.")
-                }
-            });
-        }
-        Ok(AuthCredential::PrivateKey {
-            pem: Zeroizing::new(key.pem.clone()),
-            passphrase: key.passphrase.clone().map(Zeroizing::new),
-        })
-    }
-
-    fn hop_from_entry(entry: &ServerEntry, credential: AuthCredential) -> SshHop {
-        SshHop {
-            entry_id: entry.id.to_string(),
-            label: entry.label.clone(),
-            host: entry.host.clone(),
-            port: entry.port,
-            username: entry.username.clone(),
-            credential,
-            expected_host_key: entry.host_key_fingerprint.clone(),
-        }
-    }
-
-    /// The path this session will connect over: every bastion in front of
-    /// `entry`, then `entry` itself with the credential already resolved (and
-    /// possibly prompted for) by the caller.
+    /// The path this session will connect over, with the credential for `entry` already
+    /// resolved (and possibly prompted for) by the caller.
     fn build_route(
         &self,
         entry: &ServerEntry,
@@ -1365,41 +1300,7 @@ impl AppView {
         let Some(vm) = vault.manager() else {
             return Err("The vault is locked.".to_string());
         };
-        let chain = vm
-            .resolve_jump_chain_for(entry.id)
-            .map_err(|e| e.to_string())?;
-
-        // Resolve the effective proxy (per-host override on top of the global
-        // rule) before spawning: the SSH layer has no vault access. Only the
-        // first hop is dialled over TCP, so the proxy that counts is the one
-        // configured for that machine; a jumped target is never reached from
-        // this network at all.
-        let dialled = chain.first().map(|hop| hop.id).unwrap_or(entry.id);
-        let proxy = vm.resolve_proxy_for(dialled).map(|p| {
-            let addr = format!("{}:{}", p.host, p.port);
-            let auth = p
-                .auth
-                .as_ref()
-                .map(|a| (a.username.clone(), a.password.clone()));
-            match p.kind {
-                ProxyKind::Socks5 => ResolvedProxy::Socks5 { addr, auth },
-                ProxyKind::Http => ResolvedProxy::Http { addr, auth },
-            }
-        });
-
-        // The chain ends with the target; the credential for it is already in
-        // hand, so only the bastions in front of it need resolving.
-        let mut jumps = Vec::new();
-        for bastion in chain.iter().take(chain.len().saturating_sub(1)) {
-            let hop_credential = self.resolve_credential(bastion, cx)?;
-            jumps.push(Self::hop_from_entry(bastion, hop_credential));
-        }
-
-        Ok(SshRoute {
-            jumps,
-            target: Self::hop_from_entry(entry, credential),
-            proxy,
-        })
+        route::route_for(vm, entry, credential)
     }
 
     fn launch_session(
