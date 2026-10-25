@@ -18,14 +18,27 @@ jobs:
   windows:
     name: windows-x86_64
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: flint-gpui
     steps:
+      # Cargo.toml takes flint-core from ../flint-core, so both repos go side by side.
       - uses: actions/checkout@v7
+        with:
+          path: flint-gpui
+
+      - uses: actions/checkout@v7
+        with:
+          repository: mousEHEHE/flint-core
+          path: flint-core
 
       # With no arguments rustup installs the compiler pinned in rust-toolchain.toml.
       - name: Install Rust
         run: rustup toolchain install --no-self-update
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: flint-gpui
 
       - name: Build
         run: cargo build --release --locked
@@ -42,5 +55,5 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
-          path: Flint-*.zip
+          path: flint-gpui/Flint-*.zip
           if-no-files-found: error
