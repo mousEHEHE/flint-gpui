@@ -40,6 +40,11 @@ pub const TOGGLE_FILES_SHORTCUT: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+Shift+B"
 };
+pub const SERVER_PANEL_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "\u{2318}I"
+} else {
+    "Ctrl+Shift+I"
+};
 
 /// Why a file cannot open in a new tab: every tab is taken, or the session is
 /// not connected.
@@ -251,6 +256,15 @@ impl ServerSession {
         cx.notify();
     }
 
+    /// Saved, and applies to every session, like the second file pane.
+    pub fn toggle_server_panel(&mut self, cx: &mut Context<Self>) {
+        let is_shown = !Preferences::is_server_panel_shown(cx);
+        Preferences::update(cx, |prefs| prefs.is_server_panel_shown = is_shown);
+        // Clicking the header took the keys from the terminal.
+        self.is_terminal_focus_pending = true;
+        cx.notify();
+    }
+
     /// Show or hide the second file pane, the one with this computer or
     /// another server. The choice is saved and applies to every session.
     pub fn toggle_second_pane(&mut self, cx: &mut Context<Self>) {
@@ -364,7 +378,9 @@ impl ServerSession {
                     .child(self.render_second_pane_toggle(cx))
                     .child(self.render_sftp_toggle(cx))
                     .child(div().mx(px(6.)).w(px(1.)).h(px(16.)).bg(theme::border()))
-                    .child(self.render_layout_switch(cx)),
+                    .child(self.render_layout_switch(cx))
+                    .child(div().mx(px(6.)).w(px(1.)).h(px(16.)).bg(theme::border()))
+                    .child(self.render_server_panel_toggle(cx)),
             )
             .into_any_element()
     }
@@ -493,6 +509,25 @@ impl ServerSession {
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_sftp_pane(cx)))
             .into_any_element()
+    }
+
+    pub(crate) fn render_server_panel_toggle(&self, cx: &Context<Self>) -> AnyElement {
+        toggle_button(
+            "server-panel-toggle",
+            Preferences::is_server_panel_shown(cx),
+            cx,
+        )
+        .relative()
+        .px(px(5.))
+        .child(Icon::empty().path("icons/panel-right.svg").size(px(15.)))
+        .when(shortcut_hints::is_shown(cx), |el| {
+            el.child(shortcut_hints::corner_badge(shortcut_hints::SERVER_PANEL))
+        })
+        .tooltip(|window, cx| {
+            Tooltip::new(format!("Server panel ({SERVER_PANEL_SHORTCUT})")).build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_server_panel(cx)))
+        .into_any_element()
     }
 
     /// Named after what the second pane shows: "Local" or the other server.

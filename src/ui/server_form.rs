@@ -25,7 +25,9 @@ use crate::ui::dialog_max_height;
 use crate::connection::{is_loopback_bind, ForwardKind};
 use crate::ssh_target::{find_saved_jump_host, parse_host_field};
 use crate::ui::VaultState;
-use crate::vault::{AuthMethod, PortForward, ServerEntry, ServerEntrySummary, VaultError};
+use crate::vault::{
+    AuthMethod, HostSnippet, PortForward, ServerEntry, ServerEntrySummary, VaultError,
+};
 
 pub enum FormMode {
     Add,
@@ -45,6 +47,15 @@ enum AuthMode {
     Password,
     PrivateKey,
     Agent,
+}
+
+/// What is sent to the shell after every connect.
+#[derive(Clone, Copy, PartialEq)]
+enum Startup {
+    None,
+    /// Typed in the form, kept as one of the host's own snippets.
+    Command,
+    Shared(Uuid),
 }
 
 #[derive(Clone, PartialEq)]
@@ -83,9 +94,13 @@ pub struct ServerFormView {
     selected_jump_id: Option<Uuid>,
     jump_dropdown_open: bool,
 
-    /// Snippet sent to the shell on every connect; `None` = nothing runs.
-    selected_startup_snippet: Option<Uuid>,
+    startup: Startup,
     startup_dropdown_open: bool,
+    startup_command: Entity<TextareaState>,
+    /// The host's own snippet the command edits; `None` makes a new one.
+    startup_command_id: Option<Uuid>,
+    /// Carried through, so that a save keeps the ones made in the server panel.
+    host_snippets: Vec<HostSnippet>,
     /// The jump host, the startup snippet and the forwards are folded away
     /// unless the host uses one of them.
     is_advanced_open: bool,
@@ -205,6 +220,26 @@ impl ServerFormView {
                 )
             }
         };
+
+        let host_snippets = prefill
+            .as_ref()
+            .map(|e| e.snippets.clone())
+            .unwrap_or_default();
+        let startup_id = prefill.as_ref().and_then(|e| e.startup_snippet);
+        let own_startup = startup_id.and_then(|id| host_snippets.iter().find(|s| s.id == id));
+        let startup = match (startup_id, own_startup) {
+            (None, _) => Startup::None,
+            (Some(_), Some(_)) => Startup::Command,
+            (Some(id), None) => Startup::Shared(id),
+        };
+        let startup_command_id = own_startup.map(|s| s.id);
+        let command = own_startup.map(|s| s.script.clone()).unwrap_or_default();
+        let startup_command = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("cd /srv/app")
+                .default_value(SharedString::from(command))
+        });
 
         let addkey_paste = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -335,7 +370,10 @@ impl ServerFormView {
             key_dropdown_open: false,
             selected_jump_id: prefill.as_ref().and_then(|e| e.jump_host),
             jump_dropdown_open: false,
-            selected_startup_snippet: prefill.as_ref().and_then(|e| e.startup_snippet),
+            startup,
+            startup_command,
+            startup_command_id,
+            host_snippets,
             is_advanced_open: prefill.as_ref().is_some_and(|e| {
                 e.jump_host.is_some() || e.startup_snippet.is_some() || !e.forwards.is_empty()
             }),
@@ -724,6 +762,7 @@ impl ServerFormView {
             }
         };
 
+        let (startup_snippet, snippets) = self.startup_and_snippets(cx);
         let now = unix_now();
         let entry = match &self.mode {
             FormMode::Add => ServerEntry {
@@ -744,7 +783,8 @@ impl ServerFormView {
                 proxy: crate::vault::ProxyChoice::Default,
                 jump_host: self.selected_jump_id,
                 forwards: self.forwards.clone(),
-                startup_snippet: self.selected_startup_snippet,
+                startup_snippet,
+                snippets,
                 created_at: now,
                 updated_at: now,
             },
@@ -768,13 +808,45 @@ impl ServerFormView {
                 proxy: crate::vault::ProxyChoice::Default,
                 jump_host: self.selected_jump_id,
                 forwards: self.forwards.clone(),
-                startup_snippet: self.selected_startup_snippet,
+                startup_snippet,
+                snippets,
                 created_at: *created_at,
                 updated_at: now,
             },
         };
 
         cx.emit(FormEvent::Saved(entry));
+    }
+
+    /// The startup choice as the entry stores it. A typed command goes into
+    /// the host's own snippets; an emptied one is removed from them.
+    fn startup_and_snippets(&self, cx: &App) -> (Option<Uuid>, Vec<HostSnippet>) {
+        let mut snippets = self.host_snippets.clone();
+        let startup = match self.startup {
+            Startup::None => None,
+            Startup::Shared(id) => Some(id),
+            Startup::Command => {
+                let script = self.startup_command.read(cx).value().trim().to_string();
+                if script.is_empty() {
+                    if let Some(id) = self.startup_command_id {
+                        snippets.retain(|s| s.id != id);
+                    }
+                    None
+                } else {
+                    let id = self.startup_command_id.unwrap_or_else(Uuid::new_v4);
+                    match snippets.iter_mut().find(|s| s.id == id) {
+                        Some(snippet) => snippet.script = script,
+                        None => snippets.push(HostSnippet {
+                            id,
+                            name: "On connect".to_string(),
+                            script,
+                        }),
+                    }
+                    Some(id)
+                }
+            }
+        };
+        (startup, snippets)
     }
 
     /// Re-detect whether the currently chosen/pasted key is encrypted, which
@@ -1341,6 +1413,9 @@ impl Render for ServerFormView {
                                 .child(div().flex_1().min_w_0().child(jump_field))
                                 .child(div().flex_1().min_w_0().child(startup_field)),
                         )
+                        .when(self.startup == Startup::Command, |el| {
+                            el.child(self.render_startup_command(cx))
+                        })
                         .child(self.render_forwards_section(cx))
                     }),
             );
@@ -1448,9 +1523,10 @@ impl ServerFormView {
             1 => "1 forward".to_string(),
             n => format!("{n} forwards"),
         };
-        let startup = match self.selected_startup_snippet {
-            None => "no startup snippet".to_string(),
-            Some(id) => vault
+        let startup = match self.startup {
+            Startup::None => "no startup snippet".to_string(),
+            Startup::Command => "runs a command".to_string(),
+            Startup::Shared(id) => vault
                 .and_then(|vm| vm.list_snippets().ok())
                 .and_then(|snippets| snippets.into_iter().find(|s| s.id == id))
                 .map(|snippet| format!("runs {}", snippet.name))
@@ -1898,8 +1974,8 @@ impl ServerFormView {
         (jump_field.into_any_element(), jump_popup)
     }
 
-    /// The startup-snippet field and its dropdown, arranged like the jump
-    /// picker.
+    /// The run-on-connect field and its dropdown, arranged like the jump
+    /// picker: nothing, a command for this host, or a shared snippet.
     fn render_startup_snippet_picker(
         &self,
         cx: &Context<Self>,
@@ -1917,32 +1993,21 @@ impl ServerFormView {
             .unwrap_or_default();
         snippets.sort_by_key(|s| s.name.to_lowercase());
 
-        let selected = self
-            .selected_startup_snippet
-            .map(|id| snippets.iter().find(|s| s.id == id));
-        let label = match selected {
-            None => "None".to_string(),
-            Some(Some(snippet)) => snippet.name.clone(),
-            Some(None) => "(missing snippet)".to_string(),
+        let (label, label_color, is_missing) = match self.startup {
+            Startup::None => ("None".to_string(), muted_fg, false),
+            Startup::Command => (COMMAND_OPTION.to_string(), fg, false),
+            Startup::Shared(id) => match snippets.iter().find(|s| s.id == id) {
+                Some(snippet) => (snippet.name.clone(), fg, false),
+                None => ("(missing snippet)".to_string(), danger, true),
+            },
         };
-        let is_missing = matches!(selected, Some(None));
-        let label_color = if is_missing {
-            danger
-        } else if self.selected_startup_snippet.is_some() {
-            fg
-        } else {
-            muted_fg
-        };
-        // A dead link must stay clearable even when the vault holds nothing
-        // else: the panel always carries its "None" row.
-        let can_pick = !snippets.is_empty() || self.selected_startup_snippet.is_some();
 
         let anchor: Rc<Cell<Point<Pixels>>> = Rc::new(Cell::new(Point::default()));
         let trigger: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
         let field = v_flex()
             .gap(px(6.))
-            .child(field_label("Startup snippet", cx))
+            .child(field_label("Run on connect", cx))
             .child(dropdown_trigger(
                 "startup-dropdown-btn",
                 label,
@@ -1951,9 +2016,6 @@ impl ServerFormView {
                 &trigger,
                 cx,
                 move |this, cx| {
-                    if !can_pick {
-                        return;
-                    }
                     this.startup_dropdown_open = !this.startup_dropdown_open;
                     cx.notify();
                 },
@@ -1966,16 +2028,8 @@ impl ServerFormView {
                         .child("That snippet was deleted. Pick another, or none."),
                 )
             })
-            .when(snippets.is_empty() && !is_missing, |el| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_fg)
-                        .child("No snippets yet. Add one in Settings."),
-                )
-            })
             .when(
-                self.selected_startup_snippet.is_some() && !is_missing,
+                matches!(self.startup, Startup::Shared(_)) && !is_missing,
                 |el| {
                     el.child(
                         div()
@@ -1987,31 +2041,38 @@ impl ServerFormView {
             );
 
         let popup = if self.startup_dropdown_open {
-            let nothing = dropdown_option(
-                "startup-option-none".into(),
-                "None".to_string(),
-                muted_fg,
-                cx,
-                |this, cx| {
-                    this.selected_startup_snippet = None;
+            let pick = |startup: Startup| {
+                move |this: &mut Self, cx: &mut Context<Self>| {
+                    this.startup = startup;
                     this.startup_dropdown_open = false;
                     cx.notify();
-                },
-            );
-
-            let items: Vec<AnyElement> = std::iter::once(nothing)
+                }
+            };
+            let fixed = [
+                dropdown_option(
+                    "startup-option-none".into(),
+                    "None".to_string(),
+                    muted_fg,
+                    cx,
+                    pick(Startup::None),
+                ),
+                dropdown_option(
+                    "startup-option-command".into(),
+                    COMMAND_OPTION.to_string(),
+                    fg,
+                    cx,
+                    pick(Startup::Command),
+                ),
+            ];
+            let items: Vec<AnyElement> = fixed
+                .into_iter()
                 .chain(snippets.iter().enumerate().map(|(ix, snippet)| {
-                    let id = snippet.id;
                     dropdown_option(
                         ("startup-option", ix).into(),
                         snippet.name.clone(),
                         fg,
                         cx,
-                        move |this, cx| {
-                            this.selected_startup_snippet = Some(id);
-                            this.startup_dropdown_open = false;
-                            cx.notify();
-                        },
+                        pick(Startup::Shared(snippet.id)),
                     )
                 }))
                 .collect();
@@ -2032,6 +2093,22 @@ impl ServerFormView {
         };
 
         (field.into_any_element(), popup)
+    }
+
+    /// The command box under the run-on-connect field.
+    fn render_startup_command(&self, cx: &Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap(px(6.))
+            .child(Textarea::new(&self.startup_command).h(px(76.)))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Sent to the terminal after every connect. It belongs to this host \
+                         and also shows under Snippets in the server panel.",
+                    ),
+            )
     }
 
     /// The list of saved forwards on the main form, with an add button.
@@ -2473,6 +2550,8 @@ fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }
+
+const COMMAND_OPTION: &str = "Command for this host";
 
 /// A field with its label above it.
 fn labeled(label: &'static str, cx: &App, field: impl IntoElement) -> gpui::Div {

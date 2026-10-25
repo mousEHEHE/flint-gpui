@@ -22,6 +22,7 @@ pub mod phrase_panel;
 pub mod phrase_view;
 pub mod root_view;
 pub mod server_form;
+pub mod server_panel;
 pub mod server_session;
 pub mod servers_view;
 pub mod settings;

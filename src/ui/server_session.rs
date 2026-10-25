@@ -12,11 +12,13 @@ use crate::ssh::{
 };
 use crate::theme as flint_theme;
 use crate::ui::peer_link::{Link, PeerLink};
+use crate::ui::server_panel::{ServerPanel, ServerPanelEvent, PANEL_WIDTH};
 use crate::ui::sftp_browser::{
     BrowserEvent, PreservedFiles, RestorePaths, SftpBrowser, TransferKind,
 };
 use crate::ui::terminal_view::TerminalView;
 use crate::ui::transfer_rate::TransferRate;
+use crate::ui::VaultState;
 use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, App, AsyncApp, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
@@ -142,6 +144,8 @@ pub enum ServerSessionEvent {
     },
     /// Remote OS auto-detected after connect (e.g. "Ubuntu 22.04").
     OsDetected(String),
+    /// Run this vault snippet in the session's terminal.
+    RunSnippet(uuid::Uuid),
     /// The user (or `~/.ssh/known_hosts`) trusted this host key fingerprint.
     /// Persist it on `entry_id`'s entry so future connects verify silently.
     /// On a jumped host that is often a bastion, never the target.
@@ -814,6 +818,9 @@ pub struct ServerSession {
     /// Holds a clone of the connection, which stays open as long as any
     /// clone lives. Kept here so that it ends with the session.
     probe_task: Option<Task<()>>,
+    /// Polls only while on screen. Made here and not on first show: gpui
+    /// does not redraw a cached view for an entity created during a render.
+    server_panel: Entity<ServerPanel>,
 }
 
 impl EventEmitter<ServerSessionEvent> for ServerSession {}
@@ -825,10 +832,15 @@ impl ServerSession {
         initial_restore: Option<RestorePaths>,
         forwards: Vec<ForwardRuntime>,
         file_associations: SharedFileAssociations,
+        vault_state: Entity<VaultState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let server_id = conn_info.id.clone();
         let stored_conn = conn_info.clone();
+        let session = cx.entity().downgrade();
+        let server_panel = cx.new(|cx| ServerPanel::new(session, vault_state, cx));
+        cx.subscribe(&server_panel, Self::on_server_panel_event)
+            .detach();
 
         let route = Arc::new(Mutex::new(route));
 
@@ -988,6 +1000,7 @@ impl ServerSession {
             split_state_beside: cx.new(|_| ResizableState::default()),
             _connect_task: task,
             probe_task: None,
+            server_panel,
         }
     }
 
@@ -2087,12 +2100,40 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// showing the permanent "connection lost" modal.
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+impl ServerSession {
+    fn on_server_panel_event(
+        &mut self,
+        _: Entity<ServerPanel>,
+        event: &ServerPanelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let ServerPanelEvent::RunSnippet(id) = event;
+        // The keys go back to the terminal, where the snippet runs.
+        self.is_terminal_focus_pending = true;
+        cx.emit(ServerSessionEvent::RunSnippet(*id));
+        cx.notify();
+    }
+
+    fn render_server_panel(&self, cx: &App) -> Option<AnyElement> {
+        if !Preferences::is_server_panel_shown(cx) || self.browser.is_none() {
+            return None;
+        }
+        // Redrawn on its own ticks, not on every terminal frame.
+        let style = StyleRefinement::default()
+            .w(px(PANEL_WIDTH))
+            .flex_none()
+            .h_full();
+        Some(self.server_panel.clone().cached(style).into_any_element())
+    }
+}
+
 impl Render for ServerSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_auth_prompt_inputs(window, cx);
         self.ensure_password_input(window, cx);
         self.focus_terminal_if_pending(window, cx);
         let failure_card = self.render_connect_failure(cx);
+        let server_panel = self.render_server_panel(cx);
         let theme = cx.theme();
 
         let content: AnyElement = if let (Some(browser), Some(terminal_view)) =
@@ -2167,7 +2208,21 @@ impl Render for ServerSession {
             let split = v_flex()
                 .size_full()
                 .child(self.render_session_header(cx))
-                .child(div().flex_1().min_h_0().overflow_hidden().child(panes));
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .overflow_hidden()
+                                .child(panes),
+                        )
+                        .children(server_panel),
+                );
 
             if let Some(ref info) = self.disconnected {
                 let host = info.host.clone();

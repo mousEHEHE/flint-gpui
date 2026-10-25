@@ -522,6 +522,7 @@ fn write_selected(
                     .startup_snippet
                     .as_deref()
                     .and_then(|name| vm.find_snippet_by_name(name)),
+                snippets: Vec::new(),
                 created_at: now,
                 updated_at: now,
             };

@@ -210,6 +210,9 @@ pub struct Preferences {
     /// macOS: the vault key is in the keychain behind Touch ID.
     #[serde(default)]
     pub is_touch_id_enabled: bool,
+    /// Whether a session shows the server panel on its right.
+    #[serde(default)]
+    pub is_server_panel_shown: bool,
     /// The command that edits a remote file in a terminal tab. Read it
     /// through `Preferences::editor_command`, which fills in an empty one.
     #[serde(default = "default_editor_command")]
@@ -278,6 +281,7 @@ impl Default for Preferences {
             is_second_pane_shown: false,
             is_sidebar_shown: true,
             is_touch_id_enabled: false,
+            is_server_panel_shown: false,
             editor_command: default_editor_command(),
             is_editor_default_open: false,
             has_account: false,
@@ -348,6 +352,11 @@ impl Preferences {
     pub fn is_touch_id_enabled(cx: &gpui::App) -> bool {
         cx.try_global::<Self>()
             .is_some_and(|prefs| prefs.is_touch_id_enabled)
+    }
+
+    pub fn is_server_panel_shown(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.is_server_panel_shown)
     }
 
     pub fn editor_command(cx: &gpui::App) -> String {

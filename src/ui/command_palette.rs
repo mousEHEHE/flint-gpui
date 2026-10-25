@@ -15,7 +15,9 @@ use crate::ssh_target::{find_saved_host, find_saved_host_by_name, parse_ssh_targ
 use crate::theme as flint_theme;
 use crate::ui::file_pane::{self, PaneKind};
 use crate::ui::host_icon::host_icon;
-use crate::ui::terminal_tabs::{NEW_TERMINAL_SHORTCUT, TOGGLE_FILES_SHORTCUT};
+use crate::ui::terminal_tabs::{
+    NEW_TERMINAL_SHORTCUT, SERVER_PANEL_SHORTCUT, TOGGLE_FILES_SHORTCUT,
+};
 use crate::ui::VaultState;
 use crate::vault::{ServerEntrySummary, Snippet};
 
@@ -63,6 +65,7 @@ pub enum PaletteCommand {
     ToggleSidebar,
     NewTerminal,
     ToggleSftpPane,
+    ToggleServerPanel,
     FocusFiles,
     CloseSession,
     ReconnectSession,
@@ -89,7 +92,7 @@ const fn chord(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 /// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 14] = [
+const COMMANDS: [CommandSpec; 15] = [
     CommandSpec {
         command: PaletteCommand::NewHost,
         label: "New host",
@@ -168,6 +171,14 @@ const COMMANDS: [CommandSpec; 14] = [
         keywords: "toggle sftp panes browser full height terminal",
         note: "",
         shortcut: Some(TOGGLE_FILES_SHORTCUT),
+        needs_session: true,
+    },
+    CommandSpec {
+        command: PaletteCommand::ToggleServerPanel,
+        label: "Show or hide server panel",
+        keywords: "inspector metrics cpu memory disk monitor stats",
+        note: "",
+        shortcut: Some(SERVER_PANEL_SHORTCUT),
         needs_session: true,
     },
     CommandSpec {
@@ -446,6 +457,37 @@ impl CommandPalette {
         name_hits
     }
 
+    /// The active host's own snippets matching the query, as rows. The
+    /// script's first line stands in for a description.
+    fn host_snippet_rows(&self, cx: &App) -> Vec<SnippetRow> {
+        let Some(server_id) = self.active_server_id else {
+            return Vec::new();
+        };
+        let Some(entry) = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|vm| vm.get_entry(server_id).ok())
+        else {
+            return Vec::new();
+        };
+        let q = self.query(cx);
+        entry
+            .snippets
+            .into_iter()
+            .filter(|s| {
+                q.is_empty()
+                    || s.name.to_lowercase().contains(&q)
+                    || s.script.to_lowercase().contains(&q)
+            })
+            .map(|s| SnippetRow {
+                id: s.id,
+                description: s.script.lines().next().map(str::to_string),
+                name: s.name,
+            })
+            .collect()
+    }
+
     /// True when this snippet has been run on the currently-active server.
     fn is_recent_on_active(&self, s: &Snippet) -> bool {
         match self.active_server_id {
@@ -481,6 +523,11 @@ impl CommandPalette {
                 if let Some(row) = connect_first {
                     sections.push((SharedString::from("Connect"), items.len()));
                     items.push(PaletteItem::Connect(row));
+                }
+                let host_snippets = self.host_snippet_rows(cx);
+                if !host_snippets.is_empty() {
+                    sections.push((SharedString::from("This host"), items.len()));
+                    items.extend(host_snippets.into_iter().map(PaletteItem::Snippet));
                 }
                 if !recent.is_empty() {
                     sections.push((SharedString::from("Recent"), items.len()));
@@ -930,6 +977,7 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::OpenSettings => IconName::Settings,
         PaletteCommand::SetTheme(_) => IconName::Palette,
         PaletteCommand::ToggleSidebar => return Icon::empty().path("icons/panel-left.svg"),
+        PaletteCommand::ToggleServerPanel => return Icon::empty().path("icons/panel-right.svg"),
         PaletteCommand::LockVault => return Icon::empty().path("icons/lock.svg"),
         PaletteCommand::CloseSession => IconName::Close,
         PaletteCommand::NewTerminal => IconName::SquareTerminal,

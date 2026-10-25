@@ -27,6 +27,11 @@ pub const FILES: &str = if cfg!(target_os = "macos") {
 } else {
     "\u{21E7}B"
 };
+pub const SERVER_PANEL: &str = if cfg!(target_os = "macos") {
+    "I"
+} else {
+    "\u{21E7}I"
+};
 pub const NEW_TERMINAL: &str = if cfg!(target_os = "macos") {
     "\u{21E7}T"
 } else {

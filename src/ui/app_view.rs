@@ -44,7 +44,7 @@ use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
 use crate::ui::{dialog_chrome, VaultState, DIALOG_FORM, DIALOG_NARROW, DIALOG_WIDE};
-use crate::vault::{AuthMethod, ServerEntry, SnippetBody};
+use crate::vault::{AuthMethod, ServerEntry};
 use flint_core::route::{self, CredentialIssue};
 
 actions!(
@@ -58,6 +58,7 @@ actions!(
         NewTerminal,
         ToggleSftpPane,
         ToggleSidebar,
+        ToggleServerPanel,
         CloseTab,
         NextTab,
         PrevTab,
@@ -95,6 +96,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "cmd-shift-t", NewTerminal, None);
         bind_chord(cx, "cmd-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
+        bind_chord(cx, "cmd-i", ToggleServerPanel, None);
         bind_chord(cx, "cmd-w", CloseTab, None);
         bind_chord(cx, "cmd-shift-e", ToggleFilesFocus, None);
         bind_chord(cx, "cmd-shift-]", NextTab, None);
@@ -124,6 +126,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
         bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
+        bind_chord(cx, "ctrl-shift-i", ToggleServerPanel, None);
         bind_chord(cx, "ctrl-shift-w", CloseTab, None);
         bind_chord(cx, "ctrl-shift-e", ToggleFilesFocus, None);
         bind_chord(cx, "ctrl-tab", NextTab, None);
@@ -623,6 +626,7 @@ impl AppView {
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
             PaletteCommand::ToggleSidebar => self.toggle_sidebar(cx),
+            PaletteCommand::ToggleServerPanel => self.toggle_server_panel(cx),
             PaletteCommand::FocusFiles => {
                 let Some(session) = self.tabs.get(self.active_tab) else {
                     return;
@@ -816,12 +820,15 @@ impl AppView {
         session: &Entity<ServerSession>,
         cx: &mut Context<Self>,
     ) {
-        let snippet = self
+        let Ok(server_id) = Uuid::parse_str(&session.read(cx).server_id) else {
+            return;
+        };
+        let script = self
             .vault_state
             .read(cx)
             .manager()
-            .and_then(|vm| vm.get_snippet(snippet_id).ok().cloned());
-        let Some(snippet) = snippet else {
+            .and_then(|vm| vm.script_for_host(server_id, snippet_id));
+        let Some(script) = script else {
             tracing::warn!(?snippet_id, "snippet not found for run");
             return;
         };
@@ -832,13 +839,8 @@ impl AppView {
             );
             return;
         };
-
-        if let Ok(server_id) = Uuid::parse_str(&session.read(cx).server_id) {
-            self.record_snippet_used(snippet_id, server_id, cx);
-        }
-
-        let SnippetBody::Script { content } = snippet.body;
-        send_script(shell, content, cx);
+        self.record_snippet_used(snippet_id, server_id, cx);
+        send_script(shell, script, cx);
     }
 
     /// Run the host's startup snippet on the session that just connected.
@@ -854,19 +856,20 @@ impl AppView {
             }
             return;
         }
-        let snippet = self.vault_state.read(cx).manager().and_then(|vm| {
-            let entry = vm.get_entry(server_id).ok()?;
-            vm.get_snippet(entry.startup_snippet?).ok().cloned()
+        let startup = self.vault_state.read(cx).manager().and_then(|vm| {
+            let snippet_id = vm.get_entry(server_id).ok()?.startup_snippet?;
+            Some((snippet_id, vm.script_for_host(server_id, snippet_id)?))
         });
-        let Some(snippet) = snippet else { return };
+        let Some((snippet_id, script)) = startup else {
+            return;
+        };
         let Some(shell) = session.read(cx).shell_handle(cx) else {
             return;
         };
 
-        tracing::info!(%server_id, snippet = %snippet.name, "running startup snippet");
-        self.record_snippet_used(snippet.id, server_id, cx);
-        let SnippetBody::Script { content } = snippet.body;
-        send_script(shell, content, cx);
+        tracing::info!(%server_id, %snippet_id, "running startup snippet");
+        self.record_snippet_used(snippet_id, server_id, cx);
+        send_script(shell, script, cx);
     }
 
     /// Give the keys to the terminal of the tab in front. `false` when there
@@ -1196,8 +1199,10 @@ impl AppView {
     /// recently-used snippets. Best-effort: a write failure is logged only.
     fn record_snippet_used(&mut self, snippet_id: Uuid, server_id: Uuid, cx: &mut Context<Self>) {
         let result = self.vault_state.update(cx, |vs, _| {
-            vs.manager_mut()
-                .map(|vm| vm.touch_snippet_used(snippet_id, server_id))
+            let vm = vs.manager_mut()?;
+            // A host's own snippet keeps no run history.
+            vm.get_snippet(snippet_id).ok()?;
+            Some(vm.touch_snippet_used(snippet_id, server_id))
         });
         if let Some(Err(e)) = result {
             tracing::warn!(?e, "failed to record snippet usage");
@@ -1413,6 +1418,7 @@ impl AppView {
                 initial_restore,
                 forwards,
                 file_associations,
+                self.vault_state.clone(),
                 cx,
             )
         });
@@ -1553,6 +1559,9 @@ impl AppView {
                         this.pending_snippet_for_server = None;
                     }
                     cx.notify();
+                }
+                ServerSessionEvent::RunSnippet(snippet_id) => {
+                    this.run_snippet_on_session(*snippet_id, session_entity, cx);
                 }
                 ServerSessionEvent::EditRequested { entry_id } => {
                     if let Ok(id) = Uuid::parse_str(entry_id) {
@@ -2417,6 +2426,20 @@ impl AppView {
         session.update(cx, |session, cx| session.toggle_sftp_pane(cx));
     }
 
+    fn shortcut_toggle_server_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_overlay_open(window, cx) {
+            return;
+        }
+        self.toggle_server_panel(cx);
+    }
+
+    fn toggle_server_panel(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        session.update(cx, |session, cx| session.toggle_server_panel(cx));
+    }
+
     fn shortcut_toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_overlay_open(window, cx) {
             return;
@@ -2645,6 +2668,9 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.shortcut_toggle_sidebar(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleServerPanel, window, cx| {
+                this.shortcut_toggle_server_panel(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &LockVault, window, cx| {
                 this.lock_vault(window, cx);
             }))
@@ -2777,6 +2803,7 @@ fn quick_connect_entry(
         jump_host,
         forwards: Vec::new(),
         startup_snippet: None,
+        snippets: Vec::new(),
         created_at: now,
         updated_at: now,
     }
