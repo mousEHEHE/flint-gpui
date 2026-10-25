@@ -9,13 +9,16 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
+    h_flex,
+    tooltip::Tooltip,
+    v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::connection::Connection;
 use crate::file_associations::{FileAssociations, SharedFileAssociations};
+use crate::preferences::Preferences;
 use crate::ssh::{AuthCredential, ForwardState, SshRoute, TransferOutcome};
 use crate::ssh_target::{find_saved_host, find_saved_jump_host, SshTarget};
 use crate::ui::app_picker::{AppPicker, AppPickerEvent};
@@ -53,6 +56,7 @@ actions!(
         ToggleFilesFocus,
         NewTerminal,
         ToggleSftpPane,
+        ToggleSidebar,
         CloseTab,
         NextTab,
         PrevTab,
@@ -89,6 +93,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "cmd-t", NewConnection, None);
         bind_chord(cx, "cmd-shift-t", NewTerminal, None);
         bind_chord(cx, "cmd-b", ToggleSftpPane, None);
+        bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
         bind_chord(cx, "cmd-w", CloseTab, None);
         bind_chord(cx, "cmd-shift-e", ToggleFilesFocus, None);
         bind_chord(cx, "cmd-shift-]", NextTab, None);
@@ -117,6 +122,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "ctrl-shift-t", NewConnection, None);
         bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
         bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
+        bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
         bind_chord(cx, "ctrl-shift-w", CloseTab, None);
         bind_chord(cx, "ctrl-shift-e", ToggleFilesFocus, None);
         bind_chord(cx, "ctrl-tab", NextTab, None);
@@ -150,6 +156,12 @@ const VAULT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 pub const LOCK_SHORTCUT: &str = "\u{2318}L";
 #[cfg(not(target_os = "macos"))]
 pub const LOCK_SHORTCUT: &str = "Ctrl+Shift+L";
+
+/// Shown on the sidebar button and in the palette. Must track the binding above.
+#[cfg(target_os = "macos")]
+pub const SIDEBAR_SHORTCUT: &str = "\u{2303}\u{2318}S";
+#[cfg(not(target_os = "macos"))]
+pub const SIDEBAR_SHORTCUT: &str = "Ctrl+Shift+S";
 
 /// What a connect that may first ask for a key passphrase is for.
 #[derive(Clone)]
@@ -600,6 +612,7 @@ impl AppView {
             }
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
+            PaletteCommand::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteCommand::FocusFiles => {
                 let Some(session) = self.tabs.get(self.active_tab) else {
                     return;
@@ -2118,6 +2131,30 @@ impl AppView {
         )
     }
 
+    fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tooltip = if Preferences::is_sidebar_shown(cx) {
+            format!("Hide sidebar ({SIDEBAR_SHORTCUT})")
+        } else {
+            format!("Show sidebar ({SIDEBAR_SHORTCUT})")
+        };
+        let text = cx.theme().foreground;
+        div()
+            .id("titlebar-sidebar-toggle")
+            .flex_none()
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .text_color(cx.theme().muted_foreground)
+            .cursor_pointer()
+            .hover(move |s| s.bg(crate::theme::field()).text_color(text))
+            .active(|s| s.bg(crate::theme::element_active()))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(Icon::empty().path("icons/panel-left.svg").size(px(16.)))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+    }
+
     /// The dialog for writing to the developer.
     fn show_feedback_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| FeedbackView::new(self.vault_state.clone(), window, cx));
@@ -2320,6 +2357,19 @@ impl AppView {
         session.update(cx, |session, cx| session.toggle_sftp_pane(cx));
     }
 
+    fn shortcut_toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_overlay_open(window, cx) {
+            return;
+        }
+        self.toggle_sidebar(cx);
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let is_shown = !Preferences::is_sidebar_shown(cx);
+        Preferences::update(cx, |prefs| prefs.is_sidebar_shown = is_shown);
+        cx.notify();
+    }
+
     fn shortcut_next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_overlay_open(window, cx) {
             return;
@@ -2357,7 +2407,7 @@ impl AppView {
             px(80.)
         };
         #[cfg(not(target_os = "macos"))]
-        let left_pad = px(12.);
+        let left_pad = px(6.);
 
         let theme = cx.theme();
         let bg_elevated = theme.title_bar;
@@ -2419,6 +2469,7 @@ impl AppView {
         let palette_trigger = palette_trigger.ml(px(-180.)).mt(px(-12.)).occlude();
 
         let update_mark = self.render_update_mark(cx);
+        let sidebar_toggle = self.render_sidebar_toggle(cx);
 
         // Fills the space between "flint" and the right edge. The palette
         // floats over its centre but `.occlude()`s itself, so the gaps on
@@ -2429,7 +2480,7 @@ impl AppView {
         let window_controls = window_chrome::window_controls(window);
 
         // The title bar and the sidebar are one surface, so no line under it.
-        // macOS shows the traffic lights there; elsewhere the name sits there.
+        // The sidebar button comes right after the traffic lights on macOS.
         let bar = h_flex()
             .relative()
             .w_full()
@@ -2439,6 +2490,7 @@ impl AppView {
             .gap(px(8.))
             .bg(bg_elevated)
             .items_center()
+            .child(sidebar_toggle)
             .when(cfg!(not(target_os = "macos")), |bar| {
                 bar.child(
                     div()
@@ -2478,108 +2530,36 @@ impl Render for AppView {
         let chrome = crate::theme::chrome();
         let panel = cx.theme().background;
         let border = crate::theme::border();
-        let muted_fg = cx.theme().muted_foreground;
+        let is_sidebar_shown = Preferences::is_sidebar_shown(cx);
 
         let title_bar = self.render_title_bar(window, cx);
         let active_body = self.render_active_tab();
 
-        // A transient message wins; otherwise the front session's state. With
-        // neither, the strip is not drawn at all.
-        let status_left: Option<AnyElement> = if !self.status.is_empty() {
-            Some(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(muted_fg)
-                    .child(self.status.clone())
-                    .into_any_element(),
-            )
-        } else {
-            self.tabs.get(self.active_tab).map(|session| {
-                let s = session.read(cx);
-                if s.browser.is_some() {
-                    let host_text = format!(
-                        "{}@{}:{}",
-                        s.conn_info.username, s.conn_info.host, s.conn_info.port
-                    );
-                    h_flex()
-                        .gap(px(12.))
-                        .items_center()
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .items_center()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().success)
-                                .child(
-                                    div()
-                                        .size(px(6.))
-                                        .rounded_full()
-                                        .flex_none()
-                                        .bg(cx.theme().success),
-                                )
-                                .child("Connected"),
-                        )
-                        .child(
-                            div()
-                                .font_family(crate::theme::MONO_FONT)
-                                .text_size(px(11.5))
-                                .text_color(muted_fg)
-                                .child(host_text),
-                        )
-                        .into_any_element()
-                } else if s.disconnected.is_some() || s.has_connect_failure() {
-                    let label = if s.has_connect_failure() {
-                        "connection failed"
-                    } else {
-                        "disconnected"
-                    };
-                    h_flex()
-                        .gap(px(6.))
-                        .items_center()
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(cx.theme().danger),
-                        )
-                        .child(div().text_size(px(12.)).text_color(muted_fg).child(label))
-                        .into_any_element()
-                } else {
-                    h_flex()
-                        .gap(px(6.))
-                        .items_center()
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(cx.theme().warning),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(muted_fg)
-                                .child("Connecting…"),
-                        )
-                        .into_any_element()
-                }
-            })
-        };
-
-        // The working area is a rounded card on the window surface. The
-        // status strip belongs to it and only shows when it has something.
-        let status_strip = status_left.map(|left| {
-            h_flex()
-                .flex_none()
-                .h(px(28.))
-                .px(px(14.))
-                .border_t_1()
-                .border_color(border)
-                .items_center()
-                .child(div().flex_1().min_w_0().overflow_hidden().child(left))
+        // A short message from the last action floats over the bottom of the
+        // working area for a few seconds.
+        let toast = (!self.status.is_empty()).then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(16.))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(480.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(border)
+                        .bg(crate::theme::card())
+                        .shadow_md()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().foreground)
+                        .child(self.status.clone()),
+                )
         });
 
         v_flex()
@@ -2601,6 +2581,9 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleSftpPane, window, cx| {
                 this.shortcut_toggle_sftp_pane(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.shortcut_toggle_sidebar(window, cx)
             }))
             .on_action(cx.listener(|this, _: &LockVault, window, cx| {
                 this.lock_vault(window, cx);
@@ -2654,24 +2637,28 @@ impl Render for AppView {
                     // Cached like the hosts view: a terminal frame or a
                     // transfer tick redraws this view, and the sidebar has
                     // not changed. The style repeats the sidebar's own size.
-                    .child(
-                        self.sidebar.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(SIDEBAR_WIDTH))
-                                .flex_none()
-                                .h_full(),
-                        ),
-                    )
+                    .when(is_sidebar_shown, |row| {
+                        row.child(
+                            self.sidebar.clone().cached(
+                                StyleRefinement::default()
+                                    .w(px(SIDEBAR_WIDTH))
+                                    .flex_none()
+                                    .h_full(),
+                            ),
+                        )
+                    })
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .when(!is_sidebar_shown, |card| card.ml(px(8.)))
                             .mr(px(8.))
                             .mb(px(8.))
                             .rounded(px(crate::ui::PANEL_RADIUS))
                             .border_1()
                             .border_color(border)
+                            .relative()
                             .bg(panel)
                             .overflow_hidden()
                             .child(
@@ -2681,7 +2668,7 @@ impl Render for AppView {
                                     .overflow_hidden()
                                     .child(active_body),
                             )
-                            .children(status_strip),
+                            .children(toast),
                     ),
             )
             .when_some(self.settings_view.as_ref(), |el, sv| el.child(sv.clone()))

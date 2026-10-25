@@ -60,6 +60,7 @@ pub enum PaletteCommand {
     OpenSettings,
     LockVault,
     SetTheme(ThemePreference),
+    ToggleSidebar,
     NewTerminal,
     ToggleSftpPane,
     FocusFiles,
@@ -88,7 +89,7 @@ const fn chord(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 /// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 13] = [
+const COMMANDS: [CommandSpec; 14] = [
     CommandSpec {
         command: PaletteCommand::NewHost,
         label: "New host",
@@ -143,6 +144,14 @@ const COMMANDS: [CommandSpec; 13] = [
         keywords: "appearance color auto",
         note: "",
         shortcut: None,
+        needs_session: false,
+    },
+    CommandSpec {
+        command: PaletteCommand::ToggleSidebar,
+        label: "Show or hide sidebar",
+        keywords: "toggle hosts list panel collapse",
+        note: "",
+        shortcut: Some(crate::ui::app_view::SIDEBAR_SHORTCUT),
         needs_session: false,
     },
     CommandSpec {
@@ -920,6 +929,7 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::NewHost => IconName::Plus,
         PaletteCommand::OpenSettings => IconName::Settings,
         PaletteCommand::SetTheme(_) => IconName::Palette,
+        PaletteCommand::ToggleSidebar => return Icon::empty().path("icons/panel-left.svg"),
         PaletteCommand::LockVault => return Icon::empty().path("icons/lock.svg"),
         PaletteCommand::CloseSession => IconName::Close,
         PaletteCommand::NewTerminal => IconName::SquareTerminal,
@@ -1186,6 +1196,7 @@ mod tests {
         assert_eq!(command_labels("preferences", false), ["Settings"]);
         assert_eq!(command_labels("new host", false), ["New host"]);
         assert_eq!(command_labels("import", false), ["Import hosts"]);
+        assert_eq!(command_labels("sidebar", false), ["Show or hide sidebar"]);
         assert_eq!(
             command_labels("theme", false),
             ["Theme: Dark", "Theme: Light", "Theme: System"]
@@ -1223,7 +1234,7 @@ mod tests {
             command_labels("sftp", true),
             ["Show or hide files", "Focus files"]
         );
-        assert_eq!(command_labels("", false).len(), 7);
+        assert_eq!(command_labels("", false).len(), 8);
         assert_eq!(command_labels("", true).len(), COMMANDS.len());
     }
 

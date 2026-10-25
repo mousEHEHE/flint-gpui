@@ -204,6 +204,9 @@ pub struct Preferences {
     /// uploads come from Finder or Explorer.
     #[serde(default)]
     pub is_second_pane_shown: bool,
+    /// Whether the main window shows the hosts sidebar.
+    #[serde(default = "default_true")]
+    pub is_sidebar_shown: bool,
     /// The command that edits a remote file in a terminal tab. Read it
     /// through `Preferences::editor_command`, which fills in an empty one.
     #[serde(default = "default_editor_command")]
@@ -270,6 +273,7 @@ impl Default for Preferences {
             update_checks: None,
             terminal_position: TerminalPosition::default(),
             is_second_pane_shown: false,
+            is_sidebar_shown: true,
             editor_command: default_editor_command(),
             is_editor_default_open: false,
             has_account: false,
@@ -329,6 +333,12 @@ impl Preferences {
     pub fn is_second_pane_shown(cx: &gpui::App) -> bool {
         cx.try_global::<Self>()
             .is_some_and(|prefs| prefs.is_second_pane_shown)
+    }
+
+    /// True when the preferences were never loaded, which matches the default.
+    pub fn is_sidebar_shown(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_none_or(|prefs| prefs.is_sidebar_shown)
     }
 
     pub fn editor_command(cx: &gpui::App) -> String {
@@ -646,6 +656,20 @@ mod tests {
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back.terminal_position, TerminalPosition::Beside);
         assert!(back.is_second_pane_shown);
+    }
+
+    #[test]
+    fn sidebar_is_shown_when_missing_and_round_trips() {
+        let old: Preferences = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert!(old.is_sidebar_shown);
+
+        let hidden = Preferences {
+            is_sidebar_shown: false,
+            ..Preferences::default()
+        };
+        let json = serde_json::to_string(&hidden).unwrap();
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_sidebar_shown);
     }
 
     #[test]
