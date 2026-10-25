@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 
 use crate::connection::Connection;
 use crate::file_associations::{FileAssociations, SharedFileAssociations};
+use crate::open_tabs::OpenTabs;
 use crate::preferences::Preferences;
 use crate::ssh::{AuthCredential, ForwardState, SshRoute, TransferOutcome};
 use crate::ssh_target::{find_saved_host, find_saved_jump_host, SshTarget};
@@ -200,6 +201,9 @@ pub struct AppView {
     sessions_owed_reconnect: Vec<WeakEntity<ServerSession>>,
     /// An "open with" request that arrived while the vault was locked.
     picker_owed_after_unlock: Option<(String, PathBuf)>,
+    /// The tabs of the last run. They need the vault, so they open on the
+    /// first unlock; until then the file must not be written over.
+    tabs_owed_after_unlock: Option<OpenTabs>,
     status: String,
     status_clear_task: Option<Task<()>>,
     window_handle: AnyWindowHandle,
@@ -325,6 +329,7 @@ impl AppView {
             sessions_owed_startup_snippet: Vec::new(),
             sessions_owed_reconnect: Vec::new(),
             picker_owed_after_unlock: None,
+            tabs_owed_after_unlock: Some(OpenTabs::load()),
             status: String::new(),
             status_clear_task: None,
             window_handle: window.window_handle(),
@@ -382,6 +387,7 @@ impl AppView {
         self.sessions_owed_startup_snippet.clear();
         self.sessions_owed_reconnect.clear();
         self.picker_owed_after_unlock = None;
+        self.tabs_owed_after_unlock = None;
         self.change_active_tab(0, cx);
         tracing::info!(
             closed_sessions,
@@ -393,6 +399,10 @@ impl AppView {
     /// the user works and catch up on what could not be done while locked.
     pub fn resume_after_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+
+        if let Some(open_tabs) = self.tabs_owed_after_unlock.take() {
+            self.reopen_tabs(open_tabs, window, cx);
+        }
 
         // Reconnects first: each swaps a dead tab for a new one and activates it.
         for session in std::mem::take(&mut self.sessions_owed_reconnect) {
@@ -966,6 +976,36 @@ impl AppView {
         self.open_server(entry, window, cx);
     }
 
+    /// Connect again to every host that was open when flint last closed.
+    fn reopen_tabs(&mut self, open_tabs: OpenTabs, window: &mut Window, cx: &mut Context<Self>) {
+        if open_tabs.hosts.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = open_tabs.hosts.len(),
+            "reopening the tabs of the last run"
+        );
+        for id in &open_tabs.hosts {
+            let entry = self
+                .vault_state
+                .read(cx)
+                .manager()
+                .and_then(|vm| vm.get_entry(*id).ok());
+            // Deleted since then, here or on another device.
+            let Some(entry) = entry else {
+                continue;
+            };
+            self.connect_with_prompt(entry, ConnectIntent::OpenTab, window, cx);
+        }
+        let front = open_tabs
+            .active_host()
+            .and_then(|id| self.tab_index_for_host(&id.to_string(), cx));
+        match front {
+            Some(idx) => self.change_active_tab(idx, cx),
+            None => self.show_all_servers(cx),
+        }
+    }
+
     /// Connect to an address typed into the palette. A host that is already
     /// saved is opened as is; a new one is saved first (agent auth), so host
     /// key trust, recents and reconnect work the same as for any other host.
@@ -1038,7 +1078,27 @@ impl AppView {
         self.sidebar
             .update(cx, |s, cx| s.set_active_server(active_id, cx));
         self.sync_session_states(cx);
+        self.remember_open_tabs(cx);
         cx.notify();
+    }
+
+    /// Every change of the tabs passes through `change_active_tab`, so this
+    /// writes the file on each one. It is a few hundred bytes.
+    fn remember_open_tabs(&self, cx: &App) {
+        if self.tabs_owed_after_unlock.is_some() {
+            return;
+        }
+        let open_tabs = OpenTabs {
+            hosts: self
+                .tabs
+                .iter()
+                .filter_map(|session| Uuid::parse_str(&session.read(cx).server_id).ok())
+                .collect(),
+            active: self.active_tab,
+        };
+        if let Err(e) = open_tabs.save() {
+            tracing::warn!(?e, "failed to save the open tabs");
+        }
     }
 
     /// Push each session's connection state to the sidebar and the all-servers

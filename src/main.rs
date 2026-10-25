@@ -15,6 +15,7 @@ mod file_edit;
 mod file_open;
 mod import;
 mod logging;
+mod open_tabs;
 mod preferences;
 // Reads the Termius app's local database. Only Windows stores the vault key
 // in a form flint can use; on macOS and Linux a signed-in Termius encrypts its
@@ -23,6 +24,7 @@ mod preferences;
 #[cfg(windows)]
 mod termius_local;
 mod theme;
+mod touch_id;
 mod ui;
 mod update;
 mod version;

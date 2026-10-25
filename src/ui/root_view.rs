@@ -25,6 +25,8 @@ pub fn delete_vault(vault_state: &Entity<VaultState>, cx: &mut App) -> Result<()
     SyncService::global(cx).update(cx, |service, cx| service.sign_out(cx));
     crate::vault::delete_vault_files(&path)
         .inspect_err(|e| tracing::error!(?e, "failed to delete the vault"))?;
+    crate::touch_id::delete_key();
+    crate::preferences::Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
     let was_open = vault_state.update(cx, |vault_state, cx| {
         let was_open = !matches!(vault_state, VaultState::Locked);
         // Dropping the manager wipes the key, and nothing is left that could
@@ -80,7 +82,10 @@ impl RootView {
         // in each view's `new`) because both views are built eagerly above and the
         // later one would otherwise steal focus from the one on screen.
         if has_vault {
-            unlock_view.update(cx, |view, cx| view.focus_password(window, cx));
+            unlock_view.update(cx, |view, cx| {
+                view.focus_password(window, cx);
+                view.offer_touch_id(window, cx);
+            });
         } else if is_onboarding {
             onboarding_view.update(cx, |view, cx| view.focus(window, cx));
         } else {
@@ -173,6 +178,8 @@ impl RootView {
     /// belonged to the old vault.
     fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.has_vault = false;
+        crate::touch_id::delete_key();
+        crate::preferences::Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
         self.app_view
             .update(cx, |view, cx| view.close_everything(window, cx));
         self.unlock_view

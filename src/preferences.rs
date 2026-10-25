@@ -207,6 +207,9 @@ pub struct Preferences {
     /// Whether the main window shows the hosts sidebar.
     #[serde(default = "default_true")]
     pub is_sidebar_shown: bool,
+    /// macOS: the vault key is in the keychain behind Touch ID.
+    #[serde(default)]
+    pub is_touch_id_enabled: bool,
     /// The command that edits a remote file in a terminal tab. Read it
     /// through `Preferences::editor_command`, which fills in an empty one.
     #[serde(default = "default_editor_command")]
@@ -274,6 +277,7 @@ impl Default for Preferences {
             terminal_position: TerminalPosition::default(),
             is_second_pane_shown: false,
             is_sidebar_shown: true,
+            is_touch_id_enabled: false,
             editor_command: default_editor_command(),
             is_editor_default_open: false,
             has_account: false,
@@ -339,6 +343,11 @@ impl Preferences {
     pub fn is_sidebar_shown(cx: &gpui::App) -> bool {
         cx.try_global::<Self>()
             .is_none_or(|prefs| prefs.is_sidebar_shown)
+    }
+
+    pub fn is_touch_id_enabled(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.is_touch_id_enabled)
     }
 
     pub fn editor_command(cx: &gpui::App) -> String {

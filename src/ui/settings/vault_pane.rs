@@ -1,10 +1,11 @@
-//! The Vault section of Settings: lock the vault now, change the master
-//! password or the recovery phrase, and delete the vault.
+//! The Vault section of Settings: lock the vault now, Touch ID, change the
+//! master password or the recovery phrase, and delete the vault.
 
 use gpui::prelude::*;
 use gpui::{div, px, App, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
     v_flex, ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _,
@@ -12,6 +13,7 @@ use gpui_component::{
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::account::{self, AccountError, Api};
+use crate::preferences::Preferences;
 use crate::ui::app_view::LOCK_SHORTCUT;
 use crate::ui::VaultState;
 use crate::vault::{NewPasswordSlot, VaultError, VaultManager};
@@ -105,6 +107,9 @@ pub struct VaultPane {
     delete_password: Entity<InputState>,
     delete_error: Option<String>,
     is_deleting: bool,
+    touch_id_error: Option<String>,
+    is_saving_touch_id: bool,
+    is_touch_id_available: bool,
 }
 
 impl EventEmitter<VaultPaneEvent> for VaultPane {}
@@ -159,6 +164,9 @@ impl VaultPane {
             delete_password,
             delete_error: None,
             is_deleting: false,
+            touch_id_error: None,
+            is_saving_touch_id: false,
+            is_touch_id_available: crate::touch_id::is_available(),
         }
     }
 
@@ -254,6 +262,69 @@ impl VaultPane {
 
     /// Replace the recovery phrase. The new one takes over the window until
     /// the user confirms they saved it, as after a recovery.
+    fn set_touch_id(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
+        self.touch_id_error = None;
+        if !is_enabled {
+            crate::touch_id::delete_key();
+            Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
+            tracing::info!("Touch ID unlock turned off");
+            cx.notify();
+            return;
+        }
+        let Some(key) = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .map(|vm| vm.device_key())
+        else {
+            return;
+        };
+        self.is_saving_touch_id = true;
+        cx.notify();
+        let saving = cx
+            .background_executor()
+            .spawn(async move { crate::touch_id::save_key(&key) });
+        cx.spawn(async move |this, cx| {
+            let result = saving.await;
+            this.update(cx, |this, cx| {
+                this.is_saving_touch_id = false;
+                match result {
+                    Ok(()) => {
+                        Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = true);
+                        tracing::info!("Touch ID unlock turned on");
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "failed to turn on Touch ID unlock");
+                        this.touch_id_error = Some(format!("Touch ID was not turned on: {e}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_touch_id(&self, cx: &Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap(px(8.))
+            .child(
+                Checkbox::new("vault-touch-id")
+                    .checked(Preferences::is_touch_id_enabled(cx))
+                    .disabled(self.is_saving_touch_id)
+                    .label("Unlock with Touch ID")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.set_touch_id(*checked, cx);
+                    })),
+            )
+            .children(self.touch_id_error.clone().map(|message| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().danger)
+                    .child(message)
+            }))
+    }
+
     fn make_new_phrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_making_phrase {
             return;
@@ -627,6 +698,18 @@ impl Render for VaultPane {
                             })),
                     )
                     .child(caption(LOCK_SHORTCUT)),
+            )
+            .when(
+                self.is_touch_id_available || Preferences::is_touch_id_enabled(cx),
+                |el| {
+                    el.child(heading("Touch ID").mt(px(6.)))
+                        .child(caption(
+                            "The vault key stays in this Mac's keychain, and only a finger \
+                             enrolled now opens it. After a new finger is added, unlock once \
+                             with the master password.",
+                        ))
+                        .child(self.render_touch_id(cx))
+                },
             )
             .child(heading("Master password").mt(px(6.)))
             .child(caption(

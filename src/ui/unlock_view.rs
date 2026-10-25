@@ -3,11 +3,13 @@ use gpui::{px, AnyElement, App, Context, Entity, FocusHandle, Focusable, Window}
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    ActiveTheme as _, Disableable as _,
+    ActiveTheme as _, Disableable as _, Icon,
 };
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
+use crate::preferences::Preferences;
+use crate::touch_id::{self, TouchIdError};
 use crate::ui::{lock_screen, VaultState};
 
 const RECOVERY_WORD_COUNT: usize = 24;
@@ -68,6 +70,7 @@ fn recovery_problem(
 enum Step {
     PasswordForm,
     PasswordWorking,
+    TouchIdWorking,
     RecoveryForm,
     RecoveryWorking,
     DeleteForm,
@@ -83,6 +86,8 @@ pub struct UnlockView {
     confirm_password: Entity<InputState>,
     delete_word: Entity<InputState>,
     error: Option<String>,
+    /// Asked of the system each time the screen shows, not on every frame.
+    is_touch_id_available: bool,
 }
 
 impl Focusable for UnlockView {
@@ -162,14 +167,27 @@ impl UnlockView {
             confirm_password,
             delete_word,
             error: None,
+            is_touch_id_available: touch_id::is_available(),
         }
     }
 
     /// Put the cursor in the password field. Called by `RootView` whenever the
     /// unlock screen appears so the user can type straight away.
-    pub fn focus_password(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_touch_id_available = touch_id::is_available();
         self.password
             .update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    fn can_use_touch_id(&self, cx: &App) -> bool {
+        self.is_touch_id_available && Preferences::is_touch_id_enabled(cx)
+    }
+
+    /// At the start of flint, ask for the finger right away.
+    pub fn offer_touch_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_use_touch_id(cx) {
+            self.unlock_with_touch_id(window, cx);
+        }
     }
 
     /// Back to an empty password form. `RootView` calls this once the vault
@@ -225,6 +243,7 @@ impl UnlockView {
                         *vs = VaultState::Unlocked { manager };
                         cx.notify();
                     });
+                    touch_id::save_key_again(&this.vault_state, cx);
                 }
                 Err(crate::vault::VaultError::InvalidPassword) => {
                     this.step = Step::PasswordForm;
@@ -239,6 +258,55 @@ impl UnlockView {
                     this.error = Some(format!("Failed to open vault: {e}"));
                     cx.notify();
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn unlock_with_touch_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.step = Step::TouchIdWorking;
+        self.error = None;
+        cx.notify();
+
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.try_send(touch_id::open_vault());
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = rx.recv().await else { return };
+            this.update_in(cx, |this, window, cx| {
+                let error = match result {
+                    Ok(manager) => {
+                        tracing::info!("vault unlocked with Touch ID");
+                        this.vault_state.update(cx, |vs, cx| {
+                            *vs = VaultState::Unlocked { manager };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(TouchIdError::Cancelled) => None,
+                    // The next unlock with the password saves it again.
+                    Err(TouchIdError::Stale) => {
+                        tracing::warn!("the Touch ID key no longer opens the vault");
+                        touch_id::delete_key();
+                        Some(
+                            "Touch ID no longer opens the vault. Unlock with the password to \
+                             set it up again."
+                                .to_string(),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "Touch ID unlock failed");
+                        Some(format!("Touch ID failed: {e}"))
+                    }
+                };
+                this.step = Step::PasswordForm;
+                this.error = error;
+                this.password
+                    .update(cx, |state, cx| state.focus(window, cx));
+                cx.notify();
             })
             .ok();
         })
@@ -389,6 +457,18 @@ impl UnlockView {
                     .child("Unlock")
                     .on_click(cx.listener(|this, _, window, cx| this.submit_password(window, cx))),
             )
+            .when(self.can_use_touch_id(cx), |el| {
+                el.child(
+                    Button::new("unlock-touch-id")
+                        .icon(Icon::empty().path("icons/fingerprint-pattern.svg"))
+                        .child("Unlock with Touch ID")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.unlock_with_touch_id(window, cx)
+                            }),
+                        ),
+                )
+            })
             .child(lock_screen::links().child(
                 lock_screen::link("to-recovery", "Forgot password? Use recovery phrase").on_click(
                     cx.listener(|this, _, window, cx| {
@@ -521,6 +601,7 @@ impl Render for UnlockView {
         let content = match self.step {
             Step::PasswordForm => self.render_password_form(cx),
             Step::PasswordWorking => lock_screen::working("Unlocking\u{2026}", cx),
+            Step::TouchIdWorking => lock_screen::working("Waiting for Touch ID\u{2026}", cx),
             Step::RecoveryForm => self.render_recovery_form(cx),
             Step::RecoveryWorking => lock_screen::working("Recovering\u{2026}", cx),
             Step::DeleteForm => self.render_delete_form(cx),

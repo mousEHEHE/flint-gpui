@@ -610,6 +610,7 @@ impl SyncService {
         match installed {
             Ok(()) => {
                 tracing::info!(login = %step.github_login, is_new = step.is_new, "signed in to sync");
+                crate::touch_id::save_key_again(&self.vault_state, cx);
                 self.sign_in = SignIn::Idle;
                 self.sync_error = None;
                 self.retry_after = None;
