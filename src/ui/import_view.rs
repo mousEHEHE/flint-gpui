@@ -458,7 +458,7 @@ fn write_selected(
     selected: &[(ImportedHost, Option<String>, Option<String>)],
     snippets: &[ImportedSnippet],
 ) -> ImportCounts {
-    let now = unix_now();
+    let now = crate::ui::sidebar::unix_now();
     // Local user as the fallback login when the source names none.
     let default_user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
@@ -1106,13 +1106,6 @@ fn section_head(label: &str) -> gpui::AnyElement {
         .text_color(flint_theme::text_dim())
         .child(label.to_uppercase())
         .into_any_element()
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -125,6 +125,9 @@ fn u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
 
 // ---- SSTable ----
 
+/// Real blocks are a few KiB; the header length is untrusted.
+const MAX_BLOCK_LEN: usize = 64 * 1024 * 1024;
+
 /// A decompressed block and the handle it came from.
 fn read_block(file: &[u8], offset: u64, size: u64) -> Result<Vec<u8>> {
     let offset = usize::try_from(offset).context("block offset too large")?;
@@ -133,9 +136,15 @@ fn read_block(file: &[u8], offset: u64, size: u64) -> Result<Vec<u8>> {
     let type_byte = *file.get(offset + size).context("block trailer past end")?;
     match type_byte {
         0 => Ok(block.to_vec()),
-        1 => snap::raw::Decoder::new()
-            .decompress_vec(block)
-            .context("snappy decompress"),
+        1 => {
+            let len = snap::raw::decompress_len(block).context("snappy header")?;
+            if len > MAX_BLOCK_LEN {
+                bail!("snappy block claims {len} bytes, over the {MAX_BLOCK_LEN} limit");
+            }
+            snap::raw::Decoder::new()
+                .decompress_vec(block)
+                .context("snappy decompress")
+        }
         other => bail!("unknown block compression {other}"),
     }
 }
@@ -380,6 +389,16 @@ mod tests {
         assert!(entry.is_live);
         assert_eq!(entry.value.as_deref(), Some(value.as_slice()));
         assert_eq!(entry.seq, 5);
+    }
+
+    #[test]
+    fn rejects_a_snappy_block_that_claims_a_huge_length() {
+        let mut file = Vec::new();
+        varint(&mut file, u32::MAX as u64);
+        let size = file.len() as u64;
+        file.push(1); // snappy
+        let error = read_block(&file, 0, size).unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
     }
 
     #[test]

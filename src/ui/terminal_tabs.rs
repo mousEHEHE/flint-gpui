@@ -305,6 +305,15 @@ impl ServerSession {
         cx.notify();
     }
 
+    /// Only the terminal on screen takes snapshots: none while another app tab is in front.
+    pub(crate) fn set_in_front(&self, is_front: bool, cx: &App) {
+        for (ix, terminal) in self.terminals.iter().enumerate() {
+            terminal
+                .read(cx)
+                .set_visible(is_front && ix == self.active_terminal);
+        }
+    }
+
     /// Tabs change from places that have no `Window` (a shell exiting, an
     /// async open), so the focus is moved here, on the next render.
     pub(crate) fn focus_terminal_if_pending(
@@ -315,6 +324,8 @@ impl ServerSession {
         if !std::mem::take(&mut self.is_terminal_focus_pending) {
             return;
         }
+        // Every tab switch asks for the focus, so this is where hidden tabs are told.
+        self.set_in_front(true, cx);
         // A dialog on top keeps the keyboard.
         if window.has_active_dialog(cx) {
             return;
@@ -597,16 +608,8 @@ impl ServerSession {
     }
 }
 
-/// `user@host`, with the port only when it is not the usual one.
 fn session_address(connection: &Connection) -> String {
-    if connection.port == 22 {
-        format!("{}@{}", connection.username, connection.host)
-    } else {
-        format!(
-            "{}@{}:{}",
-            connection.username, connection.host, connection.port
-        )
-    }
+    crate::ui::ssh_address(&connection.username, &connection.host, connection.port)
 }
 
 fn terminal_icon() -> Icon {

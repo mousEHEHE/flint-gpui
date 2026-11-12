@@ -487,23 +487,7 @@ impl ServerFormView {
     }
 
     fn is_valid(&self, cx: &App) -> bool {
-        let host = strip_whitespace(&self.host_input.read(cx).value());
-        let port_str = strip_whitespace(&self.port_input.read(cx).value());
-        let user = strip_whitespace(&self.user_input.read(cx).value());
-
-        if host.is_empty() || user.is_empty() {
-            return false;
-        }
-        if port_str.parse::<u16>().map(|p| p < 1).unwrap_or(true) {
-            return false;
-        }
-
-        match self.auth_mode {
-            AuthMode::Password => !self.pass_input.read(cx).value().is_empty(),
-            AuthMode::PrivateKey => self.selected_key_id.is_some(),
-            // The agent supplies the keys; nothing to fill in here.
-            AuthMode::Agent => true,
-        }
+        self.missing_hint(cx).is_none()
     }
 
     /// Move the tag input's text into the chip list (deduplicated,
@@ -763,7 +747,7 @@ impl ServerFormView {
         };
 
         let (startup_snippet, snippets) = self.startup_and_snippets(cx);
-        let now = unix_now();
+        let now = crate::ui::sidebar::unix_now();
         let entry = match &self.mode {
             FormMode::Add => ServerEntry {
                 id: Uuid::new_v4(),
@@ -2669,13 +2653,6 @@ pub(crate) fn read_key_file(path: &Path) -> Result<String, String> {
         return Err("That file is too large to be a key.".to_string());
     }
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// The button that opens a dropdown: the current value on the left, a caret on

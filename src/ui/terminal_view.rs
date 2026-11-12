@@ -463,6 +463,11 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Only the shown tab copies its screen while output streams in.
+    pub fn set_visible(&self, is_visible: bool) {
+        self.shell.set_visible(is_visible);
+    }
+
     /// Write raw bytes to the shell on a detached task. Empty input is a no-op.
     pub(crate) fn send_input(&self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         if bytes.is_empty() {

@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
-use futures::future::Either;
 use futures::StreamExt as _;
 use gpui::prelude::*;
 use gpui::{
@@ -21,7 +20,7 @@ use gpui_component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, StyledE
 use crate::server_stats::{self, Sample, SystemInfo};
 use crate::ssh::SshConnection;
 use crate::theme;
-use crate::ui::server_session::ServerSession;
+use crate::ui::server_session::{run_command, ServerSession};
 use crate::ui::VaultState;
 
 pub const PANEL_WIDTH: f32 = 320.;
@@ -328,41 +327,30 @@ async fn read_host(poll: &Poll, executor: &BackgroundExecutor) -> (Option<String
     match (poll.needs_info, poll.needs_sample) {
         (true, true) => {
             let command = server_stats::info_and_sample_command();
-            let output = run_command(connection, command, executor).await;
+            let output = run_command(connection, command, COMMAND_TIMEOUT, executor).await;
             (output.clone(), output)
         }
         (true, false) => {
-            let output = run_command(connection, server_stats::info_command(), executor).await;
+            let output = run_command(
+                connection,
+                server_stats::info_command(),
+                COMMAND_TIMEOUT,
+                executor,
+            )
+            .await;
             (output, None)
         }
         (false, true) => {
-            let output = run_command(connection, server_stats::sample_command(), executor).await;
+            let output = run_command(
+                connection,
+                server_stats::sample_command(),
+                COMMAND_TIMEOUT,
+                executor,
+            )
+            .await;
             (None, output)
         }
         (false, false) => (None, None),
-    }
-}
-
-/// Run `command` on the host and collect what it prints. `None` when no
-/// channel could be opened or the command did not finish in time.
-async fn run_command(
-    connection: &SshConnection,
-    command: String,
-    executor: &BackgroundExecutor,
-) -> Option<String> {
-    let reading = async {
-        let exec = connection.open_exec(command).await.ok()?;
-        let output = exec.subscribe();
-        let mut bytes = Vec::new();
-        while let Ok(chunk) = output.recv().await {
-            bytes.extend_from_slice(&chunk);
-        }
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    };
-    let limit = executor.timer(COMMAND_TIMEOUT);
-    match futures::future::select(Box::pin(reading), Box::pin(limit)).await {
-        Either::Left((output, _)) => output,
-        Either::Right(_) => None,
     }
 }
 

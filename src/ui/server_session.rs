@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,8 +22,9 @@ use crate::ui::transfer_rate::TransferRate;
 use crate::ui::VaultState;
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, AsyncApp, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    Focusable as _, MouseButton, Pixels, StyleRefinement, Task, WeakEntity, Window,
+    div, px, AnyElement, App, AsyncApp, BackgroundExecutor, ClipboardItem, Context, Div, Entity,
+    EventEmitter, FocusHandle, Focusable as _, MouseButton, Pixels, StyleRefinement, Task,
+    WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -236,20 +238,16 @@ impl AuthPromptState {
     }
 }
 
+// dash exits when `.` cannot open the file, so check it first to keep the fallback.
+const OS_SCRIPT: &str = "[ -r /etc/os-release ] && . /etc/os-release && \
+    printf '%s %s' \"$NAME\" \"$VERSION_ID\" || uname -sr";
+
 /// Best-effort remote OS probe: parse `/etc/os-release`, fall back to `uname`.
 /// Returns a short label like "Ubuntu 22.04" or `None` on failure/empty.
-async fn detect_os(conn: &SshConnection) -> Option<String> {
-    let cmd = ". /etc/os-release 2>/dev/null && \
-        printf '%s %s' \"$NAME\" \"$VERSION_ID\" || uname -sr"
-        .to_string();
-    let handle = conn.open_exec(cmd).await.ok()?;
-    let rx = handle.subscribe();
-    let mut out: Vec<u8> = Vec::new();
-    // Drain until the exec channel closes, which happens when the command exits.
-    while let Ok(chunk) = rx.recv().await {
-        out.extend_from_slice(&chunk);
-    }
-    let label = String::from_utf8_lossy(&out).trim().to_string();
+async fn detect_os(conn: &SshConnection, executor: &BackgroundExecutor) -> Option<String> {
+    let command = crate::server_stats::command_for(OS_SCRIPT);
+    let output = run_command(conn, command, PROBE_TIMEOUT, executor).await?;
+    let label = output.trim().to_string();
     if label.is_empty() {
         None
     } else {
@@ -260,30 +258,48 @@ async fn detect_os(conn: &SshConnection) -> Option<String> {
 /// Fetch the server's shell history (bash/zsh/fish) over an exec channel to back
 /// the terminal's command-suggestion popup. Best-effort: returns empty on any
 /// failure. See [`crate::ui::terminal_suggestions::parse_history`].
-async fn fetch_shell_history(conn: &SshConnection) -> Vec<String> {
+async fn fetch_shell_history(conn: &SshConnection, executor: &BackgroundExecutor) -> Vec<String> {
     // Read only the active shell's history. Every shell's file together would
     // bring in stale commands (an old ~/.bash_history under a zsh user) and mix
     // up recency, since each file is newest-last on its own.
     // Only the end of the file is sent back: a history can be many megabytes, and
     // a fish entry takes several lines, so the cut is well above the 5000
     // commands that are kept.
-    let cmd = "case \"$SHELL\" in \
+    let script = "case \"$SHELL\" in \
         *zsh) cat \"$HOME/.zsh_history\";; \
         *bash) cat \"$HOME/.bash_history\";; \
         *fish) cat \"$HOME/.local/share/fish/fish_history\";; \
         *) cat \"$HOME/.bash_history\" \"$HOME/.zsh_history\" \
             \"$HOME/.local/share/fish/fish_history\";; \
-        esac 2>/dev/null | tail -n 20000"
-        .to_string();
-    let Ok(handle) = conn.open_exec(cmd).await else {
+        esac 2>/dev/null | tail -n 20000";
+    let command = crate::server_stats::command_for(script);
+    let Some(output) = run_command(conn, command, PROBE_TIMEOUT, executor).await else {
         return Vec::new();
     };
-    let rx = handle.subscribe();
-    let mut out: Vec<u8> = Vec::new();
-    while let Ok(chunk) = rx.recv().await {
-        out.extend_from_slice(&chunk);
-    }
-    crate::ui::terminal_suggestions::parse_history(&String::from_utf8_lossy(&out))
+    crate::ui::terminal_suggestions::parse_history(&output)
+}
+
+/// Run `command` on the host and collect what it prints. `None` when no
+/// channel could be opened or the command did not finish within `timeout`.
+pub(crate) async fn run_command(
+    conn: &SshConnection,
+    command: String,
+    timeout: Duration,
+    executor: &BackgroundExecutor,
+) -> Option<String> {
+    let reading = async {
+        let exec = conn.open_exec(command).await.ok()?;
+        let output = exec.subscribe();
+        let mut bytes = Vec::new();
+        // Drain until the exec channel closes, which happens when the command exits.
+        while let Ok(chunk) = output.recv().await {
+            bytes.extend_from_slice(&chunk);
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    finish_within(reading, executor.timer(timeout))
+        .await
+        .flatten()
 }
 
 /// The result of `work`, or `None` when `limit` ends first.
@@ -476,6 +492,13 @@ async fn drive_connection(
                                 .browser
                                 .as_ref()
                                 .and_then(|old| old.update(cx, |old, _| old.take_left_server()));
+                            // Files open for editing keep syncing; a tab closed
+                            // later must still know which of them hold unsaved work.
+                            let open_files = session
+                                .browser
+                                .as_ref()
+                                .map(|old| old.update(cx, |old, _| old.take_open_files()))
+                                .unwrap_or_default();
                             let browser = cx.new(|cx| {
                                 SftpBrowser::new(
                                     conn_info,
@@ -497,8 +520,14 @@ async fn drive_connection(
                                     )));
                                 }
                                 BrowserEvent::ConflictDetected { local, .. } => {
-                                    this.pending_conflict = Some(local.clone());
-                                    cx.emit(ServerSessionEvent::ConflictDetected);
+                                    if this.pending_conflict.contains(local) {
+                                        return;
+                                    }
+                                    this.pending_conflict.push_back(local.clone());
+                                    // Later ones wait for the dialog of the first.
+                                    if this.pending_conflict.len() == 1 {
+                                        cx.emit(ServerSessionEvent::ConflictDetected);
+                                    }
                                 }
                                 BrowserEvent::TransferConflict => {
                                     cx.emit(ServerSessionEvent::TransferConflict);
@@ -584,6 +613,9 @@ async fn drive_connection(
                                 }
                             })
                             .detach();
+                            browser.update(cx, |browser, cx| {
+                                browser.adopt_open_files(open_files, cx);
+                            });
                             session.browser = Some(browser);
                             session.restore_peer(left_server, cx);
                             session.terminals.clear();
@@ -794,7 +826,8 @@ pub struct ServerSession {
     /// reconnect loop, which respawns from it: accepting a key mid-session
     /// updates the matching hop so later reconnects don't re-prompt.
     route: Arc<Mutex<SshRoute>>,
-    pub pending_conflict: Option<PathBuf>,
+    /// Edited files that changed on the host, in the order they are asked about.
+    pub pending_conflict: VecDeque<PathBuf>,
     /// Active ad-hoc SFTP transfers (newest last).
     pub transfers: Vec<TransferTask>,
     /// Finished transfers, newest first, capped at [`HISTORY_CAP`].
@@ -987,7 +1020,7 @@ impl ServerSession {
             peer: None,
             retry_now: retry_tx,
             route,
-            pending_conflict: None,
+            pending_conflict: VecDeque::new(),
             transfers: Vec::new(),
             transfer_history: Vec::new(),
             tasks_open: false,
@@ -1267,8 +1300,8 @@ impl ServerSession {
         // With suggestions off, no exec channel is opened for the history.
         let is_suggestions_enabled = Preferences::is_suggestions_enabled(cx);
         self.probe_task = Some(cx.spawn(async move |this, cx| {
-            let limit = cx.background_executor().timer(PROBE_TIMEOUT);
-            if let Some(os) = finish_within(detect_os(&conn), limit).await.flatten() {
+            let executor = cx.background_executor().clone();
+            if let Some(os) = detect_os(&conn, &executor).await {
                 this.update(cx, |_session, cx| {
                     cx.emit(ServerSessionEvent::OsDetected(os))
                 })
@@ -1277,10 +1310,7 @@ impl ServerSession {
             if !is_suggestions_enabled {
                 return;
             }
-            let limit = cx.background_executor().timer(PROBE_TIMEOUT);
-            let history = finish_within(fetch_shell_history(&conn), limit)
-                .await
-                .unwrap_or_default();
+            let history = fetch_shell_history(&conn, &executor).await;
             if history.is_empty() {
                 return;
             }
@@ -1532,6 +1562,19 @@ impl ServerSession {
         if let Some(prompt) = self.auth_prompt_mut(link) {
             prompt.inputs = inputs;
         }
+    }
+
+    /// The conflict about `local` was answered. Returns false when it was not
+    /// the one being asked about, so a late answer does nothing.
+    pub fn conflict_resolved(&mut self, local: &Path, cx: &mut Context<Self>) -> bool {
+        if self.pending_conflict.front().map(PathBuf::as_path) != Some(local) {
+            return false;
+        }
+        self.pending_conflict.pop_front();
+        if !self.pending_conflict.is_empty() {
+            cx.emit(ServerSessionEvent::ConflictDetected);
+        }
+        true
     }
 
     pub fn cleanup_before_close(&mut self, cx: &mut Context<Self>) {
@@ -1921,22 +1964,7 @@ impl ServerSession {
                 );
         }
 
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                // The working area is a rounded card; gpui does not clip to its
-                // corners, so the overlay rounds its own top ones.
-                .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
-                .bg(theme.overlay)
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                .on_mouse_down(MouseButton::Right, |_, _, _| {})
-                .child(card)
-                .into_any_element(),
-        )
+        Some(modal_overlay(theme.overlay).child(card).into_any_element())
     }
 
     /// Modal overlay for a keyboard-interactive challenge (2FA codes, PAM
@@ -2047,23 +2075,25 @@ impl ServerSession {
                 ),
         );
 
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                // The working area is a rounded card; gpui does not clip to its
-                // corners, so the overlay rounds its own top ones.
-                .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
-                .bg(theme.overlay)
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                .on_mouse_down(MouseButton::Right, |_, _, _| {})
-                .child(card)
-                .into_any_element(),
-        )
+        Some(modal_overlay(theme.overlay).child(card).into_any_element())
     }
+}
+
+/// A dimmed layer over the working area that centres a dialog card and
+/// swallows clicks meant for what is under it.
+fn modal_overlay(color: gpui::Hsla) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        // The working area is a rounded card; gpui does not clip to its
+        // corners, so the overlay rounds its own top ones.
+        .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
+        .bg(color)
+        .flex()
+        .items_center()
+        .justify_center()
+        .on_mouse_down(MouseButton::Left, |_, _, _| {})
+        .on_mouse_down(MouseButton::Right, |_, _, _| {})
 }
 
 /// Put a new password on one hop of the route. Returns false when the hop is
@@ -2234,79 +2264,61 @@ impl Render for ServerSession {
                     .size_full()
                     .child(split)
                     .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            // The working area is a rounded card; gpui does not clip to its
-                            // corners, so the overlay rounds its own top ones.
-                            .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
-                            .bg(theme.overlay)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                            .on_mouse_down(MouseButton::Right, |_, _, _| {})
-                            .child(
-                                v_flex()
-                                    .px(px(12.))
-                                    .py(px(10.))
-                                    .w(px(380.))
-                                    .bg(flint_theme::pop_surface())
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(flint_theme::border_focused())
-                                    .shadow_lg()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_color(theme.danger)
-                                            .text_size(px(13.))
-                                            .font_semibold()
-                                            .child(format!("Connection to {} lost", host)),
+                        modal_overlay(theme.overlay).child(
+                            v_flex()
+                                .px(px(12.))
+                                .py(px(10.))
+                                .w(px(380.))
+                                .bg(flint_theme::pop_surface())
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(flint_theme::border_focused())
+                                .shadow_lg()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_color(theme.danger)
+                                        .text_size(px(13.))
+                                        .font_semibold()
+                                        .child(format!("Connection to {} lost", host)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted_foreground)
+                                        .child(reason),
+                                )
+                                .when(preserved_count > 0, |el| {
+                                    el.child(
+                                        div().text_size(px(12.)).text_color(theme.warning).child(
+                                            preserved_files_note(preserved_count, &cache_path),
+                                        ),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(theme.muted_foreground)
-                                            .child(reason),
-                                    )
-                                    .when(preserved_count > 0, |el| {
-                                        el.child(
-                                            div()
-                                                .text_size(px(12.))
-                                                .text_color(theme.warning)
-                                                .child(preserved_files_note(
-                                                    preserved_count,
-                                                    &cache_path,
-                                                )),
+                                })
+                                .child(
+                                    h_flex()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("close-disconnect")
+                                                .small()
+                                                .ghost()
+                                                .child("Close")
+                                                .on_click(cx.listener(|_, _, _, cx| {
+                                                    cx.emit(ServerSessionEvent::CloseRequested);
+                                                })),
                                         )
-                                    })
-                                    .child(
-                                        h_flex()
-                                            .justify_end()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("close-disconnect")
-                                                    .small()
-                                                    .ghost()
-                                                    .child("Close")
-                                                    .on_click(cx.listener(|_, _, _, cx| {
-                                                        cx.emit(ServerSessionEvent::CloseRequested);
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("reconnect-disconnect")
-                                                    .small()
-                                                    .primary()
-                                                    .child("Reconnect")
-                                                    .on_click(cx.listener(|_, _, _, cx| {
-                                                        cx.emit(
-                                                            ServerSessionEvent::ReconnectRequested,
-                                                        );
-                                                    })),
-                                            ),
-                                    ),
-                            ),
+                                        .child(
+                                            Button::new("reconnect-disconnect")
+                                                .small()
+                                                .primary()
+                                                .child("Reconnect")
+                                                .on_click(cx.listener(|_, _, _, cx| {
+                                                    cx.emit(ServerSessionEvent::ReconnectRequested);
+                                                })),
+                                        ),
+                                ),
+                        ),
                     )
                     .into_any_element()
             } else if let Some(attempt) = self.reconnecting {
@@ -2318,51 +2330,39 @@ impl Render for ServerSession {
                     .size_full()
                     .child(split)
                     .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            // The working area is a rounded card; gpui does not clip to its
-                            // corners, so the overlay rounds its own top ones.
-                            .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
-                            .bg(theme.overlay)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .on_mouse_down(MouseButton::Left, |_, _, _| {})
-                            .on_mouse_down(MouseButton::Right, |_, _, _| {})
-                            .child(
-                                v_flex()
-                                    .px(px(12.))
-                                    .py(px(10.))
-                                    .w(px(380.))
-                                    .bg(flint_theme::pop_surface())
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(flint_theme::border_focused())
-                                    .shadow_lg()
-                                    .gap(px(8.))
-                                    .child(
-                                        h_flex()
-                                            .gap(px(8.))
-                                            .items_center()
-                                            .child(Spinner::new())
-                                            .child(
-                                                div()
-                                                    .text_color(theme.foreground)
-                                                    .text_size(px(13.))
-                                                    .font_semibold()
-                                                    .child(format!("Reconnecting to {host}…")),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!(
-                                                "Attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}"
-                                            )),
-                                    ),
-                            ),
+                        modal_overlay(theme.overlay).child(
+                            v_flex()
+                                .px(px(12.))
+                                .py(px(10.))
+                                .w(px(380.))
+                                .bg(flint_theme::pop_surface())
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(flint_theme::border_focused())
+                                .shadow_lg()
+                                .gap(px(8.))
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .items_center()
+                                        .child(Spinner::new())
+                                        .child(
+                                            div()
+                                                .text_color(theme.foreground)
+                                                .text_size(px(13.))
+                                                .font_semibold()
+                                                .child(format!("Reconnecting to {host}…")),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!(
+                                            "Attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}"
+                                        )),
+                                ),
+                        ),
                     )
                     .into_any_element()
             } else {
@@ -2506,6 +2506,17 @@ mod tests {
             preserved_files_note(3, "/cache/prod"),
             "3 files with unsaved changes kept in /cache/prod"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn os_script_runs_under_sh_and_prints_a_label() {
+        let command = crate::server_stats::command_for(OS_SCRIPT);
+        let output = std::process::Command::new("sh")
+            .args(["-c", &command])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
     }
 
     #[test]

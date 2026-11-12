@@ -1430,7 +1430,11 @@ impl FilePane {
             None => return,
             Some(PaneDialog::Rename { from, input }) => {
                 let new_name = input.read(cx).value().trim().to_string();
-                if !is_valid_entry_name(&new_name) {
+                // A local rename would replace the other item without asking.
+                let old_name = from.rsplit(['/', '\\']).next().unwrap_or_default();
+                let is_taken =
+                    new_name != old_name && self.entries.iter().any(|e| e.name == new_name);
+                if !is_valid_entry_name(&new_name) || is_taken {
                     self.dialog = Some(PaneDialog::Rename { from, input });
                     return;
                 }
@@ -2896,7 +2900,7 @@ fn fmt_clock(local_secs: i64) -> String {
 /// Seconds the local clock is ahead of UTC at Unix time `ts`. Zero when the
 /// system cannot tell.
 #[cfg(unix)]
-fn local_offset_secs(ts: i64) -> i64 {
+pub(crate) fn local_offset_secs(ts: i64) -> i64 {
     let time = ts as libc::time_t;
     // SAFETY: `tm` is plain data, so all zeroes is a valid value, and both
     // pointers are valid for the whole call.
@@ -2910,7 +2914,7 @@ fn local_offset_secs(ts: i64) -> i64 {
 /// Seconds the local clock is ahead of UTC. Windows answers with the offset
 /// in force today, also for a `ts` on the other side of a clock change.
 #[cfg(windows)]
-fn local_offset_secs(ts: i64) -> i64 {
+pub(crate) fn local_offset_secs(ts: i64) -> i64 {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::Storage::FileSystem::FileTimeToLocalFileTime;
 
@@ -2984,7 +2988,7 @@ fn fmt_mtime_at(mtime: u32, now: u64, offset_secs: i64) -> String {
 
 /// Year, month (1 to 12) and day of a Unix time, in the proleptic Gregorian
 /// calendar.
-fn unix_to_ymd(ts: i64) -> (i64, i64, i64) {
+pub(crate) fn unix_to_ymd(ts: i64) -> (i64, i64, i64) {
     let z = ts.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -56,15 +55,11 @@ impl FileAssociations {
         }
 
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-
-        #[cfg(unix)]
-        atomic_write_unix(&path, &json)?;
-        #[cfg(windows)]
-        atomic_write_windows(&path, &json)?;
-        #[cfg(not(any(unix, windows)))]
-        compile_error!("unsupported platform");
-
-        Ok(())
+        // Written beside the file and moved over it, so a crash in the
+        // middle of the write cannot leave half a file.
+        let unfinished = path.with_extension("json.new");
+        std::fs::write(&unfinished, json)?;
+        std::fs::rename(&unfinished, &path)
     }
 
     pub fn get(&self, extension: &str) -> Option<&Path> {
@@ -85,66 +80,4 @@ impl FileAssociations {
                 .join("file_associations.json"),
         )
     }
-}
-
-#[cfg(unix)]
-fn atomic_write_unix(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let tmp = tmp_path(path);
-
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&tmp)?;
-        file.write_all(data)?;
-        file.flush()?;
-        file.sync_all()?;
-    }
-
-    std::fs::rename(&tmp, path)?;
-
-    if let Some(parent) = path.parent() {
-        let dir = std::fs::File::open(parent)?;
-        let _ = dir.sync_all();
-    }
-
-    Ok(())
-}
-
-#[cfg(windows)]
-fn atomic_write_windows(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use windows::core::HSTRING;
-    use windows::Win32::Storage::FileSystem::ReplaceFileW;
-
-    let tmp = tmp_path(path);
-
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-    }
-
-    if !path.exists() {
-        return std::fs::rename(&tmp, path);
-    }
-
-    let target = HSTRING::from(path.as_os_str());
-    let replacement = HSTRING::from(tmp.as_os_str());
-    unsafe {
-        ReplaceFileW(&target, &replacement, None, Default::default(), None, None)
-            .map_err(std::io::Error::other)?;
-    }
-
-    Ok(())
-}
-
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
 }

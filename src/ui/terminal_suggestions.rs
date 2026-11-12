@@ -35,7 +35,7 @@ use gpui::{
 use gpui_component::{h_flex, v_flex, ActiveTheme as _};
 
 use crate::preferences::Preferences;
-use crate::shell::TermSnapshot;
+use crate::shell::{SnapshotCell, TermSnapshot};
 use crate::theme as flint_theme;
 use crate::ui::terminal_element::terminal_font_family;
 
@@ -371,7 +371,16 @@ fn readable_line(snap: &TermSnapshot) -> Option<String> {
     if !rest_blank {
         return None;
     }
-    Some(cells.iter().take(col).map(|c| c.c).collect())
+    Some(row_text(&cells[..col.min(cells.len())]))
+}
+
+/// A wide character takes two cells; the spacer after it is not a real blank.
+fn row_text(cells: &[SnapshotCell]) -> String {
+    cells
+        .iter()
+        .filter(|cell| !cell.wide_char_spacer)
+        .map(|cell| cell.c)
+        .collect()
 }
 
 /// Full text of every grid row from the top down to the cursor row, for
@@ -382,11 +391,7 @@ fn rows_to_cursor(snap: &TermSnapshot) -> Option<Vec<String>> {
     }
     let cursor_row = snap.cursor.0 as usize;
     let rows = snap.cells.get(..=cursor_row)?;
-    Some(
-        rows.iter()
-            .map(|cells| cells.iter().map(|c| c.c).collect())
-            .collect(),
-    )
+    Some(rows.iter().map(|cells| row_text(cells)).collect())
 }
 
 /// What an arrow press resolves to at the popup (see
@@ -827,6 +832,16 @@ impl SuggestionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_characters_read_without_the_spacer_cell() {
+        let mut emulator = flint_core::term_emulator::TermEmulator::new(4, 20);
+        emulator.advance("$ echo 中文".as_bytes());
+        let snap = emulator.snapshot();
+        assert_eq!(readable_line(&snap).as_deref(), Some("$ echo 中文"));
+        let rows = rows_to_cursor(&snap).unwrap();
+        assert_eq!(rows[0].trim_end(), "$ echo 中文");
+    }
 
     #[test]
     fn parse_bash_plain() {

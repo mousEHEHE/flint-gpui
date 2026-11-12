@@ -105,6 +105,25 @@ pub fn dialog_max_height(window: &gpui::Window) -> gpui::Pixels {
     (viewport * 0.9 - gpui::px(48.)).max(gpui::px(200.))
 }
 
+/// `user@host`, with the port only when it is not 22.
+pub fn ssh_address(username: &str, host: &str, port: u16) -> String {
+    let host = bracket_ipv6(host);
+    if port == 22 {
+        format!("{username}@{host}")
+    } else {
+        format!("{username}@{host}:{port}")
+    }
+}
+
+/// An IPv6 host needs brackets, or its colons read as the port separator.
+pub fn bracket_ipv6(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
 pub enum VaultState {
     Locked,
     AwaitingPhraseConfirmation {
@@ -163,6 +182,21 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn ssh_address_brackets_ipv6_and_hides_port_22() {
+        assert_eq!(ssh_address("root", "example.com", 22), "root@example.com");
+        assert_eq!(
+            ssh_address("root", "example.com", 2222),
+            "root@example.com:2222"
+        );
+        assert_eq!(ssh_address("root", "::1", 22), "root@[::1]");
+        assert_eq!(ssh_address("root", "fe80::1", 2222), "root@[fe80::1]:2222");
+        assert_eq!(
+            ssh_address("root", "[fe80::1]", 2222),
+            "root@[fe80::1]:2222"
+        );
     }
 
     #[test]

@@ -440,7 +440,12 @@ fn system_rows(info: &SystemInfo) -> Vec<(&'static str, String)> {
 fn connection_rows(entry: &ServerEntry, vault: &VaultManager) -> Vec<(&'static str, String)> {
     let mut rows = vec![(
         "SSH",
-        format!("{}@{}:{}", entry.username, entry.host, entry.port),
+        format!(
+            "{}@{}:{}",
+            entry.username,
+            crate::ui::bracket_ipv6(&entry.host),
+            entry.port
+        ),
     )];
     let login = match &entry.auth {
         AuthMethod::Password(_) => "Password".to_string(),

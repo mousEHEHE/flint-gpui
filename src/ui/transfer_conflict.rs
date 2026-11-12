@@ -31,7 +31,7 @@ pub struct FileFacts {
 }
 
 /// One end of a transfer: this computer or one of the two servers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Endpoint {
     Local,
     Server(Side),

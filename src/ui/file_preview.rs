@@ -64,10 +64,8 @@ pub fn preview_plan(entry: &FileEntry) -> PreviewPlan {
     if entry.kind == EntryKind::Other {
         return PreviewPlan::Ready(PreviewContent::NotAFile);
     }
-    if entry.size == 0 {
-        return PreviewPlan::Ready(PreviewContent::Empty);
-    }
-    if image_format(&entry.name).is_none() {
+    // Files under /proc and /sys report a size of 0 but have content.
+    if entry.size == 0 || image_format(&entry.name).is_none() {
         return PreviewPlan::Read {
             limit: TEXT_PREVIEW_BYTES,
         };
@@ -536,10 +534,6 @@ mod tests {
             PreviewPlan::Read { .. } => None,
         };
         assert!(matches!(
-            ready(&entry("a", 0, EntryKind::File)),
-            Some(PreviewContent::Empty)
-        ));
-        assert!(matches!(
             ready(&entry("fifo", 0, EntryKind::Other)),
             Some(PreviewContent::NotAFile)
         ));
@@ -559,6 +553,20 @@ mod tests {
             PreviewPlan::Read {
                 limit: TEXT_PREVIEW_BYTES
             }
+        ));
+    }
+
+    #[test]
+    fn a_file_listed_as_empty_is_still_read() {
+        assert!(matches!(
+            preview_plan(&entry("cpuinfo", 0, EntryKind::File)),
+            PreviewPlan::Read {
+                limit: TEXT_PREVIEW_BYTES
+            }
+        ));
+        assert!(matches!(
+            classify("cpuinfo", head(b"", 0)),
+            PreviewContent::Empty
         ));
     }
 }

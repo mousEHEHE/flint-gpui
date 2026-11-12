@@ -424,12 +424,7 @@ impl ServersView {
         } else {
             entry.label.clone()
         };
-        // Port 22 is implied; only an unusual port is worth the space.
-        let addr = if entry.port == 22 {
-            format!("{}@{}", entry.username, entry.host)
-        } else {
-            format!("{}@{}:{}", entry.username, entry.host, entry.port)
-        };
+        let addr = crate::ui::ssh_address(&entry.username, &entry.host, entry.port);
         let last_opened = entry
             .last_opened_at
             .map(|at| crate::ui::sidebar::relative_time(at, now))
@@ -610,7 +605,7 @@ impl Render for ServersView {
         self.tag_filter.retain(|t| all_tags.contains(t));
         let has_filters = self.group_filter.is_some() || !self.tag_filter.is_empty();
 
-        let search_lower = self.search.to_lowercase();
+        let search_lower = self.search.trim().to_lowercase();
         let filtered: Vec<ServerEntrySummary> = entries
             .into_iter()
             .filter(|e| {
@@ -619,28 +614,10 @@ impl Render for ServersView {
                     .is_none_or(|g| e.group_name.as_deref() == Some(g.as_str()))
             })
             .filter(|e| self.tag_filter.iter().all(|t| e.tag_names.contains(t)))
-            .filter(|e| {
-                if search_lower.is_empty() {
-                    return true;
-                }
-                let name = if e.label.is_empty() {
-                    &e.host
-                } else {
-                    &e.label
-                };
-                name.to_lowercase().contains(&search_lower)
-                    || e.host.to_lowercase().contains(&search_lower)
-                    || e.username.to_lowercase().contains(&search_lower)
-                    || e.tag_names
-                        .iter()
-                        .any(|t| t.to_lowercase().contains(&search_lower))
-                    || e.group_name
-                        .as_ref()
-                        .is_some_and(|g| g.to_lowercase().contains(&search_lower))
-            })
+            .filter(|e| crate::ui::command_palette::host_matches(e, &search_lower))
             .collect();
 
-        let is_search_empty = self.search.is_empty();
+        let is_search_empty = search_lower.is_empty();
         let search_text = self.search.clone();
 
         let theme = cx.theme();

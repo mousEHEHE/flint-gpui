@@ -1943,7 +1943,6 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-local-authentication",
  "rfd",
- "russh",
  "rust-embed",
  "secrecy",
  "security-framework",

@@ -172,7 +172,7 @@ pub enum TerminalPosition {
 /// still loads.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preferences {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub theme: ThemePreference,
     /// Show the history suggestions popup in the terminal, and read the
     /// server's shell history for it.
@@ -187,17 +187,17 @@ pub struct Preferences {
     /// which clamps a hand-edited value.
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: f32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub terminal_font: TerminalFont,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub terminal_scheme: TerminalScheme,
     /// `None` until the user answers the question, and until then the app
     /// makes no update request on its own. Set by `load_from` from the raw
     /// file, see `update_checks_in`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub update_checks: Option<UpdateChecks>,
     /// Shared by every session, so the layout picked once stays.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub terminal_position: TerminalPosition,
     /// Whether a session shows the second file pane (this computer or
     /// another server) next to the session's own files. Off by default: most
@@ -222,7 +222,7 @@ pub struct Preferences {
     #[serde(default)]
     pub is_editor_default_open: bool,
     /// An onboarding hint only, never for security. Kept after sign-out and
-    /// vault deletion. Set by `load_from`, see `has_account_in`.
+    /// vault deletion. Set by `load_from`, see `is_flag_set_in`.
     #[serde(default)]
     pub has_account: bool,
 }
@@ -242,8 +242,19 @@ fn update_checks_in(data: &[u8]) -> Option<UpdateChecks> {
 }
 
 /// Read from the raw file, like `update_checks_in`.
-fn has_account_in(data: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(data).is_ok_and(|file| file["has_account"] == true)
+fn is_flag_set_in(data: &[u8], name: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(data).is_ok_and(|file| file[name] == true)
+}
+
+/// A value this build does not know, such as a scheme added later, falls
+/// back to the default for that field only.
+fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(T::deserialize(value).unwrap_or_default())
 }
 
 fn default_true() -> bool {
@@ -450,7 +461,8 @@ impl Preferences {
         });
         Self {
             update_checks: update_checks_in(&data),
-            has_account: has_account_in(&data),
+            has_account: is_flag_set_in(&data, "has_account"),
+            is_touch_id_enabled: is_flag_set_in(&data, "is_touch_id_enabled"),
             ..prefs
         }
     }
@@ -621,6 +633,34 @@ mod tests {
         assert!(!load(r#"{"theme":"light"}"#).has_account);
         assert!(!load(r#"{"terminal_scheme":7}"#).has_account);
         assert!(!load("not json").has_account);
+    }
+
+    #[test]
+    fn an_unknown_scheme_keeps_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"light","terminal_scheme":"from-the-future","terminal_font":"menlo","update_checks":"weekly","is_touch_id_enabled":true}"#,
+        )
+        .unwrap();
+        let prefs = Preferences::load_from(&path);
+        assert_eq!(prefs.theme, ThemePreference::Light);
+        assert_eq!(prefs.terminal_scheme, TerminalScheme::FollowTheme);
+        assert_eq!(prefs.terminal_font, TerminalFont::Menlo);
+        assert!(prefs.is_touch_id_enabled);
+    }
+
+    #[test]
+    fn touch_id_stays_when_the_rest_of_the_file_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(
+            &path,
+            r#"{"terminal_font_size":"big","is_touch_id_enabled":true}"#,
+        )
+        .unwrap();
+        assert!(Preferences::load_from(&path).is_touch_id_enabled);
     }
 
     #[test]

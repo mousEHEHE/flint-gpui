@@ -34,7 +34,7 @@ use crate::ui::server_session::{
 };
 use crate::ui::servers_view::{ServersView, ServersViewEvent};
 use crate::ui::settings::{SettingsView, SettingsViewEvent};
-use crate::ui::sftp_browser::{RestorePaths, TransferKind};
+use crate::ui::sftp_browser::{RestorePaths, SftpBrowser, TransferKind};
 use crate::ui::shortcut_hints;
 use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent, SIDEBAR_WIDTH};
 use crate::ui::sync_service::SyncService;
@@ -898,7 +898,7 @@ impl AppView {
         if let Some(session) = self.tabs.get(idx) {
             let session = session.clone();
             self.focus_front_tab(window, cx);
-            if session.read(cx).pending_conflict.is_some() {
+            if !session.read(cx).pending_conflict.is_empty() {
                 self.open_conflict_dialog(session.clone(), cx);
             }
             // A question asked while another tab was in front.
@@ -1077,6 +1077,9 @@ impl AppView {
 
     fn change_active_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.active_tab = idx;
+        for (ix, session) in self.tabs.iter().enumerate() {
+            session.read(cx).set_in_front(ix == idx, cx);
+        }
         let active_id = self.tabs.get(idx).map(|s| s.read(cx).server_id.clone());
         self.sidebar
             .update(cx, |s, cx| s.set_active_server(active_id, cx));
@@ -1742,15 +1745,12 @@ impl AppView {
     }
 
     fn open_conflict_dialog(&mut self, session: Entity<ServerSession>, cx: &mut Context<Self>) {
-        let local = match session.read(cx).pending_conflict.clone() {
-            Some(p) => p,
-            None => return,
+        let Some(local) = session.read(cx).pending_conflict.front().cloned() else {
+            return;
         };
-        let weak_browser = session.read(cx).browser.as_ref().map(|b| b.downgrade());
         let weak_session = session.downgrade();
         let wh = self.window_handle;
         cx.spawn(async move |_, cx| {
-            let Some(wb) = weak_browser else { return };
             cx.update_window(wh, |_, window, cx| {
                 let filename = local
                     .file_name()
@@ -1758,84 +1758,93 @@ impl AppView {
                     .unwrap_or("file")
                     .to_string();
                 window.open_dialog(cx, move |dialog, _, _| {
-                    let (lc, wb_c, ws_c) = (local.clone(), wb.clone(), weak_session.clone());
-                    let (lr, wb_r, ws_r) = (local.clone(), wb.clone(), weak_session.clone());
-                    let (lo, wb_o, ws_o) = (local.clone(), wb.clone(), weak_session.clone());
-                    dialog_chrome(dialog).w(DIALOG_WIDE).child(
-                        v_flex()
-                            .p(px(12.))
-                            .gap(px(8.))
-                            .child(
-                                DialogHeader::new().child(
-                                    DialogTitle::new()
-                                        .child(format!("{filename} changed on the host")),
-                                ),
-                            )
-                            .child(div().text_size(px(12.5)).child(format!(
-                                "\"{filename}\" changed on the host while you were editing it here.",
-                            )))
-                            .child(
-                                DialogFooter::new().child(
-                                    DialogAction::new().child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("conflict-cancel")
-                                                    .ghost()
-                                                    .child("Cancel")
-                                                    .on_click(move |_, window, cx| {
-                                                        wb_c.update(cx, |b, cx| {
-                                                            b.resolve_conflict_cancel(&lc, cx);
-                                                        })
-                                                        .ok();
-                                                        ws_c.update(cx, |s, _| {
-                                                            s.pending_conflict = None;
-                                                        })
-                                                        .ok();
-                                                        window.close_dialog(cx);
-                                                    }),
-                                            )
-                                            .child(
-                                                Button::new("conflict-reload")
-                                                    .child("Reload from host")
-                                                    .on_click(move |_, window, cx| {
-                                                        wb_r.update(cx, |b, cx| {
-                                                            b.resolve_conflict_reload(
-                                                                lr.clone(),
+                    let (lx, ws_x) = (local.clone(), weak_session.clone());
+                    let (lc, ws_c) = (local.clone(), weak_session.clone());
+                    let (lr, ws_r) = (local.clone(), weak_session.clone());
+                    let (lo, ws_o) = (local.clone(), weak_session.clone());
+                    dialog_chrome(dialog)
+                        .w(DIALOG_WIDE)
+                        // Escape or a click outside: the same as Cancel.
+                        .on_close(move |_, _, cx| {
+                            answer_conflict(&ws_x, &lx, cx, |b, local, cx| {
+                                b.resolve_conflict_cancel(&local, cx)
+                            });
+                        })
+                        .child(
+                            v_flex()
+                                .p(px(12.))
+                                .gap(px(8.))
+                                .child(
+                                    DialogHeader::new().child(
+                                        DialogTitle::new()
+                                            .child(format!("{filename} changed on the host")),
+                                    ),
+                                )
+                                .child(div().text_size(px(12.5)).child(format!(
+                                    "\"{filename}\" changed on the host while you were editing it here.",
+                                )))
+                                .child(
+                                    DialogFooter::new().child(
+                                        DialogAction::new().child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("conflict-cancel")
+                                                        .ghost()
+                                                        .child("Cancel")
+                                                        .on_click(move |_, window, cx| {
+                                                            answer_conflict(
+                                                                &ws_c,
+                                                                &lc,
                                                                 cx,
+                                                                |b, local, cx| {
+                                                                    b.resolve_conflict_cancel(
+                                                                        &local, cx,
+                                                                    )
+                                                                },
                                                             );
-                                                        })
-                                                        .ok();
-                                                        ws_r.update(cx, |s, _| {
-                                                            s.pending_conflict = None;
-                                                        })
-                                                        .ok();
-                                                        window.close_dialog(cx);
-                                                    }),
-                                            )
-                                            .child(
-                                                Button::new("conflict-overwrite")
-                                                    .primary()
-                                                    .child("Overwrite on host")
-                                                    .on_click(move |_, window, cx| {
-                                                        wb_o.update(cx, |b, cx| {
-                                                            b.resolve_conflict_overwrite(
-                                                                lo.clone(),
+                                                            window.close_dialog(cx);
+                                                        }),
+                                                )
+                                                .child(
+                                                    Button::new("conflict-reload")
+                                                        .child("Reload from host")
+                                                        .on_click(move |_, window, cx| {
+                                                            answer_conflict(
+                                                                &ws_r,
+                                                                &lr,
                                                                 cx,
+                                                                |b, local, cx| {
+                                                                    b.resolve_conflict_reload(
+                                                                        local, cx,
+                                                                    )
+                                                                },
                                                             );
-                                                        })
-                                                        .ok();
-                                                        ws_o.update(cx, |s, _| {
-                                                            s.pending_conflict = None;
-                                                        })
-                                                        .ok();
-                                                        window.close_dialog(cx);
-                                                    }),
-                                            ),
+                                                            window.close_dialog(cx);
+                                                        }),
+                                                )
+                                                .child(
+                                                    Button::new("conflict-overwrite")
+                                                        .primary()
+                                                        .child("Overwrite on host")
+                                                        .on_click(move |_, window, cx| {
+                                                            answer_conflict(
+                                                                &ws_o,
+                                                                &lo,
+                                                                cx,
+                                                                |b, local, cx| {
+                                                                    b.resolve_conflict_overwrite(
+                                                                        local, cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                            window.close_dialog(cx);
+                                                        }),
+                                                ),
+                                        ),
                                     ),
                                 ),
-                            ),
-                    )
+                        )
                 });
             })
             .ok();
@@ -2882,6 +2891,26 @@ fn prev_tab_index(active: usize, tab_count: usize) -> Option<usize> {
         return Some(tab_count - 1);
     }
     Some(active - 1)
+}
+
+/// Apply the answer about `local` on the session's browser of now: a reconnect
+/// may have replaced the one there when the dialog opened. A dialog answered
+/// before does nothing.
+fn answer_conflict(
+    session: &WeakEntity<ServerSession>,
+    local: &std::path::Path,
+    cx: &mut App,
+    answer: impl FnOnce(&mut SftpBrowser, PathBuf, &mut Context<SftpBrowser>),
+) {
+    let Some(session) = session.upgrade() else {
+        return;
+    };
+    if !session.update(cx, |session, cx| session.conflict_resolved(local, cx)) {
+        return;
+    }
+    if let Some(browser) = session.read(cx).browser.clone() {
+        browser.update(cx, |browser, cx| answer(browser, local.to_path_buf(), cx));
+    }
 }
 
 #[cfg(test)]

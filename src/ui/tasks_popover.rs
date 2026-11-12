@@ -25,6 +25,9 @@ use crate::ui::sftp_browser::TransferKind;
 use crate::ui::terminal_tabs::{header_button, SESSION_HEADER_HEIGHT};
 
 const POPOVER_W: f32 = 340.0;
+/// A big selection queues thousands of transfers; past this many queued rows
+/// only a count is shown.
+const QUEUED_ROWS_SHOWN: usize = 50;
 
 impl ServerSession {
     pub fn toggle_tasks(&mut self, cx: &mut Context<Self>) {
@@ -150,8 +153,26 @@ impl ServerSession {
         }
 
         let mut body: Vec<AnyElement> = Vec::new();
+        let mut queued_seen = 0;
         for transfer in &self.transfers {
+            if transfer.is_queued {
+                queued_seen += 1;
+                if queued_seen > QUEUED_ROWS_SHOWN {
+                    continue;
+                }
+            }
             body.push(self.render_transfer_row(transfer, cx));
+        }
+        if queued_seen > QUEUED_ROWS_SHOWN {
+            body.push(
+                div()
+                    .px(px(7.))
+                    .py(px(4.))
+                    .text_size(px(11.))
+                    .text_color(theme::text_dim())
+                    .child(format!("+{} queued", queued_seen - QUEUED_ROWS_SHOWN))
+                    .into_any_element(),
+            );
         }
         if !self.transfer_history.is_empty() {
             body.push(self.render_section("EARLIER", true, cx));

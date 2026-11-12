@@ -72,6 +72,12 @@ fn keystroke_to_bytes_on(
     }
 
     if m.control && !m.alt {
+        // gpui may name Ctrl+Shift+/ after the unshifted key; xterm sends Ctrl+? for it.
+        let control_key = if m.shift && control_key == "/" {
+            "?"
+        } else {
+            control_key
+        };
         return ctrl_to_bytes(control_key);
     }
 
@@ -209,7 +215,11 @@ fn special_key_seq(key: &str, m: &Modifiers, is_app_cursor: bool) -> Option<Vec<
     })
 }
 
+/// The xterm control bytes, digits included (Ctrl+2 is NUL, Ctrl+8 is DEL).
 fn ctrl_to_bytes(key: &str) -> Option<Vec<u8>> {
+    if key == "space" {
+        return Some(vec![0x00]);
+    }
     if key.len() != 1 {
         return None;
     }
@@ -217,12 +227,13 @@ fn ctrl_to_bytes(key: &str) -> Option<Vec<u8>> {
     match c {
         'a'..='z' => Some(vec![c as u8 - b'a' + 1]),
         'A'..='Z' => Some(vec![c as u8 - b'A' + 1]),
-        ' ' | '@' => Some(vec![0x00]),
-        '[' => Some(vec![0x1b]),
-        '\\' => Some(vec![0x1c]),
-        ']' => Some(vec![0x1d]),
-        '^' => Some(vec![0x1e]),
-        '_' => Some(vec![0x1f]),
+        ' ' | '@' | '2' => Some(vec![0x00]),
+        '[' | '3' => Some(vec![0x1b]),
+        '\\' | '4' => Some(vec![0x1c]),
+        ']' | '5' => Some(vec![0x1d]),
+        '^' | '6' => Some(vec![0x1e]),
+        '_' | '/' | '-' | '7' => Some(vec![0x1f]),
+        '?' | '8' => Some(vec![0x7f]),
         _ => None,
     }
 }
@@ -250,6 +261,48 @@ mod tests {
             key: key.to_string(),
             key_char: None,
         }
+    }
+
+    #[test]
+    fn ctrl_symbols_and_digits_follow_xterm() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::none()
+        };
+        let cases = [
+            ("space", 0x00),
+            ("2", 0x00),
+            ("3", 0x1b),
+            ("4", 0x1c),
+            ("5", 0x1d),
+            ("6", 0x1e),
+            ("7", 0x1f),
+            ("/", 0x1f),
+            ("-", 0x1f),
+            ("8", 0x7f),
+            ("?", 0x7f),
+        ];
+        for (key, byte) in cases {
+            let ks = with_mods(key, ctrl);
+            assert_eq!(
+                keystroke_to_bytes(&ks, false, false),
+                Some(vec![byte]),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_slash_is_del() {
+        let ks = with_mods(
+            "/",
+            Modifiers {
+                control: true,
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        assert_eq!(keystroke_to_bytes(&ks, false, false), Some(vec![0x7f]));
     }
 
     #[test]

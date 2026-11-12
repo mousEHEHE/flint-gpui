@@ -2,10 +2,12 @@
 //! sidebar offer it.
 
 use gpui::{App, Entity};
+use gpui_component::WindowExt as _;
 use uuid::Uuid;
 
 use crate::ui::sync_service::SyncService;
 use crate::ui::VaultState;
+use crate::vault::{AuthMethod, VaultManager};
 
 /// The sharing entries of a host's menu, each with the vault the host goes
 /// to, or `None` for back to personal.
@@ -27,24 +29,59 @@ pub fn set_shared(
     vault_id: Option<Uuid>,
     cx: &mut App,
 ) {
-    let is_saved = vault_state.update(cx, |vault_state, cx| {
-        let Some(vault) = vault_state.manager_mut() else {
-            return false;
-        };
+    let outcome = vault_state.update(cx, |vault_state, cx| {
+        let vault = vault_state.manager_mut()?;
+        let key_name = vault_id.and_then(|vault_id| key_taken_along(vault, id, vault_id));
+        let (key_before, keys_before) = (login_key(vault, id), key_count(vault));
         let saved = match vault_id {
             Some(vault_id) => vault.share_entry(id, vault_id),
             None => vault.unshare_entry(id),
         };
+        // A host switched to a copy the vault already held gives the team no new key.
+        let is_copy_reused = login_key(vault, id) != key_before && key_count(vault) == keys_before;
+        let key_name = key_name.filter(|_| !is_copy_reused);
         cx.notify();
         saved
             .inspect_err(|e| tracing::error!(?e, "failed to save the vault after sharing a host"))
-            .is_ok()
+            .ok()?;
+        let team = vault.sharing_label(id);
+        Some(key_name.zip(team))
     });
     // Nothing changed, so there is nothing to send.
-    if !is_saved {
+    let Some(shared_key) = outcome else {
         return;
-    }
+    };
     SyncService::global(cx).update(cx, |service, cx| service.sync_now(cx));
+    if let (Some((key_name, team)), Some(window)) = (shared_key, cx.active_window()) {
+        let message = format!(
+            "The key \"{key_name}\" is now shared with {team} too: every member who sees the \
+             host can use it."
+        );
+        // The menu click still holds the window, so wait until it lets go.
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| window.push_notification(message, cx));
+        });
+    }
+}
+
+/// The name of the login key that sharing a host into `vault_id` gives the team as well.
+fn key_taken_along(vault: &VaultManager, id: Uuid, vault_id: Uuid) -> Option<String> {
+    let key_id = login_key(vault, id)?;
+    if vault.vault_of(key_id) == Some(vault_id) {
+        return None;
+    }
+    Some(vault.get_key(key_id).ok()?.name.clone())
+}
+
+fn login_key(vault: &VaultManager, id: Uuid) -> Option<Uuid> {
+    match vault.get_entry(id).ok()?.auth {
+        AuthMethod::PrivateKey { key_id } => Some(key_id),
+        _ => None,
+    }
+}
+
+fn key_count(vault: &VaultManager) -> usize {
+    vault.list_keys().map(|keys| keys.len()).unwrap_or_default()
 }
 
 /// A personal host can go into any team vault. A shared one can come back,

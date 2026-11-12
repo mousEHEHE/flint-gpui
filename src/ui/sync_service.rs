@@ -16,7 +16,7 @@ use crate::account::flow::{
     create_vault_for, log_out_quietly, retry_registered, sign_in_problem, take_in, Created,
     PreVaultError, Round, RoundWork, UnsavedVault,
 };
-use crate::account::team::{self, Roster, TeamError, TeamKeys};
+use crate::account::team::{self, TeamError, TeamKeys};
 use crate::account::{self, AccountError, Api, GitHubStep, OAuthError};
 use crate::preferences::Preferences;
 use crate::ui::VaultState;
@@ -74,9 +74,6 @@ pub struct SyncService {
     rounds_left: u8,
     was_unlocked: bool,
     teams_checked: Option<Instant>,
-    /// When members who left may next be signed out automatically. Without
-    /// it a request that keeps failing would be sent in a tight loop.
-    left_retry: Option<Instant>,
     /// A team action is running, or it is done and the teams are being
     /// fetched again. The pane shows a spinner for the whole stretch, so a
     /// row does not sit there looking alive after its button was pressed.
@@ -263,7 +260,6 @@ impl SyncService {
             rounds_left: 0,
             was_unlocked: false,
             teams_checked: None,
-            left_retry: None,
             is_team_busy: false,
             is_settling: false,
             team_error: None,
@@ -427,7 +423,6 @@ impl SyncService {
                 if was_team_check && self.is_settling {
                     self.settle(cx);
                 }
-                self.remove_those_who_left(cx);
                 // A round that was already running when a team action ended
                 // did not look at the teams. Do that now, even with no rounds
                 // left. Work left behind gets only the rounds that are left:
@@ -864,37 +859,6 @@ impl SyncService {
         cx.notify();
     }
 
-    /// A member who left is still in the roster, and still holds the vault
-    /// keys. The server takes no other change to the team until an admin's
-    /// device signs them out and changes the keys, so do it without asking.
-    fn remove_those_who_left(&mut self, cx: &mut Context<Self>) {
-        let Some(context) = self
-            .vault_state
-            .read(cx)
-            .manager()
-            .and_then(|v| v.team_context())
-        else {
-            return;
-        };
-        let owed = context.teams.iter().find(|(_, team)| {
-            let is_manager =
-                Roster::parse(&team.roster).is_some_and(|r| r.is_manager(context.user_id));
-            is_manager && !team.left.is_empty()
-        });
-        if self.left_retry.is_some_and(|at| Instant::now() < at) {
-            return;
-        }
-        if let Some((team_id, team)) = owed {
-            self.left_retry = Some(Instant::now() + RETRY_DELAY);
-            tracing::info!(team = %team_id, "signing out members who left the team");
-            let action = TeamAction::Remove {
-                team_id: *team_id,
-                user_ids: team.left.clone(),
-            };
-            self.team_action(action, None, cx);
-        }
-    }
-
     /// Forget the account on this device. Records stay in the vault and on
     /// the server.
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
@@ -938,7 +902,6 @@ impl SyncService {
         self.retry_after = None;
         self.rounds_left = 0;
         self.teams_checked = None;
-        self.left_retry = None;
         self.is_team_busy = false;
         self.is_settling = false;
         self.team_error = None;

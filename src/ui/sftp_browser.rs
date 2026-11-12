@@ -38,8 +38,11 @@ use crate::ui::transfer_conflict::{
 };
 
 const MAX_VISITED: usize = 50;
+/// Past this many cached folders, only the visited ones, their children and
+/// the folders above them stay.
+const DIR_CACHE_MAX: usize = 300;
 /// Per-file ceiling on the copies made speculatively when a directory is
-/// listed. Bigger files still stage on hover, click or a first drag.
+/// listed or a file is hovered. Bigger files still stage on click or a first drag.
 const DRAGOUT_PREFETCH_MAX_FILE: u64 = 1024 * 1024;
 /// Total bytes one directory listing may spend warming drag-out copies. This is
 /// bandwidth spent on files that may never be dragged anywhere, so it is a
@@ -148,7 +151,7 @@ pub struct RestorePaths {
 
 /// Which half of the browser a server pane sits in. The right one is always
 /// the session's own server.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     Left,
     Right,
@@ -266,6 +269,9 @@ struct LiveTransfer {
     kind: TransferKind,
     from: Endpoint,
     to: Endpoint,
+    /// The folder at `to` it writes into, and the name it writes.
+    target_dir: String,
+    name: String,
     cancel: CancelFlag,
 }
 
@@ -317,6 +323,8 @@ pub struct SftpBrowser {
     /// The single-file staging fetch in flight, if any. Holding it here means a
     /// new one replaces the old rather than racing it.
     dragout_task: Option<Task<()>>,
+    /// The remote path `dragout_task` fetches, and the flag that stops it.
+    dragout_staging: Option<(String, CancelFlag)>,
     /// The whole-directory staging fetch in flight, kept apart from
     /// `dragout_task` so the two never cancel each other.
     dragout_batch_task: Option<Task<()>>,
@@ -431,6 +439,7 @@ impl RemoteSide {
 
     fn cache_insert(&mut self, path: &str, entries: Vec<FileEntry>) {
         self.dir_cache.insert(PathBuf::from(path), entries);
+        prune_dir_cache(&mut self.dir_cache, &self.visited_paths);
     }
 
     /// Re-list the pane's current folder (used after file operations).
@@ -623,6 +632,7 @@ impl SftpBrowser {
             file_associations,
             local_load_task: None,
             dragout_task: None,
+            dragout_staging: None,
             dragout_batch_task: None,
             // Seed with the start folders so the initial listings don't re-announce
             // them; only genuine navigation away emits PathsChanged.
@@ -1002,8 +1012,9 @@ impl SftpBrowser {
                     return;
                 };
                 remote.clear_in_flight(&path);
-                remote.cache_insert(&path, entries.clone());
+                // Visited first, so a full cache keeps this folder.
                 remote.mark_visited(&path);
+                remote.cache_insert(&path, entries.clone());
                 remote.show_listing(&path, &entries, cx);
                 remote.trigger_prefetch_for(&path, &entries);
                 if side == Side::Right {
@@ -1182,10 +1193,11 @@ impl SftpBrowser {
             }
             FilePaneEvent::TransferRequested { paths } => {
                 // Local pane: upload into the remote pane's current folder.
-                for path in paths {
-                    let source = Source::Local(PathBuf::from(path));
-                    self.request_transfer(source, Endpoint::Server(Side::Right), cx);
-                }
+                let sources = paths
+                    .iter()
+                    .map(|path| Source::Local(PathBuf::from(path)))
+                    .collect();
+                self.request_transfers(sources, Endpoint::Server(Side::Right), cx);
             }
             // Creating and renaming take milliseconds on a local disk, so they
             // run on the GPUI thread (as the cache-dir creation in
@@ -1367,9 +1379,11 @@ impl SftpBrowser {
                     cx.emit(BrowserEvent::StatusChanged(LEFT_NOT_CONNECTED.to_string()));
                     return;
                 };
-                for path in paths {
-                    self.request_transfer(Source::Server(side, path.clone()), to, cx);
-                }
+                let sources = paths
+                    .iter()
+                    .map(|path| Source::Server(side, path.clone()))
+                    .collect();
+                self.request_transfers(sources, to, cx);
             }
             FilePaneEvent::SourcePickerRequested if !is_session => {
                 cx.emit(BrowserEvent::LeftSourcePickerRequested);
@@ -1456,7 +1470,18 @@ impl SftpBrowser {
             }
             return;
         }
-        if side == Side::Right {
+        if side != Side::Right {
+            return;
+        }
+        // A hover is a weak sign, so it only fetches small files. The rest
+        // stage on click or on the drag itself.
+        let is_small = self
+            .right
+            .pane
+            .read(cx)
+            .entry_at(&path)
+            .is_some_and(|e| e.size <= DRAGOUT_PREFETCH_MAX_FILE);
+        if is_small {
             self.warm_dragout(path, cx);
         }
     }
@@ -1582,8 +1607,10 @@ impl SftpBrowser {
     /// Allocate a task id + cancel flag for a transfer and announce it, so the
     /// session lists it in the tasks popover with a progress ring and a stop
     /// button.
+    #[allow(clippy::too_many_arguments)]
     fn begin_transfer(
         &mut self,
+        target_dir: &str,
         name: &str,
         kind: TransferKind,
         from: Endpoint,
@@ -1597,6 +1624,8 @@ impl SftpBrowser {
             kind,
             from,
             to,
+            target_dir: target_dir.to_string(),
+            name: name.to_string(),
             cancel: cancel.clone(),
         };
         let uses_session = transfer.uses(Side::Right);
@@ -1622,25 +1651,25 @@ impl SftpBrowser {
         if self.endpoint_pane(from).map(Entity::entity_id) != Some(entry.source) {
             return;
         }
-        for item in entry.items.iter() {
-            self.request_transfer(Source::at(from, &item.path), to, cx);
-        }
+        let sources = entry
+            .items
+            .iter()
+            .map(|item| Source::at(from, &item.path))
+            .collect();
+        self.request_transfers(sources, to, cx);
     }
 
-    /// The folder the pane of `to` shows, and what is known about the item
-    /// called `name` in it, if there is one. The error says why nothing can
-    /// be sent there. On a server the check reads the listing the pane
-    /// already has, so a file created there since then is not noticed.
-    fn target_facts(
+    /// The folder the pane of `to` shows, and the items its listing has there
+    /// by name. The error says why nothing can be sent there. A local folder
+    /// is checked on disk item by item instead, so its map stays empty. On a
+    /// server a file created since the listing is not noticed.
+    fn target_listing(
         &self,
         to: Endpoint,
-        name: &str,
         cx: &App,
-    ) -> Result<(String, Option<FileFacts>), String> {
+    ) -> Result<(String, HashMap<String, FileFacts>), String> {
         let Endpoint::Server(side) = to else {
-            let dir = self.local_pane.read(cx).path.clone();
-            let existing = local_facts(&PathBuf::from(&dir).join(name));
-            return Ok((dir, existing));
+            return Ok((self.local_pane.read(cx).path.clone(), HashMap::new()));
         };
         let Some(remote) = self.side(side) else {
             return Err(LEFT_NOT_CONNECTED.to_string());
@@ -1651,12 +1680,12 @@ impl SftpBrowser {
         if !pane.is_listed() {
             return Err(not_listed_message(remote.connection.display_name()));
         }
-        let existing = pane
+        let listed = pane
             .entries
             .iter()
-            .find(|e| e.name == name)
-            .map(entry_facts);
-        Ok((pane.path.clone(), existing))
+            .map(|e| (e.name.clone(), entry_facts(e)))
+            .collect();
+        Ok((pane.path.clone(), listed))
     }
 
     fn source_facts(&self, source: &Source, cx: &App) -> FileFacts {
@@ -1674,51 +1703,68 @@ impl SftpBrowser {
         })
     }
 
-    /// Send `source` into the folder the pane of `to` shows, or ask first when
-    /// the name is taken there.
-    fn request_transfer(&mut self, source: Source, to: Endpoint, cx: &mut Context<Self>) {
+    /// Send each source into the folder the pane of `to` shows, or ask first
+    /// when its name is taken there. All sources come from one place.
+    fn request_transfers(&mut self, sources: Vec<Source>, to: Endpoint, cx: &mut Context<Self>) {
+        let Some(first) = sources.first() else {
+            return;
+        };
         // This browser is still on screen, and takes keys and drops, while
         // the session connects again.
-        if self.is_session_down && is_end_of_transfer(Side::Right, source.endpoint(), to) {
+        if self.is_session_down && is_end_of_transfer(Side::Right, first.endpoint(), to) {
             cx.emit(BrowserEvent::StatusChanged(
                 SESSION_NOT_CONNECTED.to_string(),
             ));
             return;
         }
-        let Some(name) = source.name() else { return };
-        // A server may name a file `..\x` or `C:\x`. Joined to the target
-        // folder on this computer, such a name would leave that folder.
-        if to == Endpoint::Local && !is_plain_file_name(&name) {
-            tracing::warn!(
-                name,
-                "download refused, the name is not a plain file name here"
-            );
-            cx.emit(BrowserEvent::Error(unsafe_name_message(&name)));
-            return;
-        }
-        let (target_dir, existing) = match self.target_facts(to, &name, cx) {
-            Ok(facts) => facts,
+        let (target_dir, listed) = match self.target_listing(to, cx) {
+            Ok(listing) => listing,
             Err(refusal) => {
                 cx.emit(BrowserEvent::StatusChanged(refusal));
                 return;
             }
         };
-        let Some(existing) = existing else {
-            self.start_transfer(source, to, &target_dir, &name, cx);
-            return;
-        };
-        let conflict = TransferConflict {
-            id: 0,
-            name,
-            from: source.endpoint(),
-            to,
-            target_label: self.endpoint_label(to),
-            source_path: source.path(),
-            target_dir,
-            source: self.source_facts(&source, cx),
-            existing,
-        };
-        self.queue_transfer_conflict(conflict, cx);
+        let mut running = running_target_names(self.transfers.values(), to, &target_dir);
+        for source in sources {
+            let Some(name) = source.name() else { continue };
+            // A server may name a file `..\x` or `C:\x`. Joined to the target
+            // folder on this computer, such a name would leave that folder.
+            if to == Endpoint::Local && !crate::ssh::is_single_local_component(&name) {
+                tracing::warn!(
+                    name,
+                    "download refused, the name is not a plain file name here"
+                );
+                cx.emit(BrowserEvent::Error(unsafe_name_message(&name)));
+                continue;
+            }
+            let existing = match to {
+                Endpoint::Local => local_facts(&PathBuf::from(&target_dir).join(&name)),
+                Endpoint::Server(_) => listed.get(&name).copied(),
+            };
+            // A transfer still on its way there counts as an item of that name.
+            let existing = existing.or_else(|| {
+                running
+                    .contains(&name)
+                    .then(|| self.source_facts(&source, cx))
+            });
+            let Some(existing) = existing else {
+                self.start_transfer(source, to, &target_dir, &name, cx);
+                running.insert(name);
+                continue;
+            };
+            let conflict = TransferConflict {
+                id: 0,
+                name,
+                from: source.endpoint(),
+                to,
+                target_label: self.endpoint_label(to),
+                source_path: source.path(),
+                target_dir: target_dir.clone(),
+                source: self.source_facts(&source, cx),
+                existing,
+            };
+            self.queue_transfer_conflict(conflict, cx);
+        }
     }
 
     /// The servers a task has to name. `None` when the session's own server
@@ -1758,8 +1804,15 @@ impl SftpBrowser {
                 let remote = format!("{}/{}", target_dir.trim_end_matches('/'), name);
                 tracing::info!(?local, remote, ?side, "queuing upload");
                 let route = self.transfer_route(from, to);
-                let (id, cancel) =
-                    self.begin_transfer(name, TransferKind::Upload, from, to, route, cx);
+                let (id, cancel) = self.begin_transfer(
+                    target_dir,
+                    name,
+                    TransferKind::Upload,
+                    from,
+                    to,
+                    route,
+                    cx,
+                );
                 sftp.upload(local, remote, id, cancel);
             }
             (Source::Server(side, remote), Endpoint::Local) => {
@@ -1775,8 +1828,15 @@ impl SftpBrowser {
                 let local = PathBuf::from(target_dir).join(name);
                 tracing::info!(remote, ?local, ?side, "queuing download");
                 let route = self.transfer_route(from, to);
-                let (id, cancel) =
-                    self.begin_transfer(name, TransferKind::Download, from, to, route, cx);
+                let (id, cancel) = self.begin_transfer(
+                    target_dir,
+                    name,
+                    TransferKind::Download,
+                    from,
+                    to,
+                    route,
+                    cx,
+                );
                 sftp.download(remote, local, id, cancel);
             }
             (Source::Server(from_side, source_path), Endpoint::Server(to_side)) => {
@@ -1788,7 +1848,7 @@ impl SftpBrowser {
                 let route = self.transfer_route(from, to);
                 tracing::info!(source_path, remote, ?route, "queuing copy between servers");
                 let (id, cancel) =
-                    self.begin_transfer(name, TransferKind::Copy, from, to, route, cx);
+                    self.begin_transfer(target_dir, name, TransferKind::Copy, from, to, route, cx);
                 // The target's worker pulls the files and reports the progress.
                 target.relay(source, source_path, remote, id, cancel);
             }
@@ -1843,8 +1903,9 @@ impl SftpBrowser {
             1
         };
         let resolved: Vec<TransferConflict> = self.transfer_conflicts.drain(..count).collect();
+        let mut taken = TakenNames::new();
         for conflict in resolved {
-            self.apply_conflict_choice(conflict, choice, cx);
+            self.apply_conflict_choice(conflict, choice, &mut taken, cx);
         }
         self.is_conflict_choice_for_all = false;
         if !self.transfer_conflicts.is_empty() {
@@ -1856,11 +1917,12 @@ impl SftpBrowser {
         &mut self,
         conflict: TransferConflict,
         choice: ConflictChoice,
+        taken: &mut TakenNames,
         cx: &mut Context<Self>,
     ) {
         let name = match choice {
             ConflictChoice::Overwrite if conflict.can_overwrite() => conflict.name.clone(),
-            ConflictChoice::KeepBoth => self.free_target_name(&conflict, cx),
+            ConflictChoice::KeepBoth => self.free_target_name(&conflict, taken, cx),
             // Also an "overwrite all" that reaches a file-versus-folder pair.
             ConflictChoice::Overwrite | ConflictChoice::Skip => {
                 tracing::info!(name = %conflict.name, "transfer skipped, name is taken");
@@ -1875,19 +1937,42 @@ impl SftpBrowser {
         self.start_transfer(source, conflict.to, &conflict.target_dir, &name, cx);
     }
 
-    /// A name for "keep both" that nothing in the target folder uses.
-    fn free_target_name(&self, conflict: &TransferConflict, cx: &App) -> String {
+    /// A name for "keep both" that nothing in the target folder uses. The
+    /// names taken per folder are built once per answer, not once per conflict.
+    fn free_target_name(
+        &self,
+        conflict: &TransferConflict,
+        taken: &mut TakenNames,
+        cx: &App,
+    ) -> String {
         let is_folder = conflict.source.is_folder;
+        let key = (conflict.to, PathBuf::from(&conflict.target_dir));
+        if !taken.contains_key(&key) {
+            let Some(names) = self.target_names(conflict, cx) else {
+                // The server is gone; the transfer then says so and nothing is sent.
+                return conflict.name.clone();
+            };
+            taken.insert(key.clone(), names);
+        }
+        let names = taken.entry(key).or_default();
+        let dir = PathBuf::from(&conflict.target_dir);
+        let is_local = conflict.to == Endpoint::Local;
+        let name = free_name(&conflict.name, is_folder, |name| {
+            names.contains(name) || (is_local && dir.join(name).symlink_metadata().is_ok())
+        });
+        names.insert(name.clone());
+        name
+    }
+
+    /// The names running transfers write into the conflict's folder, plus the
+    /// folder's listing when it is on a server. None when that server is gone.
+    fn target_names(&self, conflict: &TransferConflict, cx: &App) -> Option<HashSet<String>> {
+        let mut names =
+            running_target_names(self.transfers.values(), conflict.to, &conflict.target_dir);
         let Endpoint::Server(side) = conflict.to else {
-            let dir = PathBuf::from(&conflict.target_dir);
-            return free_name(&conflict.name, is_folder, |name| {
-                dir.join(name).symlink_metadata().is_ok()
-            });
+            return Some(names);
         };
-        // The server may be gone; the transfer then says so and nothing is sent.
-        let Some(target) = self.side(side) else {
-            return conflict.name.clone();
-        };
+        let target = self.side(side)?;
         // The pane may have moved on since the question was asked.
         let pane = target.pane.read(cx);
         let entries: &[FileEntry] = if is_same_dir(&pane.path, &conflict.target_dir) {
@@ -1898,9 +1983,8 @@ impl SftpBrowser {
                 .map(Vec::as_slice)
                 .unwrap_or_default()
         };
-        free_name(&conflict.name, is_folder, |name| {
-            entries.iter().any(|e| e.name == name)
-        })
+        names.extend(entries.iter().map(|e| e.name.clone()));
+        Some(names)
     }
 
     /// Make sure a local copy of `remote` exists for an outbound drag.
@@ -1911,6 +1995,14 @@ impl SftpBrowser {
     fn warm_dragout(&mut self, remote: String, cx: &mut Context<Self>) {
         let pane = self.right.pane.read(cx);
         if pane.has_fresh_staged(&remote) {
+            return;
+        }
+        let is_staging = self
+            .dragout_task
+            .as_ref()
+            .is_some_and(|task| !task.is_ready())
+            && self.dragout_staging.as_ref().map(|(path, _)| path) == Some(&remote);
+        if is_staging {
             return;
         }
         let Some(entry) = pane.entry_at(&remote) else {
@@ -2029,7 +2121,12 @@ impl SftpBrowser {
         let Some(staged) = self.staging_target(&remote) else {
             return;
         };
-        let part = staging_part_path(&staged);
+        // Its own part name: a canceled copy of the same file removes only its own.
+        let attempt = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
+        let part = staged.with_file_name(format!(
+            "{}.flint-part-{attempt}",
+            staged.file_name().unwrap_or_default().to_string_lossy()
+        ));
         let sftp = self
             .right
             .prefetch
@@ -2039,10 +2136,20 @@ impl SftpBrowser {
         let started = std::time::Instant::now();
         tracing::debug!(target: "flint::dragout", remote, size, "staging for drag-out");
 
+        let cancel = CancelFlag::default();
+        if let Some((_, old)) = self
+            .dragout_staging
+            .replace((remote.clone(), cancel.clone()))
+        {
+            old.store(true, Ordering::Relaxed);
+        }
         self.dragout_task = Some(cx.spawn(async move |_, cx| {
-            if let Err(e) = sftp.stage_file(remote.clone(), part.clone(), size).await {
-                tracing::warn!(target: "flint::dragout", remote, "staging failed: {e}");
-                let _ = std::fs::remove_file(&part);
+            // The worker removes the part file of a copy that failed or was canceled.
+            if let Err(e) = sftp
+                .stage_file(remote.clone(), part.clone(), size, cancel)
+                .await
+            {
+                tracing::debug!(target: "flint::dragout", remote, "staging stopped: {e}");
                 return;
             }
             if let Err(e) = std::fs::rename(&part, &staged) {
@@ -2071,9 +2178,19 @@ impl SftpBrowser {
 
     /// Upload files dropped from the OS to the server that side shows.
     fn upload_paths(&mut self, side: Side, paths: &[PathBuf], cx: &mut Context<Self>) {
-        for path in paths {
-            self.request_transfer(Source::Local(path.clone()), Endpoint::Server(side), cx);
-        }
+        let sources = paths
+            .iter()
+            .map(|path| Source::Local(path.clone()))
+            .collect();
+        self.request_transfers(sources, Endpoint::Server(side), cx);
+    }
+
+    fn is_too_large_to_open(&self, remote: &str, cx: &App) -> bool {
+        self.right
+            .pane
+            .read(cx)
+            .entry_at(remote)
+            .is_some_and(|e| e.size > crate::ui::file_pane::DRAGOUT_MAX_BYTES)
     }
 
     fn open_remote_file(&mut self, remote: String, cx: &mut Context<Self>) {
@@ -2089,6 +2206,11 @@ impl SftpBrowser {
                 return;
             }
         };
+
+        if self.is_too_large_to_open(&remote, cx) {
+            cx.emit(BrowserEvent::StatusChanged(TOO_LARGE_TO_OPEN.to_string()));
+            return;
+        }
 
         // Creating the parent dirs takes milliseconds, so it runs on the GPUI thread.
         if let Some(parent) = local.parent() {
@@ -2177,10 +2299,12 @@ impl SftpBrowser {
                                     browser.start_watch_session(remote, local.clone(), mtime, cx);
                                     cx.emit(BrowserEvent::RequestPickerForFile { extension: key, local });
                                 } else {
+                                    browser.discard_untracked_download(&local);
                                     cx.emit(BrowserEvent::Error(NO_APP_FOR_FILE.to_string()));
                                 }
                             }
                             Err(e) => {
+                                browser.discard_untracked_download(&local);
                                 cx.emit(BrowserEvent::Error(format!("Could not open {filename}: {e}")));
                             }
                         }
@@ -2207,6 +2331,11 @@ impl SftpBrowser {
                 return;
             }
         };
+
+        if self.is_too_large_to_open(&remote, cx) {
+            cx.emit(BrowserEvent::StatusChanged(TOO_LARGE_TO_OPEN.to_string()));
+            return;
+        }
 
         if let Some(parent) = local.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -2273,6 +2402,15 @@ impl SftpBrowser {
         .detach();
     }
 
+    /// Remove a fresh download nothing tracks, or a later open would serve it stale.
+    fn discard_untracked_download(&self, local: &std::path::Path) {
+        if std::fs::remove_file(local).is_ok() {
+            if let Some(root) = flint_cache_root("sftp", &self.right.connection.id) {
+                remove_empty_parents(local, &root);
+            }
+        }
+    }
+
     fn start_watch_session(
         &mut self,
         remote: String,
@@ -2313,12 +2451,23 @@ impl SftpBrowser {
         match session.sync_state {
             // A reload that runs longer than the watcher's quiet period: the
             // change is the download writing the file.
-            SyncState::Conflict | SyncState::Downloading => return,
+            SyncState::Downloading => return,
+            // Asked again: the dialog may have been lost to a second conflict.
+            SyncState::Conflict => {
+                cx.emit(BrowserEvent::ConflictDetected { local });
+                return;
+            }
             SyncState::Uploading => {
                 session.pending_resync = true;
                 return;
             }
             _ => {}
+        }
+        // A reload from the host leaves the file as it was last synced.
+        // Read before the upload: a save while it runs must count as unsaved.
+        let uploaded_mtime = local_mtime(&local);
+        if !has_unsaved_changes(uploaded_mtime, session.last_synced_local_mtime) {
+            return;
         }
 
         let remote = session.remote.clone();
@@ -2368,13 +2517,12 @@ impl SftpBrowser {
                 return;
             }
 
-            // TODO: stream the upload instead of buffering the whole file.
             match sftp.upload_file(local.clone(), remote.clone()).await {
                 Ok(()) => {
                     tracing::info!(target: "flint::file_edit", remote, "upload complete");
                     let new_mtime = sftp.stat_file(remote).await.ok().flatten();
                     this.update(cx, |browser, cx| {
-                        let is_pending = browser.mark_uploaded(&local, new_mtime);
+                        let is_pending = browser.mark_uploaded(&local, new_mtime, uploaded_mtime);
                         browser.refresh_sync_states(cx);
                         if is_pending {
                             browser.on_file_changed(local, cx);
@@ -2406,13 +2554,14 @@ impl SftpBrowser {
         let remote = session.remote.clone();
         session.sync_state = SyncState::Uploading;
         self.refresh_sync_states(cx);
+        let uploaded_mtime = local_mtime(&local);
         let sftp = self.right.primary.clone();
         cx.spawn(async move |this, cx| {
             match sftp.upload_file(local.clone(), remote.clone()).await {
                 Ok(()) => {
                     let new_mtime = sftp.stat_file(remote).await.ok().flatten();
                     this.update(cx, |browser, cx| {
-                        let is_pending = browser.mark_uploaded(&local, new_mtime);
+                        let is_pending = browser.mark_uploaded(&local, new_mtime, uploaded_mtime);
                         browser.refresh_sync_states(cx);
                         cx.emit(BrowserEvent::StatusChanged(
                             "Uploaded your version".to_string(),
@@ -2511,16 +2660,20 @@ impl SftpBrowser {
     }
 
     /// An upload of `local` ended well: record what is on the server now.
+    /// `local_mtime` is the file's mtime read before the upload started.
     /// Returns whether the file was saved again while the upload ran, which
     /// the caller answers with another upload.
-    fn mark_uploaded(&mut self, local: &std::path::Path, remote_mtime: Option<u32>) -> bool {
+    fn mark_uploaded(
+        &mut self,
+        local: &std::path::Path,
+        remote_mtime: Option<u32>,
+        local_mtime: Option<std::time::SystemTime>,
+    ) -> bool {
         let Some(session) = self.open_files.get_mut(local) else {
             return false;
         };
         session.original_remote_mtime = remote_mtime;
-        session.last_synced_local_mtime = std::fs::metadata(local)
-            .and_then(|meta| meta.modified())
-            .ok();
+        session.last_synced_local_mtime = local_mtime;
         session.sync_state = SyncState::Synced {
             at: std::time::SystemTime::now(),
         };
@@ -2536,33 +2689,62 @@ impl SftpBrowser {
         std::mem::take(&mut session.pending_resync)
     }
 
+    /// Give up the files open for editing to the browser that replaces this one.
+    pub fn take_open_files(&mut self) -> HashMap<PathBuf, FileEditSession> {
+        std::mem::take(&mut self.open_files)
+    }
+
+    /// Watch the files the replaced browser had open, and upload what was
+    /// saved while the connection was down.
+    pub fn adopt_open_files(
+        &mut self,
+        files: HashMap<PathBuf, FileEditSession>,
+        cx: &mut Context<Self>,
+    ) {
+        for (local, old) in files {
+            // A file reopened from the cache was never synced, so None alone is no edit.
+            let is_unsent = matches!(old.sync_state, SyncState::Error | SyncState::Uploading)
+                || old.pending_resync
+                || (old.last_synced_local_mtime.is_some()
+                    && has_unsaved_changes(local_mtime(&local), old.last_synced_local_mtime));
+            match FileEditSession::new(old.remote, local.clone(), old.original_remote_mtime, cx) {
+                Ok(mut session) => {
+                    session.last_synced_local_mtime = old.last_synced_local_mtime;
+                    // An upload or reload in flight ended with the old connection.
+                    if matches!(old.sync_state, SyncState::Conflict) {
+                        session.sync_state = SyncState::Conflict;
+                    }
+                    self.open_files.insert(local.clone(), session);
+                    if is_unsent {
+                        self.on_file_changed(local, cx);
+                    }
+                }
+                // The file stays in the cache: only tracked files are ever removed.
+                Err(e) => {
+                    tracing::warn!(target: "flint::file_edit", ?e, local = %local.display(), "failed to watch file again after reconnect");
+                }
+            }
+        }
+        self.refresh_sync_states(cx);
+    }
+
     pub fn cleanup_on_disconnect(&mut self) -> PreservedFiles {
         // Without a cache folder nothing was ever written, see `flint_cache_path`.
         let cache_root = flint_cache_root("sftp", &self.right.connection.id);
 
         let mut preserved_count = 0usize;
 
+        // Only files known to be synced go. The cache may hold edits this
+        // browser does not track, such as those kept from an earlier session.
         for (local, session) in std::mem::take(&mut self.open_files) {
-            let is_synced = match (
-                session.last_synced_local_mtime,
-                std::fs::metadata(&local).and_then(|m| m.modified()),
-            ) {
-                (Some(synced), Ok(current)) => synced == current,
-                _ => false,
-            };
-
-            if is_synced {
-                let _ = std::fs::remove_file(&local);
-            } else {
+            if has_unsaved_changes(local_mtime(&local), session.last_synced_local_mtime) {
                 preserved_count += 1;
+            } else if std::fs::remove_file(&local).is_ok() {
+                if let Some(root) = &cache_root {
+                    remove_empty_parents(&local, root);
+                }
             }
             // The session drops here, and its watcher and bridge task with it.
-        }
-
-        if preserved_count == 0 {
-            if let Some(root) = &cache_root {
-                let _ = std::fs::remove_dir_all(root);
-            }
         }
 
         // Staged drag-out copies are throwaway, so they go regardless.
@@ -2898,18 +3080,8 @@ async fn read_local_head(path: String, limit: usize) -> anyhow::Result<FileHead>
 const LEFT_NOT_CONNECTED: &str = "The left pane is not connected.";
 const SESSION_NOT_CONNECTED: &str = "This session is not connected.";
 const NO_APP_FOR_FILE: &str = "No app is set for this file type";
-
-/// True when `name` is one plain file name on this computer: no separator,
-/// no drive, no `..`. A server may send any bytes as a name, and what is one
-/// name there can be a whole path here (`..\x` on Windows).
-fn is_plain_file_name(name: &str) -> bool {
-    let mut components = std::path::Path::new(name).components();
-    let is_plain = matches!(
-        components.next(),
-        Some(std::path::Component::Normal(part)) if part == std::ffi::OsStr::new(name)
-    );
-    is_plain && components.next().is_none()
-}
+/// Opening a file downloads it with no task row and no way to stop it.
+const TOO_LARGE_TO_OPEN: &str = "Too large to open here. Download it instead.";
 
 fn unsafe_name_message(name: &str) -> String {
     format!("Cannot download {name}: this name is not a valid file name on this computer.")
@@ -3095,6 +3267,60 @@ fn is_same_dir(a: &str, b: &str) -> bool {
     std::path::Path::new(a) == std::path::Path::new(b)
 }
 
+fn local_mtime(local: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(local)
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+/// True unless a file with mtime `current` is unchanged since it was last
+/// synced with the host. A file that cannot be read counts as changed.
+fn has_unsaved_changes(
+    current: Option<std::time::SystemTime>,
+    last_synced: Option<std::time::SystemTime>,
+) -> bool {
+    current.is_none() || current != last_synced
+}
+
+/// Remove the folders between `file` and `root` that are now empty, `root` too.
+fn remove_empty_parents(file: &std::path::Path, root: &std::path::Path) {
+    for dir in file
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+    {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
+}
+
+fn prune_dir_cache(cache: &mut HashMap<PathBuf, Vec<FileEntry>>, visited: &VecDeque<PathBuf>) {
+    if cache.len() <= DIR_CACHE_MAX {
+        return;
+    }
+    let kept: HashSet<&std::path::Path> = visited.iter().map(PathBuf::as_path).collect();
+    cache.retain(|path, _| {
+        path.parent().is_some_and(|parent| kept.contains(parent))
+            || visited.iter().any(|dir| dir.starts_with(path))
+    });
+}
+
+/// Names already used per target folder while one conflict answer is applied.
+type TakenNames = HashMap<(Endpoint, PathBuf), HashSet<String>>;
+
+/// The names that transfers still running write into folder `dir` at `to`.
+fn running_target_names<'a>(
+    transfers: impl Iterator<Item = &'a LiveTransfer>,
+    to: Endpoint,
+    dir: &str,
+) -> HashSet<String> {
+    transfers
+        .filter(|t| t.to == to && is_same_dir(&t.target_dir, dir))
+        .map(|t| t.name.clone())
+        .collect()
+}
+
 /// Where a failed listing is reported.
 #[derive(Debug, PartialEq)]
 enum ListFailureReport {
@@ -3261,8 +3487,74 @@ mod tests {
             kind: TransferKind::Upload,
             from,
             to,
+            target_dir: "/srv".into(),
+            name: "a.txt".into(),
             cancel: CancelFlag::default(),
         }
+    }
+
+    #[test]
+    fn keep_both_skips_names_of_running_transfers() {
+        let right = Endpoint::Server(Side::Right);
+        let mut first = live_transfer(Endpoint::Local, right);
+        first.name = "config (1).yml".into();
+        let mut elsewhere = live_transfer(Endpoint::Local, right);
+        elsewhere.target_dir = "/tmp".into();
+        elsewhere.name = "config (2).yml".into();
+        let running = running_target_names([first, elsewhere].iter(), right, "/srv/");
+        assert_eq!(running, HashSet::from(["config (1).yml".to_string()]));
+        let name = free_name("config.yml", false, |name| running.contains(name));
+        assert_eq!(name, "config (2).yml");
+    }
+
+    #[test]
+    fn a_full_dir_cache_keeps_visited_folders_their_children_and_parents() {
+        let mut cache: HashMap<PathBuf, Vec<FileEntry>> = (0..DIR_CACHE_MAX)
+            .map(|i| (PathBuf::from(format!("/old/{i}")), Vec::new()))
+            .collect();
+        let visited = VecDeque::from([PathBuf::from("/srv/app")]);
+        prune_dir_cache(&mut cache, &visited);
+        assert_eq!(cache.len(), DIR_CACHE_MAX, "under the bound nothing goes");
+
+        for path in ["/srv/app", "/srv/app/logs", "/srv", "/"] {
+            cache.insert(PathBuf::from(path), Vec::new());
+        }
+        prune_dir_cache(&mut cache, &visited);
+        let mut kept: Vec<_> = cache
+            .keys()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["/", "/srv", "/srv/app", "/srv/app/logs"]);
+    }
+
+    #[test]
+    fn a_file_counts_as_unsaved_unless_its_mtime_is_the_synced_one() {
+        let synced = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let later = synced + Duration::from_secs(1);
+        assert!(!has_unsaved_changes(Some(synced), Some(synced)));
+        assert!(has_unsaved_changes(Some(later), Some(synced)));
+        assert!(has_unsaved_changes(Some(synced), None));
+        assert!(has_unsaved_changes(None, Some(synced)));
+    }
+
+    #[test]
+    fn removing_a_cached_file_keeps_folders_that_hold_other_files() {
+        let root = tempfile::tempdir().unwrap();
+        let kept = root.path().join("srv/app/kept.txt");
+        let gone = root.path().join("srv/app/sub/gone.txt");
+        std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "edit").unwrap();
+        std::fs::write(&gone, "").unwrap();
+
+        std::fs::remove_file(&gone).unwrap();
+        remove_empty_parents(&gone, root.path());
+        assert!(!root.path().join("srv/app/sub").exists());
+        assert!(kept.exists());
+
+        std::fs::remove_file(&kept).unwrap();
+        remove_empty_parents(&kept, root.path());
+        assert!(!root.path().exists());
     }
 
     #[test]
@@ -3445,20 +3737,6 @@ mod tests {
         assert!(Source::at(Endpoint::Server(Side::Right), "/srv/")
             .name()
             .is_none());
-    }
-
-    #[test]
-    fn a_name_that_is_a_path_here_is_not_a_plain_file_name() {
-        for name in ["a.txt", ".bashrc", "two words", "a..b"] {
-            assert!(is_plain_file_name(name), "{name:?}");
-        }
-        for name in ["", ".", "..", "../x", "a/b", "/etc/passwd", "a/"] {
-            assert!(!is_plain_file_name(name), "{name:?}");
-        }
-        #[cfg(windows)]
-        for name in ["..\\x", "a\\b", "C:\\x.bat", "C:x.bat"] {
-            assert!(!is_plain_file_name(name), "{name:?}");
-        }
     }
 
     #[test]

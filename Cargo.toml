@@ -32,10 +32,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
-russh = "0.45"
 rfd = "0.14"
 notify = "=8.2.0"
-tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "net", "sync", "time"] }
+tokio = { version = "1", features = ["sync"] }
 base64 = "0.22"
 async-channel = "2"
 futures = "0.3"
@@ -45,7 +44,7 @@ secrecy = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
-ureq = { version = "2", features = ["json"] }
+ureq = "2"
 sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
@@ -60,7 +59,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = ["Win32_System_Memory", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security_Credentials"] }
+windows = { version = "0.54", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security_Credentials"] }
 winreg = "0.52"
 # Termius local import (Windows only): NaCl secretbox field decryption and
 # Snappy blocks in the IndexedDB LevelDB tables.

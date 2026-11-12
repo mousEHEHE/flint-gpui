@@ -406,12 +406,7 @@ impl CommandPalette {
                 } else {
                     e.label
                 };
-                // Port 22 is implied, as in the host list.
-                let sub = if e.port == 22 {
-                    format!("{}@{}", e.username, e.host)
-                } else {
-                    format!("{}@{}:{}", e.username, e.host, e.port)
-                };
+                let sub = crate::ui::ssh_address(&e.username, &e.host, e.port);
                 let is_connected = self.connected_server_ids.contains(&e.id.to_string());
                 HostRow {
                     id: e.id,
@@ -902,8 +897,8 @@ fn connect_row_note(row: &ConnectRow) -> String {
     notes.join(" \u{00B7} ")
 }
 
-/// Same fields the hosts list searches, so both find the same hosts.
-fn host_matches(entry: &ServerEntrySummary, query: &str) -> bool {
+/// Shared with the hosts list, so both find the same hosts. `query` is trimmed and lowercased.
+pub(crate) fn host_matches(entry: &ServerEntrySummary, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }

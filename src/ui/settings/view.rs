@@ -110,8 +110,6 @@ pub struct SettingsView {
     // keys list and detail
     selected_key_id: Option<Uuid>,
     key_search: Entity<InputState>,
-    // (key_id, Result<ssh-public-key-line, error>) cached for selected key
-    pubkey_cache: Option<(Uuid, Result<String, String>)>,
     // add key form
     add_name: Entity<InputState>,
     add_pem_source: PemSource,
@@ -231,7 +229,6 @@ impl SettingsView {
             mode: SettingsMode::Vault,
             selected_key_id: None,
             key_search,
-            pubkey_cache: None,
             add_name: cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Production key")),
             add_pem_source: PemSource::File,
             add_file_path: None,
@@ -1697,7 +1694,6 @@ impl SettingsView {
         if let Some(id) = self.selected_key_id {
             if !all_keys.iter().any(|k| k.id == id) {
                 self.selected_key_id = None;
-                self.pubkey_cache = None;
             }
         }
 
@@ -1774,7 +1770,6 @@ impl SettingsView {
                     card_row(("key-row", ix), ix == 0, ix + 1 == count)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.selected_key_id = Some(id);
-                            this.pubkey_cache = None;
                             cx.notify();
                         }))
                         .child(row_tile(
@@ -1889,7 +1884,6 @@ impl SettingsView {
                 "key-back",
                 cx.listener(|this, _, _, cx| {
                     this.selected_key_id = None;
-                    this.pubkey_cache = None;
                     cx.notify();
                 }),
                 cx,
@@ -1968,15 +1962,16 @@ impl SettingsView {
                 .into_any_element()
         };
 
-        let pubkey_result = self.derive_pubkey_line(&key);
-        let pub_line: SharedString = match &pubkey_result {
-            Ok(line) => SharedString::from(line.clone()),
-            Err(msg) => SharedString::from(format!("(could not derive: {msg})")),
+        let pub_line_for_copy = if key.public_key.is_empty() {
+            String::new()
+        } else {
+            format!("{} {}@flint", key.public_key, key.name)
         };
-        let pub_line_for_copy = match &pubkey_result {
-            Ok(line) => line.clone(),
-            Err(_) => String::new(),
-        };
+        let pub_line = SharedString::from(if pub_line_for_copy.is_empty() {
+            "(could not read the key)".to_string()
+        } else {
+            pub_line_for_copy.clone()
+        });
 
         let pubkey_section_h = h_flex()
             .items_center()
@@ -2033,33 +2028,6 @@ impl SettingsView {
                             .child("The private key stays encrypted in the vault."),
                     ),
             )
-    }
-
-    fn derive_pubkey_line(&mut self, key: &SshKey) -> Result<String, String> {
-        if let Some((cached_id, cached)) = &self.pubkey_cache {
-            if *cached_id == key.id {
-                return cached.clone();
-            }
-        }
-        let result: Result<String, String> = (|| {
-            use russh::keys;
-            use russh::keys::PublicKeyBase64;
-            let pass = key.passphrase.as_deref().filter(|p| !p.is_empty());
-            let kp = keys::decode_secret_key(&key.pem, pass)
-                .map_err(|e| format!("decode failed: {e}"))?;
-            let pk = kp
-                .clone_public_key()
-                .map_err(|e| format!("derive public key failed: {e}"))?;
-            let comment = format!("{}@flint", key.name);
-            Ok(format!(
-                "{} {} {}",
-                pk.name(),
-                pk.public_key_base64(),
-                comment
-            ))
-        })();
-        self.pubkey_cache = Some((key.id, result.clone()));
-        result
     }
 
     fn render_add_key(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3290,16 +3258,22 @@ fn radio_dot(selected: bool, cx: &App) -> impl IntoElement {
 }
 
 fn format_age(timestamp: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::ui::sidebar::unix_now();
+    format_age_at(
+        timestamp as i64,
+        now,
+        crate::ui::file_pane::local_offset_secs,
+    )
+}
 
+/// Days count in local calendar days, so "yesterday" means the date before today.
+fn format_age_at(timestamp: i64, now: i64, offset_secs: impl Fn(i64) -> i64) -> String {
     if now < timestamp {
         return "added just now".to_string();
     }
 
-    let days = (now - timestamp) / 86_400;
+    let local_day = |ts: i64| (ts + offset_secs(ts)).div_euclid(86_400);
+    let days = local_day(now) - local_day(timestamp);
 
     if days == 0 {
         "added today".to_string()
@@ -3308,7 +3282,7 @@ fn format_age(timestamp: u64) -> String {
     } else if days < 7 {
         format!("added {} days ago", days)
     } else {
-        let (y, m, d) = unix_to_ymd(timestamp as i64);
+        let (y, m, d) = crate::ui::file_pane::unix_to_ymd(timestamp + offset_secs(timestamp));
         let month = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ]
@@ -3634,18 +3608,22 @@ fn proxy_kind_pill(kind: ProxyKind, cx: &App) -> impl IntoElement {
         .child(kind.display_label())
 }
 
-/// Minimal Gregorian calendar date from Unix timestamp (ignores leap-seconds).
-fn unix_to_ymd(ts: i64) -> (i64, i64, i64) {
-    // Shift epoch to 1 Mar 0000 to simplify leap-year arithmetic.
-    let z = ts / 86_400 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn age_counts_local_calendar_days() {
+        // 2024-03-01 00:30 UTC.
+        let now = 1_709_253_000;
+        let utc = |_| 0;
+        assert_eq!(format_age_at(now - 3_600, now, utc), "added yesterday");
+        assert_eq!(format_age_at(now - 600, now, utc), "added today");
+        // Three hours ahead of UTC, both times fall on 1 March.
+        assert_eq!(
+            format_age_at(now - 3_600, now, |_| 3 * 3_600),
+            "added today"
+        );
+        assert_eq!(format_age_at(0, now, utc), "added Jan 1, 1970");
+    }
 }

@@ -25,14 +25,14 @@ echo @mem; cat /proc/meminfo
 echo @load; cat /proc/loadavg
 echo @uptime; cat /proc/uptime
 echo @net; cat /proc/net/dev
-echo @df; df -kP
+echo @df; if df -kPl / >/dev/null 2>&1; then df -kPl; else df -kP; fi # busybox df has no -l
 "#;
 
 /// The scripts go as base64, so that the login shell (fish, csh) never
-/// parses them: only `sh` does.
-fn command_for(script: &str) -> String {
+/// parses them: only `sh` does. Older macOS decodes with `-D`, not `-d`.
+pub(crate) fn command_for(script: &str) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(script);
-    format!("echo {encoded} | base64 -d | sh 2>/dev/null")
+    format!("echo {encoded} | sh -c \"base64 -d 2>/dev/null || base64 -D\" | sh 2>/dev/null")
 }
 
 pub fn info_command() -> String {
@@ -264,7 +264,7 @@ fn parse_uptime(lines: &[&str]) -> Duration {
         .first()
         .and_then(|line| line.split_whitespace().next())
         .and_then(|seconds| seconds.parse::<f64>().ok())
-        .map(Duration::from_secs_f64)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
         .unwrap_or_default()
 }
 
@@ -347,6 +347,14 @@ pub fn bytes_per_second(previous: u64, current: u64, elapsed: Duration) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uptime_ignores_values_a_duration_cannot_hold() {
+        for line in ["-1 0", "NaN 0", "inf 0", "1e30 0"] {
+            assert_eq!(parse_uptime(&[line]), Duration::ZERO);
+        }
+        assert_eq!(parse_uptime(&["12.5 3"]), Duration::from_millis(12_500));
+    }
 
     const SAMPLE: &str = "@stat
 cpu  4705 356 584 3699 23 23 0 0 0 0
@@ -487,7 +495,7 @@ tmpfs               804064      1764    802300       1% /run
     fn the_scripts_run_in_sh_whatever_the_login_shell() {
         let command = sample_command();
         assert!(command.starts_with("echo "));
-        assert!(command.ends_with(" | base64 -d | sh 2>/dev/null"));
+        assert!(command.ends_with(" || base64 -D\" | sh 2>/dev/null"));
         assert!(!command.contains('\''));
     }
 }

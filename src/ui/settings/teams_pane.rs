@@ -90,6 +90,8 @@ struct TeamRow {
     is_manager: bool,
     /// User id, name as shown and role, the owner first.
     members: Vec<(Uuid, String, String)>,
+    /// Those gone from the team who are still in its roster.
+    left: Vec<Uuid>,
     /// Invite id and link.
     invite_links: Vec<(Uuid, String)>,
     /// The vaults this account holds, in the roster's order.
@@ -408,6 +410,7 @@ impl TeamsPane {
                     is_owner: roster.owner() == Some(state.user_id),
                     is_manager: roster.is_manager(state.user_id),
                     members,
+                    left: team.left.clone(),
                     invite_links: state
                         .invites
                         .iter()
@@ -429,24 +432,6 @@ impl TeamsPane {
             })
             .collect();
         Some(rows)
-    }
-
-    /// Put a host into a team vault, or with `None` make it personal again.
-    fn set_shared(&mut self, host_id: Uuid, vault_id: Option<Uuid>, cx: &mut Context<Self>) {
-        self.vault_state.update(cx, |vault_state, cx| {
-            let Some(vault) = vault_state.manager_mut() else {
-                return;
-            };
-            let saved = match vault_id {
-                Some(vault_id) => vault.share_entry(host_id, vault_id),
-                None => vault.unshare_entry(host_id),
-            };
-            if let Err(e) = saved {
-                tracing::error!(?e, "failed to save the vault after sharing a host");
-            }
-            cx.notify();
-        });
-        self.service.update(cx, |service, cx| service.sync_now(cx));
     }
 
     /// Open one panel and close whatever else was open, with its fields.
@@ -712,7 +697,7 @@ impl TeamsPane {
                     .cursor_pointer()
                     .hover(|style| style.bg(list_hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_shared(host_id, target, cx);
+                        crate::ui::host_sharing::set_shared(&this.vault_state, host_id, target, cx);
                     }))
                     .child(checkbox(is_shared, cx))
                     .child(
@@ -1137,6 +1122,12 @@ impl Render for TeamsPane {
                 }
                 if team.is_manager && !is_me && !is_owner_row {
                     let id = SharedString::from(format!("remove-{team_id}-{user_id}"));
+                    // The server refuses a roster that keeps anyone who left, so they go together.
+                    let user_ids = if team.left.contains(&user_id) {
+                        team.left.clone()
+                    } else {
+                        vec![user_id]
+                    };
                     row = row.child(
                         Button::new(id.clone())
                             .ghost()
@@ -1147,13 +1138,18 @@ impl Render for TeamsPane {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let action = TeamAction::Remove {
                                     team_id,
-                                    user_ids: vec![user_id],
+                                    user_ids: user_ids.clone(),
                                 };
                                 this.run(id.clone(), action, None, cx);
                             })),
                     );
                 }
                 card = card.child(row);
+            }
+            if team.is_manager && !team.left.is_empty() {
+                card = card.child(caption(
+                    "Remove those who left: until then the team cannot be changed.".into(),
+                ));
             }
 
             for (invite_id, request) in join_requests.get(&team_id).cloned().unwrap_or_default() {

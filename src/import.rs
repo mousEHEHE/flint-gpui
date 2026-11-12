@@ -111,7 +111,8 @@ impl ImportedHost {
         Self {
             label,
             host,
-            port,
+            // Port 0 cannot be dialed; the server form only takes 1..=65535.
+            port: if port == 0 { 22 } else { port },
             username,
             identity_file: None,
             is_default_identity: false,
@@ -288,7 +289,9 @@ fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
             match key.as_str() {
                 "hostname" if out.hostname.is_none() => out.hostname = Some(value.clone()),
                 "user" if out.user.is_none() => out.user = Some(value.clone()),
-                "port" if out.port.is_none() => out.port = value.parse::<u16>().ok(),
+                "port" if out.port.is_none() => {
+                    out.port = value.parse::<u16>().ok().filter(|port| *port != 0)
+                }
                 "identityfile" if out.identity.is_none() => out.identity = Some(value.clone()),
                 "proxyjump" if out.proxy_jump.is_none() => out.proxy_jump = Some(value.clone()),
                 _ => {}
@@ -332,7 +335,7 @@ fn parse_proxy_jump(value: &str, blocks: &[Block]) -> Option<ImportedJump> {
     let options = resolve_options(blocks, &name);
     Some(ImportedJump::Single(JumpTarget {
         host: resolved_hostname(&options, &name),
-        port: port.or(options.port).unwrap_or(22),
+        port: port.filter(|p| *p != 0).or(options.port).unwrap_or(22),
         username: user.or(options.user),
         name,
     }))
@@ -833,9 +836,14 @@ fn termius_group_path(id: &str, groups: &HashMap<&str, &TermiusGroup>) -> Vec<St
             break;
         }
         let Some(group) = groups.get(gid) else { break };
-        if !group.name.trim().is_empty() {
-            path.push(group.name.trim().to_string());
-        }
+        // Walked inner to outer and reversed below, so the parts of a
+        // "a/b" name go in backwards too.
+        let parts = group
+            .name
+            .split('/')
+            .map(str::trim)
+            .filter(|part| !part.is_empty());
+        path.extend(parts.rev().map(str::to_string));
         cursor = group.parent_id.as_deref();
     }
     path.reverse();
@@ -1264,6 +1272,31 @@ mod tests {
             import.skipped,
             vec!["snippet \"blank\" (no name or no script)".to_string()]
         );
+    }
+
+    #[test]
+    fn port_zero_imports_as_22() {
+        assert_eq!(parse("Host a\n  Port 0\n")[0].port, 22);
+        assert_eq!(
+            jump_of("Host a\n  ProxyJump b\nHost b\n  Port 0\n").port,
+            22
+        );
+        assert_eq!(jump_of("Host a\n  ProxyJump b:0\n").port, 22);
+        let json = r#"{"format": "termius-export", "version": 1,
+            "hosts": [{"label": "a", "host": "203.0.113.1", "port": 0}]}"#;
+        assert_eq!(parse_termius_export(json).unwrap().hosts[0].port, 22);
+    }
+
+    #[test]
+    fn termius_group_with_a_slash_becomes_nested_folders() {
+        let json = r#"{"format": "termius-export", "version": 1,
+            "groups": [
+                {"id": "g1", "name": "infra / eu/", "parent_id": null},
+                {"id": "g2", "name": "web/a", "parent_id": "g1"}
+            ],
+            "hosts": [{"label": "a", "host": "203.0.113.1", "group": "g2"}]}"#;
+        let host = &parse_termius_export(json).unwrap().hosts[0];
+        assert_eq!(host.group_path, ["infra", "eu", "web", "a"]);
     }
 
     #[test]
