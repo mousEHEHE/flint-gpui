@@ -460,8 +460,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 /// Resolve an `Include` operand: `~` and `%d` expand to home, bare relative
-/// paths are relative to `~/.ssh`, and a `*` in the filename globs within its
-/// directory.
+/// paths are relative to `~/.ssh`, and `*` or `?` in any part of the path globs.
 fn resolve_include(operand: &str, base_dir: &Path) -> Vec<PathBuf> {
     let expanded = expand_path(operand);
     let path = if expanded.is_absolute() {
@@ -470,30 +469,37 @@ fn resolve_include(operand: &str, base_dir: &Path) -> Vec<PathBuf> {
         base_dir.join(expanded)
     };
 
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if !name.contains('*') && !name.contains('?') {
-        return vec![path];
+    let mut matches = vec![PathBuf::new()];
+    for component in path.components() {
+        let part = component.as_os_str().to_string_lossy();
+        if !part.contains(['*', '?']) {
+            for found in &mut matches {
+                found.push(component);
+            }
+            continue;
+        }
+        matches = matches
+            .iter()
+            .flat_map(|dir| matching_entries(dir, &part))
+            .collect();
     }
-    let Some(dir) = path.parent() else {
-        return Vec::new();
-    };
+    matches.sort();
+    matches
+}
+
+/// The entries of `dir` whose names match the glob `pattern`.
+fn matching_entries(dir: &Path, pattern: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut matches: Vec<PathBuf> = entries
+    entries
         .flatten()
-        .map(|e| e.path())
+        .map(|entry| entry.path())
         .filter(|p| {
             p.file_name()
-                .map(|n| glob_match(&name, &n.to_string_lossy()))
-                .unwrap_or(false)
+                .is_some_and(|name| glob_match(pattern, &name.to_string_lossy()))
         })
-        .collect();
-    matches.sort();
-    matches
+        .collect()
 }
 
 /// Expand a leading `~/` or `%d/` to the home directory. `~alice/key` is
@@ -876,7 +882,7 @@ pub fn scan_putty_sessions() -> Vec<ImportedHost> {
         }
         let mut username: String = session.get_value("UserName").unwrap_or_default();
         // PuTTY accepts user@host in the HostName box.
-        if let Some((u, h)) = host.split_once('@') {
+        if let Some((u, h)) = split_putty_user_host(&host) {
             if username.is_empty() {
                 username = u.to_string();
             }
@@ -899,6 +905,12 @@ pub fn scan_putty_sessions() -> Vec<ImportedHost> {
 #[cfg(not(windows))]
 pub fn scan_putty_sessions() -> Vec<ImportedHost> {
     Vec::new()
+}
+
+/// The last `@` splits: a user name may hold one (`alice@corp.com@srv`), a host cannot.
+#[cfg(any(windows, test))]
+fn split_putty_user_host(host: &str) -> Option<(&str, &str)> {
+    host.rsplit_once('@')
 }
 
 /// PuTTY percent-encodes session names in the registry ("my%20server").
@@ -1149,6 +1161,20 @@ mod tests {
         let outer = hosts.iter().find(|h| h.label == "outer").unwrap();
         assert_eq!(outer.username.as_deref(), Some("shared"));
         assert_eq!(outer.port, 22);
+    }
+
+    #[test]
+    fn include_globs_a_folder_part() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(dir.path().join("conf.d").join(name)).unwrap();
+            let config = format!("Host {name}\n");
+            std::fs::write(dir.path().join("conf.d").join(name).join("config"), config).unwrap();
+        }
+        let hosts = parse_ssh_config("Include conf.d/*/config\n", dir.path());
+
+        let labels: Vec<&str> = hosts.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["one", "two"]);
     }
 
     #[test]
@@ -1505,6 +1531,15 @@ mod tests {
             assert!(host.key_pem.is_none());
             assert!(host.password.is_none());
         }
+    }
+
+    #[test]
+    fn putty_user_with_at_sign() {
+        assert_eq!(
+            split_putty_user_host("alice@corp.com@srv"),
+            Some(("alice@corp.com", "srv"))
+        );
+        assert_eq!(split_putty_user_host("srv"), None);
     }
 
     #[test]
