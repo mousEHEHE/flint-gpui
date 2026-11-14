@@ -353,6 +353,8 @@ impl VaultPane {
         self.phrase_error = None;
         cx.notify();
 
+        // The server takes the new phrase before this device saves it.
+        let is_on_server = session.is_some();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let made =
@@ -366,7 +368,7 @@ impl VaultPane {
             let installed = match made {
                 Ok((slot, phrase)) => vault_state.update(cx, |vault_state, cx| {
                     cx.notify();
-                    show_new_phrase(vault_state, slot, phrase)
+                    show_new_phrase(vault_state, slot, phrase, is_on_server)
                 }),
                 Err(e) => Some(Err(e)),
             };
@@ -377,6 +379,10 @@ impl VaultPane {
                     Some(Err(AccountError::Vault(VaultError::InvalidPassword))) => {
                         Some("Wrong master password.".to_string())
                     }
+                    Some(Err(e)) if is_on_server => Some(format!(
+                        "Your account now takes the phrase shown, but this device could not \
+                         save it ({e}). Write it down: this device still opens with the old one."
+                    )),
                     Some(Err(e)) => Some(format!("The recovery phrase was not changed: {e}")),
                     None => Some(
                         "The vault was locked first, so the new phrase was not saved. If it \
@@ -580,14 +586,19 @@ impl VaultPane {
 
 /// Save the new recovery slot and hand the window to the phrase screen.
 /// `None` when the vault is no longer open; nothing is written then.
+/// A phrase the server already took is shown even if saving it here fails: it is the only copy.
 fn show_new_phrase(
     vault_state: &mut VaultState,
     slot: crate::vault::NewRecoverySlot,
     phrase: crate::vault::RecoveryPhrase,
+    is_on_server: bool,
 ) -> Option<Result<(), AccountError>> {
     let vault = vault_state.manager_mut()?;
-    if let Err(e) = vault.install_recovery_slot(slot) {
-        return Some(Err(e.into()));
+    let saved = vault
+        .install_recovery_slot(slot)
+        .map_err(AccountError::from);
+    if saved.is_err() && !is_on_server {
+        return Some(saved);
     }
     if let VaultState::Unlocked { manager } = std::mem::replace(vault_state, VaultState::Locked) {
         *vault_state = VaultState::AwaitingPhraseConfirmation {
@@ -596,7 +607,7 @@ fn show_new_phrase(
             is_rotation: true,
         };
     }
-    Some(Ok(()))
+    Some(saved)
 }
 
 /// Save a re-wrapped password slot into the open vault. `None` when the vault

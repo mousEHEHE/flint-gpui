@@ -423,21 +423,15 @@ impl SyncService {
                 if was_team_check && self.is_settling {
                     self.settle(cx);
                 }
-                // A round that was already running when a team action ended
-                // did not look at the teams. Do that now, even with no rounds
-                // left. Work left behind gets only the rounds that are left:
-                // a vault that stays behind must not be asked in a tight loop.
-                if self.is_settling {
-                    self.rounds_left = self.rounds_left.max(1);
-                }
-                // A team pin from the last pull may bring a team vault to pull.
-                // Only a check that worked chains a round, so this cannot loop.
-                if was_team_check_ok {
-                    self.rounds_left = self.rounds_left.max(1);
-                }
-                // A refresh asked for while this round ran comes right after it.
-                let is_refresh_owed = self.teams_checked.is_none();
-                if has_more || self.is_settling || is_refresh_owed {
+                let (rounds_left, is_chained) = next_round(
+                    self.rounds_left,
+                    self.is_settling,
+                    was_team_check_ok,
+                    has_more,
+                    self.teams_checked.is_none(),
+                );
+                self.rounds_left = rounds_left;
+                if is_chained {
                     self.run_round(cx);
                 }
             }
@@ -996,6 +990,32 @@ fn run_team_action(
     Ok((keys, done))
 }
 
+/// The rounds left after a round that worked, and whether another runs now.
+fn next_round(
+    rounds_left: u8,
+    is_settling: bool,
+    was_team_check_ok: bool,
+    has_more: bool,
+    is_refresh_owed: bool,
+) -> (u8, bool) {
+    let mut rounds_left = rounds_left;
+    // A round that was already running when a team action ended did not look
+    // at the teams. Do that now, even with no rounds left. Work left behind
+    // gets only the rounds that are left: a vault that stays behind must not
+    // be asked in a tight loop.
+    if is_settling {
+        rounds_left = rounds_left.max(1);
+    }
+    // A team pin from the last pull may bring a team vault to pull.
+    // Only a check that worked chains a round, so this cannot loop.
+    if was_team_check_ok {
+        rounds_left = rounds_left.max(1);
+    }
+    // A refresh asked for while this round ran comes right after it.
+    let is_wanted = has_more || is_settling || is_refresh_owed;
+    (rounds_left, is_wanted && rounds_left > 0)
+}
+
 fn team_problem(error: &TeamError) -> String {
     match error {
         TeamError::Api(api) => match api.code() {
@@ -1039,7 +1059,8 @@ fn install(vault_state: &mut VaultState, opened: Opened) -> Result<(), VaultErro
     match opened {
         Opened::Adopted(account) => vault.adopt_account(account),
         Opened::Registered(registration, phrase) => {
-            vault.install_registration(registration)?;
+            // The account already takes this phrase, so it is shown even if saving here fails.
+            let saved = vault.install_registration(registration);
             // The new phrase takes over the window until the user confirms
             // they saved it, exactly like after a recovery.
             if let VaultState::Unlocked { manager } =
@@ -1051,7 +1072,31 @@ fn install(vault_state: &mut VaultState, opened: Opened) -> Result<(), VaultErro
                     is_rotation: true,
                 };
             }
-            Ok(())
+            saved
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chained_rounds_stop_when_none_are_left() {
+        let mut rounds_left = MAX_ROUNDS_IN_A_ROW;
+        let mut rounds_run = 0;
+        loop {
+            // As `run_round` does before each round.
+            rounds_left -= 1;
+            rounds_run += 1;
+            let (left, is_chained) = next_round(rounds_left, false, false, true, false);
+            rounds_left = left;
+            if !is_chained {
+                break;
+            }
+        }
+        assert_eq!(rounds_run, MAX_ROUNDS_IN_A_ROW);
+        assert_eq!(next_round(0, false, true, false, false), (1, false));
+        assert_eq!(next_round(0, true, false, false, false), (1, true));
     }
 }

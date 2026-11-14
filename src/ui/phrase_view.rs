@@ -7,12 +7,14 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex, ActiveTheme as _,
 };
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::ui::phrase_panel::{phrase_file_text, phrase_panel};
 use crate::ui::{lock_screen, VaultState};
 
 const COPIED_LABEL_DURATION: Duration = Duration::from_secs(2);
+const CLIPBOARD_CLEAR_DELAY: Duration = Duration::from_secs(60);
 const PHRASE_FILE_NAME: &str = "flint-recovery-phrase.txt";
 
 pub struct PhraseView {
@@ -20,6 +22,7 @@ pub struct PhraseView {
     vault_state: Entity<VaultState>,
     is_copied: bool,
     copied_reset: Option<Task<()>>,
+    clipboard_clear: Option<Task<()>>,
     /// Outcome of the last "Save as text file": the saved path, or the error.
     save_result: Option<Result<String, String>>,
     is_save_dialog_open: bool,
@@ -67,6 +70,7 @@ impl PhraseView {
             vault_state,
             is_copied: false,
             copied_reset: None,
+            clipboard_clear: None,
             save_result: None,
             is_save_dialog_open: false,
             phrase_generation: 0,
@@ -104,8 +108,20 @@ impl PhraseView {
         let Some(words) = self.phrase_words(cx) else {
             return;
         };
-        let plain = words.split_whitespace().collect::<Vec<_>>().join(" ");
-        cx.write_to_clipboard(ClipboardItem::new_string(plain));
+        let plain = Zeroizing::new(words.split_whitespace().collect::<Vec<_>>().join(" "));
+        cx.write_to_clipboard(ClipboardItem::new_string(plain.to_string()));
+        // Only a hash is kept, so the timer holds no copy of the words.
+        let copied_hash = Sha256::digest(plain.as_bytes());
+        self.clipboard_clear = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(CLIPBOARD_CLEAR_DELAY).await;
+            cx.update(|cx| {
+                let current = cx.read_from_clipboard().and_then(|item| item.text());
+                let current = current.map(Zeroizing::new);
+                if current.is_some_and(|text| Sha256::digest(text.as_bytes()) == copied_hash) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                }
+            });
+        }));
         self.is_copied = true;
         // Replacing the task drops the old timer, so a second click restarts it.
         self.copied_reset = Some(cx.spawn(async move |this, cx| {
