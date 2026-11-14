@@ -2496,7 +2496,7 @@ impl SftpBrowser {
                 }
             };
 
-            if current_mtime != saved_mtime {
+            if is_remote_edited(saved_mtime, current_mtime) {
                 tracing::warn!(
                     target: "flint::file_edit",
                     remote,
@@ -2598,7 +2598,7 @@ impl SftpBrowser {
         self.refresh_sync_states(cx);
         let sftp = self.right.primary.clone();
         cx.spawn(async move |this, cx| {
-            match sftp.download_file(remote.clone(), local.clone()).await {
+            match download_to_cache(&sftp, remote.clone(), &local).await {
                 Ok(DownloadResult { mtime }) => {
                     this.update(cx, |browser, cx| {
                         if let Some(session) = browser.open_files.get_mut(&local) {
@@ -3219,10 +3219,18 @@ fn flint_cache_path(
     // off separator normalization on Windows, so a '/' left in the path
     // would be read as part of a file name (os error 123).
     let mut local = base;
-    for component in remote.components() {
-        if let std::path::Component::Normal(part) = component {
-            local.push(part);
+    if let Some(parent) = remote.parent() {
+        for component in parent.components() {
+            if let std::path::Component::Normal(part) = component {
+                local.push(part);
+            }
         }
+    }
+    // A folder per remote path: on a case-insensitive disk `README` and
+    // `readme` would otherwise share one local file.
+    local.push(remote_path_tag(remote));
+    if let Some(name) = remote.file_name() {
+        local.push(name);
     }
     // Only a drive path takes the prefix as it is: a network share would
     // need `\\?\UNC\`, and is left alone.
@@ -3239,6 +3247,16 @@ fn flint_cache_path(
         local
     };
     Ok(local)
+}
+
+/// A short hex tag that differs for remote paths that differ only in case.
+fn remote_path_tag(remote: &std::path::Path) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(remote.as_os_str().as_encoded_bytes());
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// The folder that holds one kind of cached files of one connection.
@@ -3280,6 +3298,12 @@ fn has_unsaved_changes(
     last_synced: Option<std::time::SystemTime>,
 ) -> bool {
     current.is_none() || current != last_synced
+}
+
+/// True when the server's copy changed since it was downloaded, so the user
+/// must pick reload or overwrite. A time that appears or goes away counts too.
+fn is_remote_edited(saved_mtime: Option<u32>, current_mtime: Option<u32>) -> bool {
+    current_mtime != saved_mtime
 }
 
 /// Remove the folders between `file` and `root` that are now empty, `root` too.
@@ -3806,7 +3830,31 @@ mod tests {
         let result = sftp_cache_path("my-conn", std::path::Path::new("/home/user/file.txt"));
         assert!(result.is_ok());
         let p = result.unwrap();
-        assert!(p.ends_with("my-conn/home/user/file.txt"));
+        assert!(p.starts_with(flint_cache_root("sftp", "my-conn").unwrap()));
+        assert!(p.ends_with("file.txt"));
+        assert!(p
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .ends_with("my-conn/home/user"));
+    }
+
+    #[test]
+    fn cache_paths_differ_by_case() {
+        let upper = sftp_cache_path("c", std::path::Path::new("/srv/README")).unwrap();
+        let lower = sftp_cache_path("c", std::path::Path::new("/srv/readme")).unwrap();
+        let fold = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
+        assert_ne!(fold(&upper), fold(&lower));
+        assert!(upper.ends_with("README"));
+    }
+
+    #[test]
+    fn remote_edit_is_a_conflict() {
+        assert!(!is_remote_edited(Some(100), Some(100)));
+        assert!(is_remote_edited(Some(100), Some(200)));
+        assert!(is_remote_edited(Some(100), None));
+        assert!(is_remote_edited(None, Some(100)));
     }
 
     // Regression: a nested remote path must not leave literal '/' separators in
@@ -3821,6 +3869,7 @@ mod tests {
             assert!(!s.contains('/'), "path still contains '/': {s}");
             assert!(s.starts_with("\\\\?\\"), "missing verbatim prefix: {s}");
         }
-        assert!(p.ends_with("conn/root/docker-compose.yml"));
+        assert!(p.ends_with("docker-compose.yml"));
+        assert!(p.parent().unwrap().parent().unwrap().ends_with("conn/root"));
     }
 }
