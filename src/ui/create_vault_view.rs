@@ -319,7 +319,7 @@ impl CreateVaultView {
         lock_screen::column()
             .child(lock_screen::header(
                 "Create vault",
-                Some("Choose a master password to protect your hosts and credentials."),
+                Some("Pick a master password. It locks your hosts and keys."),
                 cx,
             ))
             .child(Input::new(&self.password).mask_toggle())
@@ -412,8 +412,8 @@ impl CreateVaultView {
             .child(lock_screen::header(
                 format!("Create a flint account for @{login}"),
                 Some(
-                    "Choose a master password. It protects this vault and its synced copy. \
-                     Your recovery phrase comes next.",
+                    "Pick a master password. It locks this vault and its synced copy. \
+                     The recovery phrase comes next.",
                 ),
                 cx,
             ))

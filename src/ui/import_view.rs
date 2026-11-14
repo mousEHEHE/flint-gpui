@@ -762,7 +762,7 @@ impl Render for ImportView {
                     .child(if total == 0 && self.is_scanning {
                         "Looking for hosts in ~/.ssh/config and PuTTY sessions…".to_string()
                     } else if total == 0 {
-                        "No hosts found in ~/.ssh/config or PuTTY sessions. \
+                        "Nothing in ~/.ssh/config or PuTTY. \
                          You can still load a termius-export JSON file."
                             .to_string()
                     } else if snippet_count == 0 {

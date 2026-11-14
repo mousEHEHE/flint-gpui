@@ -118,8 +118,8 @@ impl OnboardingView {
             .child(lock_screen::header(
                 "Updates",
                 Some(
-                    "flint can ask its server for a newer version when it starts and every \
-                     six hours while it runs. The request sends only your OS name.",
+                    "flint can check for a new version on start and every 6 hours. \
+                     It sends only your OS name.",
                 ),
                 cx,
             ))
@@ -133,7 +133,7 @@ impl OnboardingView {
                     })),
             )
             .child(lock_screen::note(
-                "You can change this later in Settings, About.",
+                "You can change it later in Settings → About.",
                 muted,
             ))
             .child(
@@ -150,15 +150,13 @@ impl OnboardingView {
         let muted = cx.theme().muted_foreground;
         column()
             .child(lock_screen::header(
-                "Sync with a flint account",
-                Some(
-                    "Keep hosts, keys and snippets the same on all your devices. Everything is \
-                     encrypted on this device before it is sent, so the server cannot read it.",
-                ),
+                "Sync your devices",
+                Some("Same hosts, keys and snippets on every computer."),
                 cx,
             ))
+            .child(lock_screen::sync_promise(cx))
             .child(lock_screen::note(
-                "Already have an account? Sign in, and this device's vault is made from it.",
+                "Already have an account? Sign in and this device picks it up.",
                 muted,
             ))
             .child(

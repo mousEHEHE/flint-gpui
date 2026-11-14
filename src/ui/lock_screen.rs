@@ -2,8 +2,9 @@ use gpui::prelude::*;
 use gpui::{div, px, AnyElement, App, Div, ElementId, Hsla, Pixels, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
+    h_flex,
     spinner::Spinner,
-    v_flex, ActiveTheme as _, Sizable as _,
+    v_flex, ActiveTheme as _, Icon, Sizable as _,
 };
 
 use crate::ui::window_chrome::{self, TITLE_BAR_HEIGHT};
@@ -56,6 +57,32 @@ pub fn note(text: impl Into<SharedString>, color: Hsla) -> Div {
         .text_size(NOTE_TEXT_SIZE)
         .text_color(color)
         .child(text.into())
+}
+
+/// Shown wherever sync is offered: what people ask first is "does it cost" and "can you read it".
+pub fn sync_promise(cx: &App) -> Div {
+    let theme = cx.theme();
+    h_flex()
+        .w_full()
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(8.))
+        .rounded(px(6.))
+        .bg(crate::theme::element())
+        .child(
+            Icon::empty()
+                .path("icons/shield-check.svg")
+                .size(px(16.))
+                .text_color(theme.primary),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(theme.foreground)
+                .child("Free. Encrypted on your device, so even our server can't read it."),
+        )
 }
 
 pub fn error(text: &str, cx: &App) -> Div {

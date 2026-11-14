@@ -31,7 +31,7 @@ use crate::vault::{
 };
 
 use super::sync_pane::SyncPane;
-use super::teams_pane::TeamsPane;
+use super::teams_pane::{OpenSync, TeamsPane};
 use super::vault_pane::{VaultPane, VaultPaneEvent};
 use super::SettingsSection;
 
@@ -213,6 +213,12 @@ impl SettingsView {
 
         let sync_pane = cx.new(|cx| SyncPane::new(vault_state.clone(), window, cx));
         let teams_pane = cx.new(|cx| TeamsPane::new(vault_state.clone(), window, cx));
+        cx.subscribe(&teams_pane, |this, _, _: &OpenSync, cx| {
+            this.active_section = SettingsSection::Sync;
+            this.mode = SettingsMode::Sync;
+            cx.notify();
+        })
+        .detach();
         let vault_pane = cx.new(|cx| VaultPane::new(vault_state.clone(), window, cx));
         cx.subscribe(
             &vault_pane,
@@ -1562,6 +1568,33 @@ impl SettingsView {
             .children(updates)
             .child(
                 h_flex()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(10.))
+                    .rounded(px(6.))
+                    .bg(crate::theme::element())
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .text_color(fg)
+                            .child("Like flint? A star on GitHub helps other people find it."),
+                    )
+                    .child(
+                        Button::new("about-star")
+                            .primary()
+                            .small()
+                            .child(
+                                h_flex()
+                                    .gap(px(6.))
+                                    .child(Icon::empty().path("icons/star.svg").size(px(13.)))
+                                    .child("Star"),
+                            )
+                            .on_click(|_, _, cx| cx.open_url(crate::logging::REPOSITORY_URL)),
+                    ),
+            )
+            .child(
+                h_flex()
                     .gap(px(6.))
                     .flex_wrap()
                     .child(
@@ -1588,14 +1621,15 @@ impl SettingsView {
                     ),
             )
             .child(div().text_size(px(12.)).text_color(muted_fg).child(
-                "Copy diagnostics copies the version and the system only. \
-                         The log file holds host names, user names and errors: \
-                         read it before you attach it to an issue.",
+                "Diagnostics are just the version and your OS. The log file has host and \
+                         user names, so look through it before you attach it.",
             ))
-            .child(div().text_size(px(12.)).text_color(muted_fg).child(
-                "flint is free software under the GNU GPL version 3 and comes \
-                         with no warranty. The source is at the Repository link.",
-            ))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted_fg)
+                    .child("flint is free software (GPL-3.0) with no warranty."),
+            )
     }
 
     /// The "Check for updates on start" preference, with a button to check
@@ -1630,11 +1664,7 @@ impl SettingsView {
                     .pl(px(22.))
                     .text_size(px(11.5))
                     .text_color(muted_fg)
-                    .child(
-                    "When on, flint asks the flint server for the newest version when it starts \
-                     and every six hours after. When off, it asks only when you press Check now. \
-                     The request says macOS or Windows and nothing else.",
-                ),
+                    .child("On start and every 6 hours. It sends only your OS name."),
             )
             .child(
                 h_flex()

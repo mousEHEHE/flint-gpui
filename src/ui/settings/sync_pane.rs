@@ -507,12 +507,11 @@ impl Render for SyncPane {
             // The page title above already says "Sync".
             (SignIn::Idle, None) => body
                 .child(caption(
-                    "Keep hosts, keys and snippets the same on all your devices. Everything is \
-                     encrypted on this device before it is sent, with a key that only your \
-                     master password or recovery phrase can unlock, so the server cannot read \
-                     any of it."
+                    "Same hosts, keys and snippets on every computer. Only your master password \
+                     or recovery phrase can unlock them."
                         .into(),
                 ))
+                .child(crate::ui::lock_screen::sync_promise(cx))
                 .children(sign_in_error)
                 .child(h_flex().child(sign_in_button("Sign in with GitHub", cx))),
 

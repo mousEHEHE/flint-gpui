@@ -335,7 +335,7 @@ impl ServerFormView {
         };
         let group_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Type to pick or create a group, use / to nest")
+                .placeholder("Pick or type a new one, a/b nests")
                 .default_value(SharedString::from(group_text))
         });
         let tag_input =

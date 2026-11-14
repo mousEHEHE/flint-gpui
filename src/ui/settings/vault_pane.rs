@@ -693,8 +693,7 @@ impl Render for VaultPane {
             .gap(px(12.))
             .child(heading("Lock"))
             .child(caption(
-                "Clears the vault key from memory. Open sessions stay connected behind the lock \
-                 screen.",
+                "Locks flint right away. Open sessions keep running.",
             ))
             .child(
                 h_flex()
@@ -715,18 +714,16 @@ impl Render for VaultPane {
                 |el| {
                     el.child(heading("Touch ID").mt(px(6.)))
                         .child(caption(
-                            "The vault key stays in this Mac's keychain, and only a finger \
-                             enrolled now opens it. After a new finger is added, unlock once \
-                             with the master password.",
+                            "Unlock with your finger. Add a new finger later and \
+                             you'll need the password once.",
                         ))
                         .child(self.render_touch_id(cx))
                 },
             )
             .child(heading("Master password").mt(px(6.)))
             .child(caption(
-                "Hosts, keys and snippets are not re-encrypted, and the recovery phrase keeps \
-                 working. A synced account takes the new password; other devices must sign in \
-                 again.",
+                "Your recovery phrase keeps working. Other synced devices will ask you to \
+                 sign in again.",
             ))
             .child(
                 v_flex()
@@ -756,8 +753,7 @@ impl Render for VaultPane {
             )
             .child(heading("Recovery phrase").mt(px(6.)))
             .child(caption(
-                "Makes a new 24-word phrase and shows it once. The old phrase stops working, \
-                 on the sync account too.",
+                "Makes a new 24-word phrase. The old one stops working everywhere.",
             ))
             .child(
                 v_flex()

@@ -201,9 +201,9 @@ impl Render for PhraseView {
         let theme = cx.theme();
 
         let subtitle: &'static str = if is_rotation {
-            "Your previous phrase no longer works. This one is shown only once."
+            "The old phrase no longer works. This one is shown once."
         } else {
-            "Shown only once. If you forget your password, these 24 words are the only way back into this vault."
+            "Shown once. Forgot your password? These 24 words are the only way back in."
         };
 
         let save_message = self.save_result.as_ref().map(|result| match result {
@@ -239,7 +239,7 @@ impl Render for PhraseView {
                 )
                 .children(save_message)
                 .child(lock_screen::note(
-                    "Copied words stay on the clipboard, and the text file is not encrypted.",
+                    "Copied words are wiped from the clipboard after a minute. The text file is not encrypted.",
                     theme.muted_foreground,
                 ))
                 .child(

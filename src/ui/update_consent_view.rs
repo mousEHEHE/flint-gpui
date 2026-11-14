@@ -49,14 +49,14 @@ impl Render for UpdateConsentView {
             .gap(px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child("Check for updates?")))
             .child(div().text_size(px(12.)).text_color(fg).child(
-                "flint can ask its server for the newest version when it starts and every six \
-                 hours while it runs. The request sends only your OS name.",
+                "flint can check for a new version on start and every 6 hours. \
+                 It sends only your OS name.",
             ))
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(muted_fg)
-                    .child("You can change this later in Settings, About."),
+                    .child("You can change it later in Settings → About."),
             )
             .child(
                 h_flex()

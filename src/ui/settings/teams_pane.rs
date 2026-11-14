@@ -20,6 +20,11 @@ use crate::ui::VaultState;
 
 use super::ago;
 
+/// Signed out, the pane only points at Sync; the settings view switches there.
+pub struct OpenSync;
+
+impl gpui::EventEmitter<OpenSync> for TeamsPane {}
+
 pub struct TeamsPane {
     vault_state: Entity<VaultState>,
     service: Entity<SyncService>,
@@ -950,10 +955,19 @@ impl Render for TeamsPane {
 
         let Some(teams) = self.teams(cx) else {
             // The page title above already says "Teams".
-            return pane.child(caption(
-                "Share hosts with other people. Sign in under Sync first: a team needs an account."
-                    .into(),
-            ));
+            return pane
+                .child(caption(
+                    "Share hosts with your team by invite link. You need to sign in first.".into(),
+                ))
+                .child(
+                    gpui_component::h_flex().child(
+                        Button::new("teams-open-sync")
+                            .primary()
+                            .small()
+                            .child("Go to Sync")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenSync))),
+                    ),
+                );
         };
 
         let service = self.service.read(cx);
