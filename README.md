@@ -35,7 +35,7 @@ For Linux and Intel Mac you need to build it yourself for now.
 - Two-panel file manager, local and remote, or two servers. Drag and drop works.
 - Open a remote file in your local editor, it uploads back when you save (macOS and Windows).
 - Snippets.
-- Import from `~/.ssh/config`, and from PuTTY on Windows.
+- Import from `~/.ssh/config`, and from PuTTY on Windows with its `.ppk` keys. A `.ppk` key can also be added in Settings.
 - Everything is kept in a vault with master password and a 24-word recovery phrase.
 - Updates install from the app, then it restarts. The app checks that the build is signed with my key before it installs it.
 
@@ -76,7 +76,6 @@ sudo apt install build-essential clang cmake pkg-config \
 
 - No X11 forwarding, no `ProxyCommand`.
 - No local terminal and no split panes.
-- `.ppk` keys are not supported.
 - The vault does not lock by itself, only when you lock it.
 - A stopped file transfer starts from the beginning.
 - Linux build is almost not tested.

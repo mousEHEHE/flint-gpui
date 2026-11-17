@@ -902,14 +902,19 @@ pub fn scan_putty_sessions() -> Vec<ImportedHost> {
         }
         let port: u32 = session.get_value("PortNumber").unwrap_or(22);
 
-        // PuTTY keys are .ppk, which cannot be imported as PEM, so no identity.
-        hosts.push(ImportedHost::new(
-            percent_decode(&name),
-            host.trim().to_string(),
-            u16::try_from(port).unwrap_or(22),
-            (!username.trim().is_empty()).then(|| username.trim().to_string()),
-            ImportSource::Putty,
-        ));
+        // Named "public", but it is the session's private .ppk; the vault converts it.
+        let key_file: String = session.get_value("PublicKeyFile").unwrap_or_default();
+        let key_file = key_file.trim();
+        hosts.push(ImportedHost {
+            identity_file: (!key_file.is_empty()).then(|| PathBuf::from(key_file)),
+            ..ImportedHost::new(
+                percent_decode(&name),
+                host.trim().to_string(),
+                u16::try_from(port).unwrap_or(22),
+                (!username.trim().is_empty()).then(|| username.trim().to_string()),
+                ImportSource::Putty,
+            )
+        });
     }
     hosts
 }
