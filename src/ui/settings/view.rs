@@ -66,6 +66,8 @@ pub enum SettingsViewEvent {
     Close,
     LockRequested,
     RunSnippet(Uuid),
+    /// Put this key's public half into `authorized_keys` on a host the user picks.
+    AddKeyToHost(Uuid),
 }
 
 #[derive(Clone, PartialEq)]
@@ -2031,9 +2033,23 @@ impl SettingsView {
             pub_line_for_copy.clone()
         });
 
+        let has_public_key = !pub_line_for_copy.is_empty();
+        let key_id = key.id;
         let pubkey_section_h = h_flex()
             .items_center()
             .child(section_header("Public key", None).flex_1())
+            .child(
+                Button::new("pub-add-to-host")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .child("Add to host\u{2026}")
+                    .tooltip("Sign in to a host and add this key to its authorized_keys")
+                    .disabled(!has_public_key)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsViewEvent::AddKeyToHost(key_id));
+                    })),
+            )
             .child(
                 Button::new("pub-copy")
                     .ghost()

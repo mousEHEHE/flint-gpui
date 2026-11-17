@@ -196,6 +196,8 @@ pub struct AppView {
     /// Server id and snippet id. When the matching session emits `Connected`,
     /// the snippet runs on it.
     pending_snippet_for_server: Option<(String, Uuid)>,
+    /// (server id, key id): add the key to the host's authorized_keys once it is connected.
+    pending_key_for_server: Option<(String, Uuid)>,
     /// Sessions that connected while the vault was locked. Their startup
     /// snippet lives in the vault, so it runs once the vault is open again.
     sessions_owed_startup_snippet: Vec<WeakEntity<ServerSession>>,
@@ -329,6 +331,7 @@ impl AppView {
             settings_view: None,
             command_palette: None,
             pending_snippet_for_server: None,
+            pending_key_for_server: None,
             sessions_owed_startup_snippet: Vec::new(),
             sessions_owed_reconnect: Vec::new(),
             picker_owed_after_unlock: None,
@@ -387,6 +390,7 @@ impl AppView {
             session.update(cx, |session, cx| session.cleanup_before_close(cx));
         }
         self.pending_snippet_for_server = None;
+        self.pending_key_for_server = None;
         self.sessions_owed_startup_snippet.clear();
         self.sessions_owed_reconnect.clear();
         self.picker_owed_after_unlock = None;
@@ -427,6 +431,7 @@ impl AppView {
             }
         }
         self.try_drain_pending_snippet(cx);
+        self.try_drain_pending_key(cx);
         if let Some((extension, local)) = self.picker_owed_after_unlock.take() {
             self.show_picker_for(extension, local, cx);
         }
@@ -504,6 +509,10 @@ impl AppView {
                         cx.notify();
                     }
                     SettingsViewEvent::LockRequested => this.lock_vault(window, cx),
+                    SettingsViewEvent::AddKeyToHost(key_id) => {
+                        this.settings_view = None;
+                        this.show_host_picker_for_key(*key_id, window, cx);
+                    }
                     SettingsViewEvent::RunSnippet(snippet_id) => {
                         let id = *snippet_id;
                         this.settings_view = None;
@@ -593,8 +602,9 @@ impl AppView {
                             this.run_palette_command(*command, window, cx);
                             cx.notify();
                         }
-                        // Only the left-source picker emits this.
-                        CommandPaletteEvent::LeftSourcePicked(_) => {}
+                        // Only the left-source and key pickers emit these.
+                        CommandPaletteEvent::LeftSourcePicked(_)
+                        | CommandPaletteEvent::HostPickedForKey(_) => {}
                     }
                 },
             )
@@ -782,10 +792,17 @@ impl AppView {
         self.run_snippet_on_session(snippet_id, &session, cx);
     }
 
-    /// The connect a snippet was queued for did not start, so the snippet
-    /// must not run on some later connect to the same host.
+    /// The connect a snippet or key was queued for did not start, so it must
+    /// not run on some later connect to the same host.
     fn forget_pending_snippet(&mut self, server_id: Uuid) {
         let server_id = server_id.to_string();
+        let is_key_for_host = self
+            .pending_key_for_server
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == server_id);
+        if is_key_for_host {
+            self.pending_key_for_server = None;
+        }
         let is_for_host = self
             .pending_snippet_for_server
             .as_ref()
@@ -793,6 +810,128 @@ impl AppView {
         if is_for_host {
             self.pending_snippet_for_server = None;
         }
+    }
+
+    /// Ask which host gets the key, then sign in there and add it.
+    fn show_host_picker_for_key(
+        &mut self,
+        key_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key_name = match self
+            .vault_state
+            .read(cx)
+            .manager()
+            .map(|vm| vm.get_key(key_id))
+        {
+            Some(Ok(key)) => key.name.clone(),
+            _ => return,
+        };
+        let connected_ids: std::collections::HashSet<String> = self
+            .tabs
+            .iter()
+            .map(|s| s.read(cx).server_id.clone())
+            .collect();
+        let vault_state = self.vault_state.clone();
+        let palette = cx.new(|cx| {
+            CommandPalette::new_host_picker_for_key(
+                vault_state,
+                key_name,
+                connected_ids,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(
+            &palette,
+            window,
+            move |this, _, event: &CommandPaletteEvent, window, cx| {
+                let host = match event {
+                    CommandPaletteEvent::Close => None,
+                    CommandPaletteEvent::HostPickedForKey(host) => Some(*host),
+                    // The picker lists nothing that emits the other events.
+                    _ => return,
+                };
+                this.command_palette = None;
+                this.focus_handle.focus(window, cx);
+                if let Some(host) = host {
+                    this.pending_key_for_server = Some((host.to_string(), key_id));
+                    // Connects with the host's own sign-in and its prompts; an open tab is reused.
+                    this.open_server_by_id(host, window, cx);
+                    this.try_drain_pending_key(cx);
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        self.command_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn try_drain_pending_key(&mut self, cx: &mut Context<Self>) {
+        let Some((server_id, key_id)) = self.pending_key_for_server.clone() else {
+            return;
+        };
+        if self.is_vault_locked(cx) {
+            return;
+        }
+        let Some(idx) = self.tab_index_for_host(&server_id, cx) else {
+            return;
+        };
+        let session = self.tabs[idx].read(cx);
+        if session.shell_handle(cx).is_none() {
+            return;
+        }
+        let Some(conn) = session.connection.clone() else {
+            return;
+        };
+        let host_name = session.conn_info.display_name().to_string();
+        self.pending_key_for_server = None;
+
+        let key = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|vm| vm.get_key(key_id).ok())
+            .map(|key| (key.name.clone(), key.public_key.clone()));
+        let Some(script) = key.as_ref().and_then(|(name, public_key)| {
+            crate::authorized_keys::install_script(public_key, &format!("{name}@flint"))
+        }) else {
+            self.set_status(
+                "The key was not added: its public key could not be read.".into(),
+                cx,
+            );
+            return;
+        };
+        let key_name = key.map(|(name, _)| name).unwrap_or_default();
+        tracing::info!(host = %host_name, %key_id, "adding a key to authorized_keys");
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let command = crate::server_stats::command_for(&script);
+            let output = crate::ui::server_session::run_command(
+                &conn,
+                command,
+                std::time::Duration::from_secs(30),
+                &executor,
+            )
+            .await;
+            let message = match crate::authorized_keys::outcome(output.as_deref()) {
+                Ok(crate::authorized_keys::Outcome::Added) => {
+                    format!("Added \u{201C}{key_name}\u{201D} to {host_name}.")
+                }
+                Ok(crate::authorized_keys::Outcome::AlreadyThere) => {
+                    format!("{host_name} already has \u{201C}{key_name}\u{201D}.")
+                }
+                Err(problem) => {
+                    tracing::warn!(host = %host_name, %problem, "could not add the key");
+                    format!("Could not add \u{201C}{key_name}\u{201D} to {host_name}: {problem}")
+                }
+            };
+            this.update(cx, |this, cx| this.set_status(message, cx))
+                .ok();
+        })
+        .detach();
     }
 
     fn tab_index_for_host(&self, server_id: &str, cx: &App) -> Option<usize> {
@@ -1447,6 +1586,7 @@ impl AppView {
                     this.set_status(status, cx);
                     this.sync_session_states(cx);
                     this.try_drain_pending_snippet(cx);
+                    this.try_drain_pending_key(cx);
                     this.run_startup_snippet(session_entity, cx);
                 }
                 ServerSessionEvent::ConflictDetected => {
@@ -1560,6 +1700,18 @@ impl AppView {
                             .is_some_and(|(server_id, _)| *server_id == session.server_id);
                     if is_waiting_on_failed {
                         this.pending_snippet_for_server = None;
+                    }
+                    let is_key_waiting_on_failed = session.has_connect_failure()
+                        && this
+                            .pending_key_for_server
+                            .as_ref()
+                            .is_some_and(|(server_id, _)| *server_id == session.server_id);
+                    if is_key_waiting_on_failed {
+                        this.pending_key_for_server = None;
+                        this.set_status(
+                            "The key was not added: the host could not be reached.".into(),
+                            cx,
+                        );
                     }
                     cx.notify();
                 }

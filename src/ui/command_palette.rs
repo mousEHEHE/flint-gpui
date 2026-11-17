@@ -52,6 +52,8 @@ pub enum CommandPaletteEvent {
     /// What the left file pane should show: this computer (`None`) or a
     /// saved server.
     LeftSourcePicked(Option<Uuid>),
+    /// The host the key of a `new_host_picker_for_key` palette goes to.
+    HostPickedForKey(Uuid),
 }
 
 /// An app action the palette can run.
@@ -227,6 +229,8 @@ enum Mode {
     /// "Choose what the left file pane shows": this computer, then the hosts
     /// other than the session's own.
     PickLeftSource { session_server_id: Uuid },
+    /// "Choose a host to add `key_name` to": only hosts listed.
+    PickHostForKey { key_name: String },
 }
 
 /// One render-ready item in the palette list.
@@ -320,6 +324,26 @@ impl CommandPalette {
             "Search hosts\u{2026}",
             true,
             Some(session_server_id),
+            connected_server_ids,
+            window,
+            cx,
+        )
+    }
+
+    /// A palette that only picks the host a key is added to.
+    pub fn new_host_picker_for_key(
+        vault_state: Entity<VaultState>,
+        key_name: String,
+        connected_server_ids: std::collections::HashSet<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_mode(
+            vault_state,
+            Mode::PickHostForKey { key_name },
+            "Search hosts\u{2026}",
+            false,
+            None,
             connected_server_ids,
             window,
             cx,
@@ -547,7 +571,7 @@ impl CommandPalette {
                 }
                 (items, sections)
             }
-            Mode::PickServerForSnippet { .. } => {
+            Mode::PickServerForSnippet { .. } | Mode::PickHostForKey { .. } => {
                 let hosts = self.host_rows(cx);
                 let sections = if hosts.is_empty() {
                     vec![]
@@ -577,7 +601,9 @@ impl CommandPalette {
                 self.search.update(cx, |s, cx| s.set_value("", window, cx));
                 self.select(0, cx);
             }
-            Mode::Main | Mode::PickLeftSource { .. } => cx.emit(CommandPaletteEvent::Close),
+            Mode::Main | Mode::PickLeftSource { .. } | Mode::PickHostForKey { .. } => {
+                cx.emit(CommandPaletteEvent::Close)
+            }
         }
     }
 
@@ -654,6 +680,9 @@ impl CommandPalette {
             (Mode::PickLeftSource { .. }, PaletteItem::Host(h)) => {
                 cx.emit(CommandPaletteEvent::LeftSourcePicked(Some(h.id)));
             }
+            (Mode::PickHostForKey { .. }, PaletteItem::Host(h)) => {
+                cx.emit(CommandPaletteEvent::HostPickedForKey(h.id));
+            }
             // Not listed in these modes; nothing to do if one gets here.
             (
                 Mode::PickServerForSnippet { .. },
@@ -665,6 +694,13 @@ impl CommandPalette {
             | (
                 Mode::PickLeftSource { .. },
                 PaletteItem::Snippet(_) | PaletteItem::Connect(_) | PaletteItem::Command(_),
+            )
+            | (
+                Mode::PickHostForKey { .. },
+                PaletteItem::Snippet(_)
+                | PaletteItem::Connect(_)
+                | PaletteItem::Command(_)
+                | PaletteItem::ThisComputer,
             )
             | (Mode::Main, PaletteItem::ThisComputer) => {}
         }
@@ -704,6 +740,10 @@ impl Render for CommandPalette {
             Mode::PickLeftSource { .. } => {
                 Some(("Choose what the left file pane shows".to_string(), None))
             }
+            Mode::PickHostForKey { key_name } => Some((
+                format!("Choose a host to add \u{201C}{key_name}\u{201D} to"),
+                None,
+            )),
             Mode::Main => None,
         };
         let banner: Option<AnyElement> = banner_text.map(|(text, escape_hint)| {

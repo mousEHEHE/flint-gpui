@@ -10,6 +10,7 @@ use gpui_component::{theme::ThemeMode, Root};
 
 mod app_discovery;
 mod assets;
+mod authorized_keys;
 mod file_associations;
 mod file_edit;
 mod file_open;

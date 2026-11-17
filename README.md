@@ -30,6 +30,7 @@ For Linux and Intel Mac you need to build it yourself for now.
 - Jump hosts, SOCKS5 and HTTP proxy.
 - Agent forwarding, turned on per host.
 - New ed25519 keys made in the app, in the same format `ssh-keygen` writes.
+- Add a key to a host's `authorized_keys` from Settings, over the sign-in the host already has.
 - Port forwarding: local, remote and dynamic.
 - Terminal with tabs and search. It can suggest commands from shell history of the server.
 - Two-panel file manager, local and remote, or two servers. Drag and drop works.
