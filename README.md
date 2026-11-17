@@ -27,7 +27,7 @@ For Linux and Intel Mac you need to build it yourself for now.
 ## What works
 
 - SSH with password, private key or ssh agent. 2FA prompts work too.
-- Jump hosts, SOCKS5 and HTTP proxy.
+- Jump hosts, SOCKS5 and HTTP proxy, and `ProxyCommand` (also read from `~/.ssh/config`).
 - Agent forwarding, turned on per host.
 - New ed25519 keys made in the app, in the same format `ssh-keygen` writes.
 - Add a key to a host's `authorized_keys` from Settings, over the sign-in the host already has.
@@ -75,7 +75,7 @@ sudo apt install build-essential clang cmake pkg-config \
 
 ## What is missing
 
-- No X11 forwarding, no `ProxyCommand`.
+- No X11 forwarding.
 - No local terminal and no split panes.
 - The vault does not lock by itself, only when you lock it.
 - A stopped file transfer starts from the beginning.

@@ -97,6 +97,8 @@ pub struct ImportedHost {
     pub jump: Option<ImportedJump>,
     /// `ForwardAgent yes` in the ssh config.
     pub forward_agent: bool,
+    /// `ProxyCommand` from the ssh config, tokens as written.
+    pub proxy_command: Option<String>,
     pub source: ImportSource,
 }
 
@@ -128,6 +130,7 @@ impl ImportedHost {
             startup_snippet: None,
             jump: None,
             forward_agent: false,
+            proxy_command: None,
             source,
         }
     }
@@ -155,6 +158,7 @@ impl std::fmt::Debug for ImportedHost {
             .field("startup_snippet", &self.startup_snippet)
             .field("jump", &self.jump)
             .field("forward_agent", &self.forward_agent)
+            .field("proxy_command", &self.proxy_command)
             .field("source", &self.source)
             .finish()
     }
@@ -247,6 +251,9 @@ fn parse_ssh_config(text: &str, base_dir: &Path) -> Vec<ImportedHost> {
                 is_default_identity,
                 jump,
                 forward_agent: options.forward_agent.unwrap_or(false),
+                proxy_command: options
+                    .proxy_command
+                    .filter(|command| !command.eq_ignore_ascii_case("none")),
                 ..ImportedHost::new(
                     alias.clone(),
                     host,
@@ -277,6 +284,7 @@ struct HostOptions {
     identity: Option<String>,
     proxy_jump: Option<String>,
     forward_agent: Option<bool>,
+    proxy_command: Option<String>,
 }
 
 fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
@@ -287,6 +295,7 @@ fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
         identity: None,
         proxy_jump: None,
         forward_agent: None,
+        proxy_command: None,
     };
     for block in blocks {
         if !block_matches(block, alias) {
@@ -301,6 +310,10 @@ fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
                 }
                 "identityfile" if out.identity.is_none() => out.identity = Some(value.clone()),
                 "proxyjump" if out.proxy_jump.is_none() => out.proxy_jump = Some(value.clone()),
+                // "none" turns off one a wildcard block would give; it still wins as the first value.
+                "proxycommand" if out.proxy_command.is_none() => {
+                    out.proxy_command = Some(value.clone())
+                }
                 // A socket path or variable names another agent than the one
                 // flint forwards, so only a plain yes turns it on.
                 "forwardagent" if out.forward_agent.is_none() => {
@@ -402,8 +415,14 @@ fn collect_blocks(text: &str, base_dir: &Path, depth: u32, blocks: &mut Vec<Bloc
             _ => {
                 // Never empty in practice: `parse_ssh_config` seeds the list
                 // with the global block.
+                // A command keeps its quotes: they are the shell's.
+                let value = if key == "proxycommand" {
+                    value
+                } else {
+                    unquote(&value)
+                };
                 if let Some(block) = blocks.last_mut() {
-                    block.options.push((key, unquote(&value)));
+                    block.options.push((key, value));
                 }
             }
         }
@@ -1023,6 +1042,26 @@ mod tests {
         assert_eq!(target.host, "dev-gate.example.net");
         assert_eq!(target.port, 2022);
         assert_eq!(target.username.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn proxy_command_is_kept_as_written_and_none_means_none() {
+        let hosts = parse(
+            "Host a\n  ProxyCommand sh -c \"nc %h %p\"\n\nHost b\n  ProxyCommand none\n\n\
+             Host c\n\nHost *\n  ProxyCommand cloudflared access ssh --hostname %h\n",
+        );
+        let commands: Vec<(&str, Option<&str>)> = hosts
+            .iter()
+            .map(|h| (h.label.as_str(), h.proxy_command.as_deref()))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                ("a", Some("sh -c \"nc %h %p\"")),
+                ("b", None),
+                ("c", Some("cloudflared access ssh --hostname %h")),
+            ]
+        );
     }
 
     #[test]

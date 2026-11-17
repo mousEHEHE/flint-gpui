@@ -102,6 +102,7 @@ pub struct ServerFormView {
     /// Carried through, so that a save keeps the ones made in the server panel.
     host_snippets: Vec<HostSnippet>,
     forward_agent: bool,
+    proxy_command_input: Entity<InputState>,
     /// The jump host, the startup snippet and the forwards are folded away
     /// unless the host uses one of them.
     is_advanced_open: bool,
@@ -269,6 +270,15 @@ impl ServerFormView {
 
         let port_input =
             cx.new(|cx| InputState::new(window, cx).default_value(SharedString::from(port)));
+        let proxy_command = prefill
+            .as_ref()
+            .and_then(|e| e.proxy_command.clone())
+            .unwrap_or_default();
+        let proxy_command_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. cloudflared access ssh --hostname %h")
+                .default_value(SharedString::from(proxy_command))
+        });
         let user_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("root")
@@ -376,11 +386,13 @@ impl ServerFormView {
             startup_command_id,
             host_snippets,
             forward_agent: prefill.as_ref().is_some_and(|e| e.forward_agent),
+            proxy_command_input,
             is_advanced_open: prefill.as_ref().is_some_and(|e| {
                 e.jump_host.is_some()
                     || e.startup_snippet.is_some()
                     || !e.forwards.is_empty()
                     || e.forward_agent
+                    || e.proxy_command.is_some()
             }),
             startup_dropdown_open: false,
             group_input,
@@ -775,6 +787,7 @@ impl ServerFormView {
                 startup_snippet,
                 snippets,
                 forward_agent: self.forward_agent,
+                proxy_command: self.proxy_command(cx),
                 created_at: now,
                 updated_at: now,
             },
@@ -801,6 +814,7 @@ impl ServerFormView {
                 startup_snippet,
                 snippets,
                 forward_agent: self.forward_agent,
+                proxy_command: self.proxy_command(cx),
                 created_at: *created_at,
                 updated_at: now,
             },
@@ -1407,6 +1421,7 @@ impl Render for ServerFormView {
                         .when(self.startup == Startup::Command, |el| {
                             el.child(self.render_startup_command(cx))
                         })
+                        .child(self.render_proxy_command(cx))
                         .child(self.render_agent_forwarding(cx))
                         .child(self.render_forwards_section(cx))
                     }),
@@ -1529,7 +1544,41 @@ impl ServerFormView {
         } else {
             ""
         };
-        format!("{jump} · {forwards} · {startup}{agent}")
+        let proxy_command = if self.proxy_command(cx).is_some() {
+            " · ProxyCommand"
+        } else {
+            ""
+        };
+        format!("{jump} · {forwards} · {startup}{agent}{proxy_command}")
+    }
+
+    fn proxy_command(&self, cx: &App) -> Option<String> {
+        let command = self.proxy_command_input.read(cx).value().trim().to_string();
+        (!command.is_empty()).then_some(command)
+    }
+
+    fn render_proxy_command(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let note = if self.is_team_host(cx) {
+            "Not run for team hosts: anyone who edits the host could run anything on your \
+             computer."
+        } else {
+            "Runs on this computer and is the link to the host, as in OpenSSH. %h, %p and %r \
+             are its address, port and user. Not used when the host is reached through a \
+             jump host: then the jump host's own counts."
+        };
+        v_flex()
+            .gap_1()
+            .child(labeled(
+                "ProxyCommand",
+                cx,
+                Input::new(&self.proxy_command_input),
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(note),
+            )
     }
 
     /// A team host is in a vault other people edit too.

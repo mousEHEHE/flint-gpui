@@ -524,6 +524,7 @@ fn write_selected(
                     .and_then(|name| vm.find_snippet_by_name(name)),
                 snippets: Vec::new(),
                 forward_agent: host.forward_agent,
+                proxy_command: host.proxy_command.clone(),
                 created_at: now,
                 updated_at: now,
             };
@@ -1203,6 +1204,7 @@ mod tests {
             startup_snippet: startup_snippet.map(str::to_string),
             jump: None,
             forward_agent: false,
+            proxy_command: None,
             source: ImportSource::Termius,
         }
     }
