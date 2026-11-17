@@ -73,6 +73,7 @@ pub enum PaletteCommand {
     ReconnectSession,
     ChooseLeftSource,
     OpenLocalTerminal,
+    ToggleSplit,
 }
 
 struct CommandSpec {
@@ -95,7 +96,7 @@ const fn chord(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 /// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 16] = [
+const COMMANDS: [CommandSpec; 17] = [
     CommandSpec {
         command: PaletteCommand::OpenLocalTerminal,
         label: "Local terminal",
@@ -174,6 +175,14 @@ const COMMANDS: [CommandSpec; 16] = [
         keywords: "shell tab another second",
         note: "same connection, no new login",
         shortcut: Some(NEW_TERMINAL_SHORTCUT),
+        needs_session: true,
+    },
+    CommandSpec {
+        command: PaletteCommand::ToggleSplit,
+        label: "Split or join terminals",
+        keywords: "pane side by side two shells",
+        note: "",
+        shortcut: Some(crate::ui::terminal_tabs::SPLIT_SHORTCUT),
         needs_session: true,
     },
     CommandSpec {
@@ -1025,6 +1034,7 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::LockVault => return Icon::empty().path("icons/lock.svg"),
         PaletteCommand::CloseSession => IconName::Close,
         PaletteCommand::NewTerminal | PaletteCommand::OpenLocalTerminal => IconName::SquareTerminal,
+        PaletteCommand::ToggleSplit => return Icon::empty().path("icons/panel-right.svg"),
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
         | PaletteCommand::ChooseLeftSource => IconName::FolderOpen,
@@ -1321,7 +1331,12 @@ mod tests {
         assert_eq!(command_labels("terminal", false), ["Local terminal"]);
         assert_eq!(
             command_labels("terminal", true),
-            ["Local terminal", "New terminal", "Show or hide files"]
+            [
+                "Local terminal",
+                "New terminal",
+                "Split or join terminals",
+                "Show or hide files"
+            ]
         );
         assert_eq!(
             command_labels("sftp", true),

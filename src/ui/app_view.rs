@@ -57,6 +57,7 @@ actions!(
         ToggleFilesFocus,
         NewTerminal,
         OpenLocalTerminal,
+        SplitTerminal,
         ToggleSftpPane,
         ToggleSidebar,
         ToggleServerPanel,
@@ -96,6 +97,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "cmd-t", NewConnection, None);
         bind_chord(cx, "cmd-shift-t", NewTerminal, None);
         bind_chord(cx, "cmd-alt-t", OpenLocalTerminal, None);
+        bind_chord(cx, "cmd-d", SplitTerminal, None);
         bind_chord(cx, "cmd-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
         bind_chord(cx, "cmd-i", ToggleServerPanel, None);
@@ -127,6 +129,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "ctrl-shift-t", NewConnection, None);
         bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
         bind_chord(cx, "ctrl-alt-shift-t", OpenLocalTerminal, None);
+        bind_chord(cx, "ctrl-shift-d", SplitTerminal, None);
         bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
         bind_chord(cx, "ctrl-shift-i", ToggleServerPanel, None);
@@ -653,6 +656,7 @@ impl AppView {
                 self.set_active_tab(self.active_tab, window, cx);
             }
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
+            PaletteCommand::ToggleSplit => self.toggle_split(cx),
             PaletteCommand::OpenLocalTerminal => self.open_local_terminal(window, cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
             PaletteCommand::ToggleSidebar => self.toggle_sidebar(cx),
@@ -2637,6 +2641,13 @@ impl AppView {
         session.update(cx, |session, cx| session.open_extra_terminal(cx));
     }
 
+    fn toggle_split(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        session.update(cx, |session, cx| session.toggle_split(cx));
+    }
+
     fn toggle_sftp_pane(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.tabs.get(self.active_tab) else {
             return;
@@ -2876,6 +2887,11 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitTerminal, window, cx| {
+                if !this.is_overlay_open(window, cx) {
+                    this.toggle_split(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &OpenLocalTerminal, window, cx| {
                 this.open_local_terminal(window, cx);

@@ -33,6 +33,7 @@ For Linux and Intel Mac you need to build it yourself for now.
 - Add a key to a host's `authorized_keys` from Settings, over the sign-in the host already has.
 - Port forwarding: local, remote and dynamic.
 - Terminal with tabs and search. It can suggest commands from shell history of the server.
+- Two terminals side by side: Cmd+D (Ctrl+Shift+D on Windows and Linux), again to join them.
 - A terminal on your own computer too (macOS and Linux): Option+Cmd+T, or "Local terminal" in the command palette.
 - Two-panel file manager, local and remote, or two servers. Drag and drop works.
 - Open a remote file in your local editor, it uploads back when you save (macOS and Windows).
@@ -77,7 +78,7 @@ sudo apt install build-essential clang cmake pkg-config \
 ## What is missing
 
 - No X11 forwarding.
-- No split panes, and no local terminal on Windows yet.
+- No local terminal on Windows yet.
 - The vault does not lock by itself, only when you lock it.
 - A stopped file transfer starts from the beginning.
 - Linux build is almost not tested.

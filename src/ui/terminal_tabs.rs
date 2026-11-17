@@ -10,8 +10,10 @@ use gpui::{
     div, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window,
 };
 use gpui_component::{
-    h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, Icon, IconName, StyledExt as _,
-    WindowExt as _,
+    h_flex,
+    resizable::{h_resizable, resizable_panel},
+    tooltip::Tooltip,
+    v_flex, ActiveTheme as _, Icon, IconName, StyledExt as _, WindowExt as _,
 };
 
 use crate::connection::Connection;
@@ -35,6 +37,11 @@ pub const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "\u{21E7}\u{2318}T"
 } else {
     "Ctrl+Shift+N"
+};
+pub const SPLIT_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "\u{2318}D"
+} else {
+    "Ctrl+Shift+D"
 };
 pub const TOGGLE_FILES_SHORTCUT: &str = if cfg!(target_os = "macos") {
     "\u{2318}B"
@@ -67,6 +74,34 @@ fn file_name(path: &str) -> &str {
 fn active_after_close(active: usize, closed: usize, remaining: usize) -> usize {
     let next = if closed < active { active - 1 } else { active };
     next.min(remaining.saturating_sub(1))
+}
+
+/// Two terminals side by side: the tab indices of the left and right panes.
+pub(crate) type SplitPanes = Option<(usize, usize)>;
+
+/// The panes after the tab at `closed` is removed. A pane's own tab closing
+/// ends the split; the tabs after it move down one.
+fn split_after_close(split: SplitPanes, closed: usize) -> SplitPanes {
+    let (left, right) = split?;
+    if closed == left || closed == right {
+        return None;
+    }
+    let shift = |ix: usize| if ix > closed { ix - 1 } else { ix };
+    Some((shift(left), shift(right)))
+}
+
+/// The panes after tab `target` is picked while `active` has the keys. A tab
+/// already on screen only gets the keys; any other takes the active pane.
+fn split_after_activate(split: SplitPanes, active: usize, target: usize) -> SplitPanes {
+    let (left, right) = split?;
+    if target == left || target == right {
+        return split;
+    }
+    if active == right {
+        Some((left, target))
+    } else {
+        Some((target, right))
+    }
 }
 
 impl ServerSession {
@@ -160,8 +195,11 @@ impl ServerSession {
             this.update(cx, |session, cx| match result {
                 // A reconnect in the meantime replaced every shell. This one
                 // belongs to the old connection, so it is dropped.
-                Ok(_) if session.connection_generation != generation => {}
+                Ok(_) if session.connection_generation != generation => {
+                    session.is_split_pending = false;
+                }
                 Ok(_) if !session.can_open_terminal() => {
+                    session.is_split_pending = false;
                     if let Some((_, path)) = startup {
                         cx.emit(ServerSessionEvent::StatusChanged(full_or_offline_status(
                             session.terminals.len(),
@@ -182,8 +220,7 @@ impl ServerSession {
                     if let Some(terminal) = session.terminals.last() {
                         terminal.update(cx, |view, _| view.edited_file = edited_file);
                     }
-                    session.active_terminal = session.terminals.len() - 1;
-                    session.is_terminal_focus_pending = true;
+                    session.show_new_terminal();
                     tracing::info!(
                         host = %session.conn_info.display_name(),
                         count = session.terminals.len(),
@@ -192,6 +229,7 @@ impl ServerSession {
                     cx.notify();
                 }
                 Err(error) => {
+                    session.is_split_pending = false;
                     tracing::warn!(
                         host = %session.conn_info.display_name(),
                         %error,
@@ -217,11 +255,11 @@ impl ServerSession {
         match crate::local_shell::open_local_shell(rows, cols, None) {
             Ok(shell) => {
                 self.add_terminal(shell, cx);
-                self.active_terminal = self.terminals.len() - 1;
-                self.is_terminal_focus_pending = true;
+                self.show_new_terminal();
                 cx.notify();
             }
             Err(e) => {
+                self.is_split_pending = false;
                 tracing::warn!(%e, "could not open another local terminal");
                 cx.emit(ServerSessionEvent::StatusChanged(format!(
                     "Error: could not open another terminal ({e})."
@@ -247,7 +285,83 @@ impl ServerSession {
                     .items_center()
                     .child(self.render_terminal_tabs(cx)),
             )
-            .child(div().flex_1().overflow_hidden().child(terminal_view))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(self.render_terminal_area(&terminal_view, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Show the shell just added at the end: in a new right pane when a split
+    /// asked for it, otherwise in the pane with the keys.
+    fn show_new_terminal(&mut self) {
+        let new = self.terminals.len() - 1;
+        if std::mem::take(&mut self.is_split_pending) && new > 0 {
+            self.split = Some((self.active_terminal, new));
+        } else {
+            self.split = split_after_activate(self.split, self.active_terminal, new);
+        }
+        self.active_terminal = new;
+        self.is_terminal_focus_pending = true;
+    }
+
+    /// Open a shell beside the current one, or show one terminal again.
+    pub fn toggle_split(&mut self, cx: &mut Context<Self>) {
+        if self.split.take().is_some() {
+            self.is_terminal_focus_pending = true;
+            cx.notify();
+            return;
+        }
+        // A held Cmd+D repeats before the first shell arrives.
+        if self.is_split_pending || !self.can_open_terminal() {
+            return;
+        }
+        self.is_split_pending = true;
+        self.open_terminal(None, cx);
+    }
+
+    /// The active terminal, or both panes of a split. A click in a pane gives
+    /// it the keys, before the terminal itself sees the click.
+    pub(crate) fn render_terminal_area(
+        &self,
+        active: &Entity<TerminalView>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let panes = self.split.and_then(|(left, right)| {
+            Some((
+                (left, self.terminals.get(left)?.clone()),
+                (right, self.terminals.get(right)?.clone()),
+            ))
+        });
+        let Some((left, right)) = panes else {
+            return active.clone().into_any_element();
+        };
+        let accent = cx.theme().primary;
+        let pane = |(ix, terminal): (usize, Entity<TerminalView>)| {
+            let is_active = ix == self.active_terminal;
+            div()
+                .size_full()
+                .overflow_hidden()
+                .border_t_2()
+                .border_color(if is_active {
+                    accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                    if this.active_terminal != ix {
+                        this.active_terminal = ix;
+                        cx.notify();
+                    }
+                }))
+                .child(terminal)
+        };
+        h_resizable("terminal-split")
+            .with_state(&self.terminal_split_state)
+            .child(resizable_panel().child(pane(left)))
+            .child(resizable_panel().child(pane(right)))
             .into_any_element()
     }
 
@@ -255,6 +369,7 @@ impl ServerSession {
         if ix >= self.terminals.len() {
             return;
         }
+        self.split = split_after_activate(self.split, self.active_terminal, ix);
         self.active_terminal = ix;
         self.is_terminal_focus_pending = true;
         cx.notify();
@@ -273,8 +388,18 @@ impl ServerSession {
             }
         }
         let was_active = ix == self.active_terminal;
+        // The other pane of a split takes over when the active one goes.
+        let partner = self.split.and_then(|(left, right)| {
+            (ix == left)
+                .then_some(right)
+                .or((ix == right).then_some(left))
+        });
+        self.split = split_after_close(self.split, ix);
         self.terminals.remove(ix);
-        self.active_terminal = active_after_close(self.active_terminal, ix, self.terminals.len());
+        self.active_terminal = match partner {
+            Some(partner) if was_active => partner - usize::from(partner > ix),
+            _ => active_after_close(self.active_terminal, ix, self.terminals.len()),
+        };
         // The focus went away with the closed view.
         if was_active {
             self.is_terminal_focus_pending = true;
@@ -360,9 +485,12 @@ impl ServerSession {
     /// Only the terminal on screen takes snapshots: none while another app tab is in front.
     pub(crate) fn set_in_front(&self, is_front: bool, cx: &App) {
         for (ix, terminal) in self.terminals.iter().enumerate() {
+            let is_in_pane = self
+                .split
+                .is_some_and(|(left, right)| ix == left || ix == right);
             terminal
                 .read(cx)
-                .set_visible(is_front && ix == self.active_terminal);
+                .set_visible(is_front && (ix == self.active_terminal || is_in_pane));
         }
     }
 
@@ -704,6 +832,29 @@ fn toggle_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pane_closing_ends_the_split_and_other_tabs_move_down() {
+        assert_eq!(split_after_close(None, 0), None);
+        // Tabs [0 | 2] 1 3: closing a pane's tab ends the split.
+        assert_eq!(split_after_close(Some((0, 2)), 2), None);
+        assert_eq!(split_after_close(Some((0, 2)), 0), None);
+        // Closing a tab between them moves the right pane's tab down.
+        assert_eq!(split_after_close(Some((0, 2)), 1), Some((0, 1)));
+        // Closing one before both moves both; one after both changes nothing.
+        assert_eq!(split_after_close(Some((2, 3)), 0), Some((1, 2)));
+        assert_eq!(split_after_close(Some((0, 1)), 3), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_picked_tab_goes_into_the_pane_with_the_keys() {
+        assert_eq!(split_after_activate(None, 0, 2), None);
+        // Already on screen: the panes stay as they are.
+        assert_eq!(split_after_activate(Some((0, 1)), 0, 1), Some((0, 1)));
+        // The right pane has the keys, so tab 3 replaces its shell.
+        assert_eq!(split_after_activate(Some((0, 1)), 1, 3), Some((0, 3)));
+        assert_eq!(split_after_activate(Some((0, 1)), 0, 3), Some((3, 1)));
+    }
 
     #[test]
     fn closing_a_tab_before_the_active_one_keeps_the_same_shell_active() {

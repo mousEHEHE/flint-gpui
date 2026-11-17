@@ -627,6 +627,8 @@ async fn drive_connection(
                             session.active_terminal = session
                                 .active_terminal
                                 .min(session.terminals.len().saturating_sub(1));
+                            let count = session.terminals.len();
+                            session.split = session.split.filter(|&(_, right)| right < count);
                             session.is_terminal_focus_pending = true;
                             session.reconnecting = None;
                             session.disconnected = None;
@@ -856,6 +858,11 @@ pub struct ServerSession {
     server_panel: Entity<ServerPanel>,
     /// A terminal on this computer: no connection, no file panes, no panel.
     pub(crate) is_local: bool,
+    /// Two terminal tabs side by side; see `terminal_tabs::split_after_activate`.
+    pub(crate) split: crate::ui::terminal_tabs::SplitPanes,
+    /// The shell being opened goes into a new right pane.
+    pub(crate) is_split_pending: bool,
+    pub(crate) terminal_split_state: Entity<ResizableState>,
 }
 
 impl EventEmitter<ServerSessionEvent> for ServerSession {}
@@ -1037,6 +1044,9 @@ impl ServerSession {
             probe_task: None,
             server_panel,
             is_local: false,
+            split: None,
+            is_split_pending: false,
+            terminal_split_state: cx.new(|_| ResizableState::default()),
         }
     }
 
@@ -1114,6 +1124,9 @@ impl ServerSession {
             probe_task: None,
             server_panel,
             is_local: true,
+            split: None,
+            is_split_pending: false,
+            terminal_split_state: cx.new(|_| ResizableState::default()),
         };
         local.add_terminal(shell, cx);
         tracing::info!("local terminal opened");
@@ -2272,7 +2285,7 @@ impl Render for ServerSession {
                     div()
                         .flex_1()
                         .overflow_hidden()
-                        .child(terminal_view.clone()),
+                        .child(self.render_terminal_area(terminal_view, cx)),
                 );
             // Cached: terminal output redraws the session many times a second,
             // and the file panes have not changed.
