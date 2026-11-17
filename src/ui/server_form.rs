@@ -101,6 +101,7 @@ pub struct ServerFormView {
     startup_command_id: Option<Uuid>,
     /// Carried through, so that a save keeps the ones made in the server panel.
     host_snippets: Vec<HostSnippet>,
+    forward_agent: bool,
     /// The jump host, the startup snippet and the forwards are folded away
     /// unless the host uses one of them.
     is_advanced_open: bool,
@@ -374,8 +375,12 @@ impl ServerFormView {
             startup_command,
             startup_command_id,
             host_snippets,
+            forward_agent: prefill.as_ref().is_some_and(|e| e.forward_agent),
             is_advanced_open: prefill.as_ref().is_some_and(|e| {
-                e.jump_host.is_some() || e.startup_snippet.is_some() || !e.forwards.is_empty()
+                e.jump_host.is_some()
+                    || e.startup_snippet.is_some()
+                    || !e.forwards.is_empty()
+                    || e.forward_agent
             }),
             startup_dropdown_open: false,
             group_input,
@@ -769,6 +774,7 @@ impl ServerFormView {
                 forwards: self.forwards.clone(),
                 startup_snippet,
                 snippets,
+                forward_agent: self.forward_agent,
                 created_at: now,
                 updated_at: now,
             },
@@ -794,6 +800,7 @@ impl ServerFormView {
                 forwards: self.forwards.clone(),
                 startup_snippet,
                 snippets,
+                forward_agent: self.forward_agent,
                 created_at: *created_at,
                 updated_at: now,
             },
@@ -1400,6 +1407,7 @@ impl Render for ServerFormView {
                         .when(self.startup == Startup::Command, |el| {
                             el.child(self.render_startup_command(cx))
                         })
+                        .child(self.render_agent_forwarding(cx))
                         .child(self.render_forwards_section(cx))
                     }),
             );
@@ -1516,7 +1524,51 @@ impl ServerFormView {
                 .map(|snippet| format!("runs {}", snippet.name))
                 .unwrap_or_else(|| "a removed snippet".to_string()),
         };
-        format!("{jump} · {forwards} · {startup}")
+        let agent = if self.forward_agent && !self.is_team_host(cx) {
+            " · forwards the agent"
+        } else {
+            ""
+        };
+        format!("{jump} · {forwards} · {startup}{agent}")
+    }
+
+    /// A team host is in a vault other people edit too.
+    fn is_team_host(&self, cx: &App) -> bool {
+        let FormMode::Edit { id, .. } = self.mode else {
+            return false;
+        };
+        let vault = self.vault_state.read(cx).manager();
+        vault.is_some_and(|vm| vm.team_of(id).is_some())
+    }
+
+    fn render_agent_forwarding(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_team_host = self.is_team_host(cx);
+        let note = if is_team_host {
+            "Not for team hosts: anyone who edits the host could use the agent of everyone \
+             who connects to it."
+        } else {
+            "Programs on the host, like git, can sign with the keys in your local SSH agent. \
+             Anyone with root on the host can use them too, so turn it on only for hosts \
+             you trust."
+        };
+        v_flex()
+            .gap_1()
+            .child(
+                Checkbox::new("forward-agent")
+                    .checked(self.forward_agent && !is_team_host)
+                    .disabled(is_team_host)
+                    .label("Forward SSH agent")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.forward_agent = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(note),
+            )
     }
 
     /// Why "Add host" is greyed out, while it is.

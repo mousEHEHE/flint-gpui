@@ -2815,6 +2815,7 @@ fn quick_connect_entry(
         forwards: Vec::new(),
         startup_snippet: None,
         snippets: Vec::new(),
+        forward_agent: false,
         created_at: now,
         updated_at: now,
     }

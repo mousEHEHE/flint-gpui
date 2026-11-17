@@ -523,6 +523,7 @@ fn write_selected(
                     .as_deref()
                     .and_then(|name| vm.find_snippet_by_name(name)),
                 snippets: Vec::new(),
+                forward_agent: host.forward_agent,
                 created_at: now,
                 updated_at: now,
             };
@@ -1201,6 +1202,7 @@ mod tests {
             tags: Vec::new(),
             startup_snippet: startup_snippet.map(str::to_string),
             jump: None,
+            forward_agent: false,
             source: ImportSource::Termius,
         }
     }

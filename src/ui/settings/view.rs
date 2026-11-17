@@ -388,6 +388,26 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Opens the new key, whose page has its public key to copy.
+    fn generate_key(&mut self, cx: &mut Context<Self>) {
+        let result = self.vault_state.update(cx, |vs, cx| {
+            let generated = vs
+                .manager_mut()
+                .map(|vm| vm.generate_key("New ed25519 key".to_string()));
+            cx.notify();
+            generated
+        });
+        match result {
+            Some(Ok(id)) => {
+                tracing::info!(%id, "ssh key generated");
+                self.selected_key_id = Some(id);
+            }
+            Some(Err(e)) => tracing::error!(?e, "failed to generate a key"),
+            None => {}
+        }
+        cx.notify();
+    }
+
     fn apply_rename(&mut self, id: Uuid, new_name: String, cx: &mut Context<Self>) {
         let result = self.vault_state.update(cx, |vs, _| {
             vs.manager_mut().map(|vm| vm.rename_key(id, new_name))
@@ -1754,6 +1774,14 @@ impl SettingsView {
         let head = page_head("SSH keys", Some(all_keys.len()))
             .child(div().flex_1())
             .child(filter_field(&self.key_search))
+            .child(
+                Button::new("generate-key-btn")
+                    .ghost()
+                    .small()
+                    .child("Generate")
+                    .tooltip("Make a new ed25519 key in the vault")
+                    .on_click(cx.listener(|this, _, _, cx| this.generate_key(cx))),
+            )
             .child(
                 Button::new("add-key-btn")
                     .primary()

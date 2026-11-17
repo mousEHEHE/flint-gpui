@@ -2428,6 +2428,7 @@ mod tests {
 
     fn hop(entry_id: &str) -> crate::ssh::SshHop {
         crate::ssh::SshHop {
+            forward_agent: false,
             entry_id: entry_id.to_string(),
             label: entry_id.to_string(),
             host: format!("{entry_id}.internal"),

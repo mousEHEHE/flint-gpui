@@ -95,6 +95,8 @@ pub struct ImportedHost {
     pub startup_snippet: Option<String>,
     /// `ProxyJump` from the ssh config; `None` = connect directly.
     pub jump: Option<ImportedJump>,
+    /// `ForwardAgent yes` in the ssh config.
+    pub forward_agent: bool,
     pub source: ImportSource,
 }
 
@@ -125,6 +127,7 @@ impl ImportedHost {
             tags: Vec::new(),
             startup_snippet: None,
             jump: None,
+            forward_agent: false,
             source,
         }
     }
@@ -151,6 +154,7 @@ impl std::fmt::Debug for ImportedHost {
             .field("tags", &self.tags)
             .field("startup_snippet", &self.startup_snippet)
             .field("jump", &self.jump)
+            .field("forward_agent", &self.forward_agent)
             .field("source", &self.source)
             .finish()
     }
@@ -242,6 +246,7 @@ fn parse_ssh_config(text: &str, base_dir: &Path) -> Vec<ImportedHost> {
                 identity_file,
                 is_default_identity,
                 jump,
+                forward_agent: options.forward_agent.unwrap_or(false),
                 ..ImportedHost::new(
                     alias.clone(),
                     host,
@@ -271,6 +276,7 @@ struct HostOptions {
     port: Option<u16>,
     identity: Option<String>,
     proxy_jump: Option<String>,
+    forward_agent: Option<bool>,
 }
 
 fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
@@ -280,6 +286,7 @@ fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
         port: None,
         identity: None,
         proxy_jump: None,
+        forward_agent: None,
     };
     for block in blocks {
         if !block_matches(block, alias) {
@@ -294,6 +301,11 @@ fn resolve_options(blocks: &[Block], alias: &str) -> HostOptions {
                 }
                 "identityfile" if out.identity.is_none() => out.identity = Some(value.clone()),
                 "proxyjump" if out.proxy_jump.is_none() => out.proxy_jump = Some(value.clone()),
+                // A socket path or variable names another agent than the one
+                // flint forwards, so only a plain yes turns it on.
+                "forwardagent" if out.forward_agent.is_none() => {
+                    out.forward_agent = Some(value.eq_ignore_ascii_case("yes"))
+                }
                 _ => {}
             }
         }
@@ -1006,6 +1018,29 @@ mod tests {
         assert_eq!(target.host, "dev-gate.example.net");
         assert_eq!(target.port, 2022);
         assert_eq!(target.username.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn forward_agent_is_on_only_for_a_plain_yes_and_the_first_value_wins() {
+        let hosts = parse(
+            "Host a\n  ForwardAgent yes\n\nHost b\n  ForwardAgent no\n\n\
+             Host c\n  ForwardAgent /tmp/other.sock\n\nHost d\n\n\
+             Host e\n  ForwardAgent no\n\nHost *\n  ForwardAgent Yes\n",
+        );
+        let on: Vec<(&str, bool)> = hosts
+            .iter()
+            .map(|h| (h.label.as_str(), h.forward_agent))
+            .collect();
+        assert_eq!(
+            on,
+            [
+                ("a", true),
+                ("b", false),
+                ("c", false),
+                ("d", true),
+                ("e", false)
+            ]
+        );
     }
 
     /// The hop is defined after the host that references it.
