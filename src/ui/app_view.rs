@@ -56,6 +56,7 @@ actions!(
         NewConnection,
         ToggleFilesFocus,
         NewTerminal,
+        OpenLocalTerminal,
         ToggleSftpPane,
         ToggleSidebar,
         ToggleServerPanel,
@@ -94,6 +95,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "cmd-l", LockVault, None);
         bind_chord(cx, "cmd-t", NewConnection, None);
         bind_chord(cx, "cmd-shift-t", NewTerminal, None);
+        bind_chord(cx, "cmd-alt-t", OpenLocalTerminal, None);
         bind_chord(cx, "cmd-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
         bind_chord(cx, "cmd-i", ToggleServerPanel, None);
@@ -124,6 +126,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "ctrl-shift-l", LockVault, None);
         bind_chord(cx, "ctrl-shift-t", NewConnection, None);
         bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
+        bind_chord(cx, "ctrl-alt-shift-t", OpenLocalTerminal, None);
         bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
         bind_chord(cx, "ctrl-shift-i", ToggleServerPanel, None);
@@ -160,6 +163,12 @@ const VAULT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 pub const LOCK_SHORTCUT: &str = "\u{2318}L";
 #[cfg(not(target_os = "macos"))]
 pub const LOCK_SHORTCUT: &str = "Ctrl+Shift+L";
+
+/// Shown in the palette. Must track the binding above.
+#[cfg(target_os = "macos")]
+pub const LOCAL_TERMINAL_SHORTCUT: &str = "\u{2325}\u{2318}T";
+#[cfg(not(target_os = "macos"))]
+pub const LOCAL_TERMINAL_SHORTCUT: &str = "Ctrl+Alt+Shift+T";
 
 /// Shown on the sidebar button and in the palette. Must track the binding above.
 #[cfg(target_os = "macos")]
@@ -247,6 +256,16 @@ impl AppView {
             SidebarEvent::DeleteServerRequested(id) => this.show_remove_dialog(*id, window, cx),
             SidebarEvent::SettingsRequested => this.toggle_settings(window, cx),
             SidebarEvent::FeedbackRequested => this.show_feedback_dialog(window, cx),
+            SidebarEvent::ShowTab(session_id) => {
+                if let Some(idx) = this.tab_index_for_host(session_id, cx) {
+                    this.change_active_tab(idx, cx);
+                }
+            }
+            SidebarEvent::CloseTab(session_id) => {
+                if let Some(idx) = this.tab_index_for_host(session_id, cx) {
+                    this.close_tab(idx, cx);
+                }
+            }
         })
         .detach();
 
@@ -634,6 +653,7 @@ impl AppView {
                 self.set_active_tab(self.active_tab, window, cx);
             }
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
+            PaletteCommand::OpenLocalTerminal => self.open_local_terminal(window, cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
             PaletteCommand::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteCommand::ToggleServerPanel => self.toggle_server_panel(cx),
@@ -1233,14 +1253,17 @@ impl AppView {
         if self.tabs_owed_after_unlock.is_some() {
             return;
         }
-        let open_tabs = OpenTabs {
-            hosts: self
-                .tabs
-                .iter()
-                .filter_map(|session| Uuid::parse_str(&session.read(cx).server_id).ok())
-                .collect(),
-            active: self.active_tab,
-        };
+        let host_of =
+            |session: &Entity<ServerSession>| Uuid::parse_str(&session.read(cx).server_id).ok();
+        // Local tabs are not saved, so the front one is counted among the hosts only.
+        let hosts: Vec<Uuid> = self.tabs.iter().filter_map(host_of).collect();
+        let active = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(host_of)
+            .and_then(|id| hosts.iter().position(|host| *host == id))
+            .unwrap_or(hosts.len());
+        let open_tabs = OpenTabs { hosts, active };
         if let Err(e) = open_tabs.save() {
             tracing::warn!(?e, "failed to save the open tabs");
         }
@@ -1256,7 +1279,7 @@ impl AppView {
         for s in &self.tabs {
             let sess = s.read(cx);
             let id = sess.server_id.clone();
-            let status = if sess.browser.is_some() {
+            let status = if sess.browser.is_some() || sess.is_local {
                 HostStatus::Connected
             } else if sess.disconnected.is_some() || sess.has_connect_failure() {
                 HostStatus::Disconnected
@@ -1565,6 +1588,16 @@ impl AppView {
             )
         });
 
+        self.add_session_tab(session, window, cx);
+    }
+
+    /// Show `session` in a tab of its own and follow what it reports.
+    fn add_session_tab(
+        &mut self,
+        session: Entity<ServerSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe_in(
             &session,
             window,
@@ -1746,6 +1779,24 @@ impl AppView {
         self.change_active_tab(self.tabs.len() - 1, cx);
     }
 
+    /// A tab with a shell on this computer.
+    fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shell = match crate::local_shell::open_local_shell(24, 80, None) {
+            Ok(shell) => shell,
+            Err(e) => {
+                tracing::warn!(%e, "could not open a local terminal");
+                self.set_status(format!("Could not open a local terminal: {e}"), cx);
+                return;
+            }
+        };
+        let file_associations = self.file_associations.clone();
+        let vault_state = self.vault_state.clone();
+        let session =
+            cx.new(|cx| ServerSession::start_local(shell, file_associations, vault_state, cx));
+        self.add_session_tab(session, window, cx);
+        self.sync_session_states(cx);
+    }
+
     /// Replace a dead session with a fresh connection to the same server.
     fn reconnect_session(
         &mut self,
@@ -1753,6 +1804,10 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // There is nothing to reconnect: the tab would close and not come back.
+        if session.read(cx).is_local {
+            return;
+        }
         // A fresh connection needs the entry from the vault. Closing the tab
         // now would lose it for good, so it waits for `resume_after_unlock`.
         if self.is_vault_locked(cx) {
@@ -2821,6 +2876,9 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenLocalTerminal, window, cx| {
+                this.open_local_terminal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.shortcut_new_terminal(window, cx)

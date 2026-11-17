@@ -854,6 +854,8 @@ pub struct ServerSession {
     /// Polls only while on screen. Made here and not on first show: gpui
     /// does not redraw a cached view for an entity created during a render.
     server_panel: Entity<ServerPanel>,
+    /// A terminal on this computer: no connection, no file panes, no panel.
+    pub(crate) is_local: bool,
 }
 
 impl EventEmitter<ServerSessionEvent> for ServerSession {}
@@ -1034,7 +1036,88 @@ impl ServerSession {
             _connect_task: task,
             probe_task: None,
             server_panel,
+            is_local: false,
         }
+    }
+
+    /// A tab with a shell on this computer. It never connects anywhere, so the
+    /// SSH parts are left empty and idle.
+    pub fn start_local(
+        shell: ShellHandle,
+        file_associations: SharedFileAssociations,
+        vault_state: Entity<VaultState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let server_id = format!(
+            "{}{}",
+            crate::ui::sidebar::LOCAL_SESSION_PREFIX,
+            uuid::Uuid::new_v4()
+        );
+        let conn_info = Connection {
+            id: server_id.clone(),
+            name: "Local".to_string(),
+            host: "this computer".to_string(),
+            port: 0,
+            username: String::new(),
+        };
+        let session = cx.entity().downgrade();
+        let server_panel = cx.new(|cx| ServerPanel::new(session, vault_state, cx));
+        let (retry_tx, _) = async_channel::bounded::<()>(1);
+        let route = SshRoute {
+            jumps: Vec::new(),
+            target: crate::ssh::SshHop {
+                entry_id: server_id.clone(),
+                label: String::new(),
+                host: String::new(),
+                port: 0,
+                username: String::new(),
+                credential: AuthCredential::Agent,
+                expected_host_key: None,
+                forward_agent: false,
+            },
+            proxy: None,
+        };
+        let mut local = Self {
+            server_id,
+            conn_info,
+            connection: None,
+            browser: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            is_terminal_focus_pending: true,
+            is_sftp_hidden: true,
+            shell_history: Vec::new(),
+            initial_restore: None,
+            disconnected: None,
+            connect_failure: None,
+            password_input: None,
+            is_saving_password: false,
+            passwords_to_save: Vec::new(),
+            reconnecting: None,
+            host_key_prompt: None,
+            auth_prompt: None,
+            peer: None,
+            retry_now: retry_tx,
+            route: Arc::new(Mutex::new(route)),
+            pending_conflict: VecDeque::new(),
+            transfers: Vec::new(),
+            transfer_history: Vec::new(),
+            tasks_open: false,
+            forwards: Vec::new(),
+            forwards_open: false,
+            ticking: false,
+            connection_generation: 0,
+            file_associations,
+            split_state: cx.new(|_| ResizableState::default()),
+            split_state_beside: cx.new(|_| ResizableState::default()),
+            _connect_task: Task::ready(()),
+            probe_task: None,
+            server_panel,
+            is_local: true,
+        };
+        local.add_terminal(shell, cx);
+        tracing::info!("local terminal opened");
+        local
     }
 
     /// The machine just woke from sleep. A reconnect backoff that is still
@@ -2159,6 +2242,10 @@ impl ServerSession {
 
 impl Render for ServerSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_local {
+            self.focus_terminal_if_pending(window, cx);
+            return self.render_local(cx);
+        }
         self.ensure_auth_prompt_inputs(window, cx);
         self.ensure_password_input(window, cx);
         self.focus_terminal_if_pending(window, cx);
@@ -2419,6 +2506,7 @@ impl Render for ServerSession {
             })
             .when_some(self.render_tasks_popover(cx), |el, pop| el.child(pop))
             .when_some(self.render_forwards_popover(cx), |el, pop| el.child(pop))
+            .into_any_element()
     }
 }
 

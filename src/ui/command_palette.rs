@@ -72,6 +72,7 @@ pub enum PaletteCommand {
     CloseSession,
     ReconnectSession,
     ChooseLeftSource,
+    OpenLocalTerminal,
 }
 
 struct CommandSpec {
@@ -94,7 +95,15 @@ const fn chord(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 /// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 15] = [
+const COMMANDS: [CommandSpec; 16] = [
+    CommandSpec {
+        command: PaletteCommand::OpenLocalTerminal,
+        label: "Local terminal",
+        keywords: "this computer shell zsh bash mac laptop new tab",
+        note: "",
+        shortcut: Some(crate::ui::app_view::LOCAL_TERMINAL_SHORTCUT),
+        needs_session: false,
+    },
     CommandSpec {
         command: PaletteCommand::NewHost,
         label: "New host",
@@ -1015,7 +1024,7 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::ToggleServerPanel => return Icon::empty().path("icons/panel-right.svg"),
         PaletteCommand::LockVault => return Icon::empty().path("icons/lock.svg"),
         PaletteCommand::CloseSession => IconName::Close,
-        PaletteCommand::NewTerminal => IconName::SquareTerminal,
+        PaletteCommand::NewTerminal | PaletteCommand::OpenLocalTerminal => IconName::SquareTerminal,
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
         | PaletteCommand::ChooseLeftSource => IconName::FolderOpen,
@@ -1308,16 +1317,17 @@ mod tests {
             command_labels("session", true),
             ["Close session", "Reconnect session"]
         );
-        assert!(command_labels("terminal", false).is_empty());
+        // A local terminal needs no session: it is one.
+        assert_eq!(command_labels("terminal", false), ["Local terminal"]);
         assert_eq!(
             command_labels("terminal", true),
-            ["New terminal", "Show or hide files"]
+            ["Local terminal", "New terminal", "Show or hide files"]
         );
         assert_eq!(
             command_labels("sftp", true),
             ["Show or hide files", "Focus files"]
         );
-        assert_eq!(command_labels("", false).len(), 8);
+        assert_eq!(command_labels("", false).len(), 9);
         assert_eq!(command_labels("", true).len(), COMMANDS.len());
     }
 

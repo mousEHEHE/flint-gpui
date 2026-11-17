@@ -10,7 +10,8 @@ use gpui::{
     div, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window,
 };
 use gpui_component::{
-    h_flex, tooltip::Tooltip, ActiveTheme as _, Icon, IconName, StyledExt as _, WindowExt as _,
+    h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, Icon, IconName, StyledExt as _,
+    WindowExt as _,
 };
 
 use crate::connection::Connection;
@@ -94,7 +95,7 @@ impl ServerSession {
     }
 
     fn can_open_terminal(&self) -> bool {
-        self.browser.is_some()
+        (self.is_local || self.browser.is_some())
             && self.disconnected.is_none()
             && self.reconnecting.is_none()
             && self.terminals.len() < MAX_TERMINALS
@@ -137,6 +138,10 @@ impl ServerSession {
     /// `startup` is typed into the new shell, and its path names the tab.
     fn open_terminal(&mut self, startup: Option<(Vec<u8>, String)>, cx: &mut Context<Self>) {
         if !self.can_open_terminal() {
+            return;
+        }
+        if self.is_local {
+            self.open_local_terminal(cx);
             return;
         }
         let Some(conn) = self.connection.clone() else {
@@ -204,6 +209,48 @@ impl ServerSession {
         .detach();
     }
 
+    fn open_local_terminal(&mut self, cx: &mut Context<Self>) {
+        let (rows, cols) = self
+            .active_terminal()
+            .and_then(|terminal| terminal.read(cx).grid_size())
+            .unwrap_or((24, 80));
+        match crate::local_shell::open_local_shell(rows, cols, None) {
+            Ok(shell) => {
+                self.add_terminal(shell, cx);
+                self.active_terminal = self.terminals.len() - 1;
+                self.is_terminal_focus_pending = true;
+                cx.notify();
+            }
+            Err(e) => {
+                tracing::warn!(%e, "could not open another local terminal");
+                cx.emit(ServerSessionEvent::StatusChanged(format!(
+                    "Error: could not open another terminal ({e})."
+                )));
+            }
+        }
+    }
+
+    /// The tab of a local session: its terminals and nothing else.
+    pub(crate) fn render_local(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(terminal_view) = self.active_terminal().cloned() else {
+            return div().size_full().into_any_element();
+        };
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .h(px(38.))
+                    .flex_none()
+                    .min_w_0()
+                    .px(px(8.))
+                    .items_center()
+                    .child(self.render_terminal_tabs(cx)),
+            )
+            .child(div().flex_1().overflow_hidden().child(terminal_view))
+            .into_any_element()
+    }
+
     fn activate_terminal(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.terminals.len() {
             return;
@@ -245,6 +292,11 @@ impl ServerSession {
         else {
             return;
         };
+        // A local tab is only its shells: when the last one ends, so does the tab.
+        if self.is_local && self.terminals.len() == 1 {
+            cx.emit(ServerSessionEvent::CloseRequested);
+            return;
+        }
         self.close_terminal(ix, cx);
     }
 

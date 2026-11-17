@@ -38,6 +38,9 @@ pub enum HostStatus {
     Disconnected,
 }
 
+/// The start of a local terminal session's id; see `ServerSession::start_local`.
+pub const LOCAL_SESSION_PREFIX: &str = "local-";
+
 pub enum SidebarEvent {
     OpenServer(Uuid),
     CloseServer(Uuid),
@@ -47,6 +50,9 @@ pub enum SidebarEvent {
     DeleteServerRequested(Uuid),
     SettingsRequested,
     FeedbackRequested,
+    /// A tab that is not a saved host: a local terminal. Carries its session id.
+    ShowTab(String),
+    CloseTab(String),
 }
 
 pub struct Sidebar {
@@ -252,6 +258,95 @@ impl Sidebar {
             )
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::OpenServer(entry_id));
+            }))
+            .into_any_element()
+    }
+
+    /// The row of a local terminal tab: no host behind it, so no menu.
+    fn local_row(
+        &self,
+        ui_idx: usize,
+        session_id: String,
+        shortcut: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hint = shortcut.filter(|_| shortcut_hints::is_shown(cx));
+        let theme = cx.theme();
+        let (bg_element_hover, bg_element_active, text) =
+            (theme.list_hover, theme.list_active, theme.foreground);
+        let text_dim = flint_theme::text_dim();
+        let is_active = self.active_server_id.as_deref() == Some(session_id.as_str());
+        let group_id: SharedString = format!("{SIDEBAR_GROUP}-{ui_idx}").into();
+        let (show_id, close_id) = (session_id.clone(), session_id);
+
+        h_flex()
+            .id(("sidebar-local", ui_idx))
+            .group(group_id.clone())
+            .relative()
+            .h(px(ROW_HEIGHT))
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .items_center()
+            .cursor_pointer()
+            .when(is_active, |el| el.bg(flint_theme::element()))
+            .when(!is_active, |el| {
+                el.hover(|s| s.bg(flint_theme::field()))
+                    .active(|s| s.bg(bg_element_active))
+            })
+            .child(
+                Icon::new(IconName::SquareTerminal)
+                    .size(px(12.))
+                    .text_color(text_dim),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .text_color(text)
+                    .truncate()
+                    .child("Local terminal"),
+            )
+            .child(
+                h_flex()
+                    .absolute()
+                    .right(px(4.))
+                    .gap(px(1.))
+                    .items_center()
+                    .when_some(hint.clone(), |row, keys| {
+                        row.child(shortcut_hints::badge(keys))
+                    })
+                    .when(hint.is_none(), |row| {
+                        row.child(
+                            div()
+                                .id(("sidebar-local-close", ui_idx))
+                                .size(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(3.))
+                                .text_color(text_dim)
+                                .invisible()
+                                .when(is_active, |el| el.visible())
+                                .group_hover(group_id, |s| s.visible())
+                                .hover(|s| s.bg(bg_element_hover).text_color(text))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Close terminal").build(window, cx)
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::CloseTab(close_id.clone()));
+                                    }),
+                                )
+                                .child(Icon::new(IconName::Close).size(px(10.))),
+                        )
+                    }),
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(SidebarEvent::ShowTab(show_id.clone()));
             }))
             .into_any_element()
     }
@@ -531,6 +626,12 @@ impl Render for Sidebar {
         }
         // Cmd+1 to Cmd+9 follow this order: it is the tab order.
         for (tab_index, (id, status)) in self.sessions.iter().enumerate() {
+            let shortcut = shortcut_hints::tab_key(tab_index);
+            if id.starts_with(LOCAL_SESSION_PREFIX) {
+                content.push(self.local_row(ui_idx, id.clone(), shortcut, cx));
+                ui_idx += 1;
+                continue;
+            }
             let Some(e) = by_id.get(id) else { continue };
             let sub: SharedString = match status {
                 HostStatus::Connected => "",
@@ -539,7 +640,6 @@ impl Render for Sidebar {
                 HostStatus::Offline => "offline",
             }
             .into();
-            let shortcut = shortcut_hints::tab_key(tab_index);
             content.push(self.host_row(ui_idx, e, sub, *status, false, true, shortcut, cx));
             ui_idx += 1;
         }

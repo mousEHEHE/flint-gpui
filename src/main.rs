@@ -33,7 +33,7 @@ mod ui;
 mod update;
 mod version;
 
-use flint_core::{account, connection, shell, ssh, ssh_target, vault};
+use flint_core::{account, connection, local_shell, shell, ssh, ssh_target, vault};
 use preferences::{Preferences, ThemePreference};
 use ui::root_view::RootView;
 
