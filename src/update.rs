@@ -13,8 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
+
+use crate::release_message::release_message;
+
+/// The public half of ~/.config/flint-release/update-signing.key on the
+/// developer's Mac (see examples/sign_release.rs). Only builds it signed are
+/// offered, so a server that was taken over cannot push its own.
+const RELEASE_PUBLIC_KEY: [u8; 32] = [
+    112, 146, 34, 188, 228, 160, 243, 237, 6, 69, 28, 200, 41, 149, 163, 52, 246, 47, 132, 202,
+    243, 125, 173, 80, 133, 74, 251, 136, 137, 64, 226, 86,
+];
 
 /// A build above this size is not what the server would ever publish.
 pub const MAX_DOWNLOAD_BYTES: u64 = 300 * 1024 * 1024;
@@ -48,7 +60,8 @@ fn platform_for(os: &str, is_sandboxed: bool) -> Option<&'static str> {
     }
 }
 
-/// The build the server offers for a platform.
+/// The build the server offers for a platform. Only made from an answer whose
+/// signature is right.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Release {
     pub version: String,
@@ -61,6 +74,14 @@ pub struct Release {
     pub download_path: String,
 }
 
+#[derive(Deserialize)]
+struct SignedRelease {
+    #[serde(flatten)]
+    release: Release,
+    #[serde(default)]
+    signature: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
     #[error("could not reach the server: {0}")]
@@ -69,6 +90,8 @@ pub enum UpdateError {
     Status(u16),
     #[error("the server sent an answer flint does not understand")]
     BadAnswer,
+    #[error("the build on the server is not signed by the flint developer")]
+    NotSigned,
     #[error("the file is larger than flint accepts")]
     TooLarge,
     #[error("the file is not the size the server announced, so it was not kept")]
@@ -117,10 +140,33 @@ pub fn latest_release(base_url: &str, platform: &str) -> Result<Option<Release>,
         return Err(UpdateError::Status(response.status()));
     }
     let text = response.into_string().map_err(|_| UpdateError::BadAnswer)?;
-    let release = serde_json::from_str(&text).map_err(|_| UpdateError::BadAnswer)?;
-    fit_for_display(release)
+    let signed: SignedRelease = serde_json::from_str(&text).map_err(|_| UpdateError::BadAnswer)?;
+    if !is_signed(&release_key(), platform, &signed) {
+        tracing::warn!(version = %signed.release.version, "the offered build has no valid signature");
+        return Err(UpdateError::NotSigned);
+    }
+    fit_for_display(signed.release)
         .map(Some)
         .ok_or(UpdateError::BadAnswer)
+}
+
+fn release_key() -> VerifyingKey {
+    #[cfg(test)]
+    return tests::test_key().verifying_key();
+    #[cfg(not(test))]
+    VerifyingKey::from_bytes(&RELEASE_PUBLIC_KEY).expect("the release key is a valid point")
+}
+
+fn is_signed(key: &VerifyingKey, platform: &str, signed: &SignedRelease) -> bool {
+    let Ok(bytes) = STANDARD.decode(&signed.signature) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&bytes) else {
+        return false;
+    };
+    let release = &signed.release;
+    let message = release_message(platform, &release.version, &release.sha256);
+    key.verify_strict(message.as_bytes(), &signature).is_ok()
 }
 
 /// The dialog shows the notes and the file name as the server sent them, so
@@ -476,6 +522,17 @@ mod tests {
 
     use super::*;
 
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    pub(super) fn test_key() -> SigningKey {
+        SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn signature_of(platform: &str, release: &Release) -> String {
+        let message = release_message(platform, &release.version, &release.sha256);
+        STANDARD.encode(test_key().sign(message.as_bytes()).to_bytes())
+    }
+
     const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
     fn hello_release() -> Release {
@@ -550,6 +607,10 @@ mod tests {
     }
 
     fn release_answer(release: &Release) -> Vec<u8> {
+        signed_answer(release, &signature_of("macos", release))
+    }
+
+    fn signed_answer(release: &Release, signature: &str) -> Vec<u8> {
         let body = serde_json::json!({
             "platform": "macos",
             "version": release.version,
@@ -559,6 +620,7 @@ mod tests {
             "sha256": release.sha256,
             "published_at": "2026-10-11T10:00:00Z",
             "download_path": release.download_path,
+            "signature": signature,
         });
         file_answer(body.to_string().as_bytes())
     }
@@ -795,10 +857,11 @@ mod tests {
 
     #[test]
     fn the_check_sends_the_platform_and_nothing_about_the_user() {
-        let body = br#"{"platform":"macos","version":"0.2.0","notes":"Faster.\nSmaller.",
-            "filename":"Flint-0.2.0.dmg","size_bytes":5,"sha256":"abc",
-            "published_at":"2026-10-11T10:00:00Z","download_path":"/api/v1/downloads/macos"}"#;
-        let (base_url, served) = serve_once(file_answer(body));
+        let sent = Release {
+            notes: "Faster.\nSmaller.".into(),
+            ..hello_release()
+        };
+        let (base_url, served) = serve_once(release_answer(&sent));
 
         let release = latest_release(&base_url, "macos").unwrap().unwrap();
         let request = served.join().unwrap();
@@ -851,6 +914,55 @@ mod tests {
             safe_file_name(&release.filename).as_deref(),
             Some("Fli-nt-0.2.0.dmg")
         );
+    }
+
+    #[test]
+    fn only_a_build_signed_for_this_platform_version_and_file_is_offered() {
+        let release = hello_release();
+        let good = signature_of("macos", &release);
+        let other_key = STANDARD.encode(
+            SigningKey::from_bytes(&[8; 32])
+                .sign(release_message("macos", "0.2.0", HELLO_SHA256).as_bytes())
+                .to_bytes(),
+        );
+        let refused = [
+            signed_answer(&release, ""),
+            signed_answer(&release, "not base64!"),
+            signed_answer(&release, &other_key),
+            signed_answer(&release, &signature_of("windows", &release)),
+            // The server changed the version or the file under a good signature.
+            signed_answer(
+                &Release {
+                    version: "9.0.0".into(),
+                    ..release.clone()
+                },
+                &good,
+            ),
+            signed_answer(
+                &Release {
+                    sha256: WORLD_SHA256.into(),
+                    ..release.clone()
+                },
+                &good,
+            ),
+        ];
+        for answer in refused {
+            let (base_url, served) = serve_once(answer);
+            assert!(matches!(
+                latest_release(&base_url, "macos"),
+                Err(UpdateError::NotSigned)
+            ));
+            served.join().unwrap();
+        }
+
+        let (base_url, served) = serve_once(signed_answer(&release, &good));
+        assert_eq!(latest_release(&base_url, "macos").unwrap(), Some(release));
+        served.join().unwrap();
+    }
+
+    #[test]
+    fn the_built_in_release_key_is_a_valid_key() {
+        assert!(VerifyingKey::from_bytes(&RELEASE_PUBLIC_KEY).is_ok());
     }
 
     #[test]

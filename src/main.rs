@@ -17,6 +17,8 @@ mod import;
 mod logging;
 mod open_tabs;
 mod preferences;
+mod release_message;
+mod self_update;
 mod server_stats;
 // Reads the Termius app's local database. Only Windows stores the vault key
 // in a form flint can use; on macOS and Linux a signed-in Termius encrypts its
@@ -40,6 +42,7 @@ fn main() {
     vault::memory::disable_core_dumps();
 
     logging::init();
+    std::thread::spawn(self_update::remove_leftovers);
 
     let platform = gpui_platform::current_platform(false);
     Application::with_platform(platform)

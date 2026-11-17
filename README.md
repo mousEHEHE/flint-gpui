@@ -35,6 +35,7 @@ For Linux and Intel Mac you need to build it yourself for now.
 - Snippets.
 - Import from `~/.ssh/config`, and from PuTTY on Windows.
 - Everything is kept in a vault with master password and a 24-word recovery phrase.
+- Updates install from the app, then it restarts. The app checks that the build is signed with my key before it installs it.
 
 ## Sync and teams
 
@@ -76,7 +77,6 @@ sudo apt install build-essential clang cmake pkg-config \
 - No key generation, and `.ppk` keys are not supported.
 - The vault does not lock by itself, only when you lock it.
 - A stopped file transfer starts from the beginning.
-- Updates are not signed. The app only tells you there is a new version and downloads the file, you install it yourself.
 - Linux build is almost not tested.
 - Nobody did a security audit of it.
 

@@ -1,5 +1,5 @@
 //! The dialog behind the title bar's update mark: what is new, and the
-//! download of it. It only shows what `UpdateService` knows.
+//! download and install of it. It only shows what `UpdateService` knows.
 
 use gpui::prelude::*;
 use gpui::{div, px, Context, EventEmitter, Window};
@@ -47,7 +47,7 @@ impl UpdateView {
         Button::new("update-download")
             .small()
             .primary()
-            .child("Download")
+            .child("Update")
             .on_click(|_, _, cx| {
                 UpdateService::global(cx).update(cx, |service, cx| service.start_download(cx));
             })
@@ -69,7 +69,17 @@ impl UpdateView {
                             .update(cx, |service, cx| service.cancel_download(cx));
                     }),
             ),
-            Download::Done(_) => buttons.child(Self::close_button("Close", cx)).child(
+            Download::Installing => buttons,
+            Download::Installed { .. } => buttons.child(Self::close_button("Later", cx)).child(
+                Button::new("update-restart")
+                    .small()
+                    .primary()
+                    .child("Restart")
+                    .on_click(|_, _, cx| {
+                        UpdateService::global(cx).update(cx, |service, cx| service.restart(cx));
+                    }),
+            ),
+            Download::Done { .. } => buttons.child(Self::close_button("Close", cx)).child(
                 Button::new("update-reveal")
                     .small()
                     .primary()
@@ -96,7 +106,12 @@ fn progress_line(download: &Download) -> Option<String> {
     match download {
         Download::Idle => None,
         Download::Running { percent } => Some(format!("Downloading\u{2026} {percent}%")),
-        Download::Done(path) => Some(format!("Saved to {}", path.display())),
+        Download::Installing => Some("Installing\u{2026}".into()),
+        Download::Installed { .. } => Some("Installed. It starts when flint restarts.".into()),
+        Download::Done { path, problem } => Some(format!(
+            "{problem} The file is saved to {}, open it to update by hand.",
+            path.display()
+        )),
         Download::Failed(problem) => Some(problem.clone()),
     }
 }
@@ -137,7 +152,7 @@ impl Render for UpdateView {
         };
 
         let notes = release.notes.clone();
-        let is_failed = matches!(download, Download::Failed(_));
+        let is_failed = matches!(download, Download::Failed(_) | Download::Done { .. });
         let progress = progress_line(&download);
         let buttons = Self::render_buttons(&download, cx);
 
@@ -206,8 +221,15 @@ mod tests {
             Some("Downloading\u{2026} 42%")
         );
         assert_eq!(
-            progress_line(&Download::Done("/home/me/Downloads/Flint-0.2.0.dmg".into())).as_deref(),
-            Some("Saved to /home/me/Downloads/Flint-0.2.0.dmg")
+            progress_line(&Download::Done {
+                path: "/home/me/Downloads/Flint-0.2.0.zip".into(),
+                problem: "Could not install: no access.".into(),
+            })
+            .as_deref(),
+            Some(
+                "Could not install: no access. The file is saved to \
+                 /home/me/Downloads/Flint-0.2.0.zip, open it to update by hand."
+            )
         );
         assert_eq!(
             progress_line(&Download::Failed("Could not download: x.".into())).as_deref(),

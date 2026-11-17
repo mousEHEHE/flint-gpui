@@ -46,6 +46,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 ureq = "2"
 sha2 = "0.10"
+# Checks the signature of an update. Already built for russh.
+ed25519-dalek = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1928,6 +1928,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "crypto_secretbox",
  "dirs 5.0.1",
+ "ed25519-dalek",
  "flint-core",
  "futures",
  "gif 0.14.2",

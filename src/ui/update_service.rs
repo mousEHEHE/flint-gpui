@@ -1,5 +1,6 @@
-//! Knows whether a newer build is out, and downloads it when asked. Lives for
-//! the whole run of the app, so the title bar and Settings show one state.
+//! Knows whether a newer build is out, and downloads and installs it when
+//! asked. Lives for the whole run of the app, so the title bar and Settings
+//! show one state.
 //!
 //! The requests themselves are in `crate::update`. This file decides when
 //! they are made: never on an OS without builds, on a timer only when the
@@ -27,8 +28,20 @@ const DUE_LOOK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 #[derive(Clone)]
 pub enum Download {
     Idle,
-    Running { percent: u8 },
-    Done(PathBuf),
+    Running {
+        percent: u8,
+    },
+    Installing,
+    /// The new build is in place and starts with the next start of `app`.
+    Installed {
+        app: PathBuf,
+    },
+    /// Saved, but it could not be installed: `problem` says why. The user
+    /// can still open the file by hand.
+    Done {
+        path: PathBuf,
+        problem: String,
+    },
     Failed(String),
 }
 
@@ -56,8 +69,12 @@ impl Global for GlobalUpdateService {}
 enum DownloadEvent {
     Progress(u8),
     /// The build that was saved, which is the server's current build, and
-    /// where it is.
+    /// where it is. Installing it starts right away.
     Finished(Result<(Release, PathBuf), UpdateError>),
+    Installed {
+        zip: PathBuf,
+        result: Result<PathBuf, String>,
+    },
 }
 
 impl UpdateService {
@@ -174,8 +191,12 @@ impl UpdateService {
     }
 
     fn take_offer(&mut self, offered: Option<Release>) {
-        // The download on screen belongs to the release on screen.
-        let is_downloading = matches!(self.download, Download::Running { .. });
+        // The download on screen belongs to the release on screen. An
+        // installed build waits for the restart, whatever the server says now.
+        let is_downloading = matches!(
+            self.download,
+            Download::Running { .. } | Download::Installing | Download::Installed { .. }
+        );
         if is_downloading || self.release == offered {
             return;
         }
@@ -196,7 +217,7 @@ impl UpdateService {
         cx.notify();
     }
 
-    /// Fetch the offered build into the Downloads folder.
+    /// Fetch the offered build into the Downloads folder and install it.
     pub fn start_download(&mut self, cx: &mut Context<Self>) {
         let Some(platform) = update::platform() else {
             return;
@@ -204,7 +225,10 @@ impl UpdateService {
         let Some(release) = self.release.clone() else {
             return;
         };
-        if matches!(self.download, Download::Running { .. }) {
+        if matches!(
+            self.download,
+            Download::Running { .. } | Download::Installing
+        ) {
             return;
         }
         let Some(folder) = dirs::download_dir().or_else(dirs::home_dir) else {
@@ -238,7 +262,12 @@ impl UpdateService {
                 &is_cancelled,
                 on_progress,
             );
+            let zip = done.as_ref().ok().map(|(_, path)| path.clone());
             let _ = tx.try_send(DownloadEvent::Finished(done));
+            // A cancel that came as the download ended must not replace the app.
+            if let Some(zip) = zip.filter(|_| !is_cancelled.load(Ordering::Relaxed)) {
+                let _ = tx.try_send(install(zip));
+            }
         });
 
         let generation = self.generation;
@@ -282,8 +311,15 @@ impl UpdateService {
                 // Not always the build that was offered: the server may have
                 // replaced it since the check.
                 self.release = Some(release);
-                Download::Done(path)
+                Download::Installing
             }
+            DownloadEvent::Installed {
+                result: Ok(app), ..
+            } => Download::Installed { app },
+            DownloadEvent::Installed {
+                zip,
+                result: Err(problem),
+            } => Download::Done { path: zip, problem },
             // Only a cancel the service did not ask for ends up here.
             DownloadEvent::Finished(Err(UpdateError::Cancelled)) => Download::Idle,
             // The server has nothing newer any more, so there is no offer.
@@ -299,13 +335,31 @@ impl UpdateService {
         };
     }
 
+    /// Quit, and start the installed build once this one is gone.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        let Download::Installed { app } = &self.download else {
+            return;
+        };
+        match crate::self_update::relaunch_after_quit(app) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                tracing::warn!(?e, "could not restart into the new version");
+                self.download = Download::Failed(
+                    "The new version is installed, but flint could not restart. Quit and open it again."
+                        .into(),
+                );
+                cx.notify();
+            }
+        }
+    }
+
     /// Show the downloaded build in Finder or Explorer.
     pub fn reveal_download(&mut self, cx: &mut Context<Self>) {
         if self.forget_missing_download() {
             cx.notify();
             return;
         }
-        let Download::Done(path) = &self.download else {
+        let Download::Done { path, .. } = &self.download else {
             return;
         };
         let path = path.clone();
@@ -319,7 +373,7 @@ impl UpdateService {
     /// The user moved or deleted the downloaded build: say so, which also
     /// brings the Download button back. Returns whether that happened.
     fn forget_missing_download(&mut self) -> bool {
-        let Download::Done(path) = &self.download else {
+        let Download::Done { path, .. } = &self.download else {
             return false;
         };
         if path.exists() {
@@ -342,6 +396,22 @@ impl UpdateService {
             (None, None) => "Checks only when you press Check now".into(),
         }
     }
+}
+
+/// Runs on the download's worker thread. A build that is in place needs its
+/// zip no more.
+fn install(zip: PathBuf) -> DownloadEvent {
+    let result = crate::self_update::install(&zip)
+        .inspect(|_| {
+            if let Err(e) = std::fs::remove_file(&zip) {
+                tracing::debug!(?e, "could not remove the installed zip");
+            }
+        })
+        .map_err(|e| {
+            tracing::warn!(error = format!("{e:#}"), "could not install the update");
+            format!("Could not install: {e:#}.")
+        });
+    DownloadEvent::Installed { zip, result }
 }
 
 /// A check is due when the last one failed, or went well six hours ago.
@@ -432,11 +502,14 @@ mod tests {
     fn a_new_offer_replaces_the_old_one_and_its_download() {
         let mut service = service();
         service.take_offer(Some(release("0.2.0")));
-        service.download = Download::Done("/tmp/Flint-0.2.0.dmg".into());
+        service.download = Download::Done {
+            path: "/tmp/Flint-0.2.0.dmg".into(),
+            problem: String::new(),
+        };
 
         // The same offer again keeps the finished download.
         service.take_offer(Some(release("0.2.0")));
-        assert!(matches!(service.download, Download::Done(_)));
+        assert!(matches!(service.download, Download::Done { .. }));
 
         service.take_offer(Some(release("0.3.0")));
         assert_eq!(service.release, Some(release("0.3.0")));
@@ -494,9 +567,38 @@ mod tests {
         service.take_download_event(DownloadEvent::Finished(Ok(saved)));
 
         assert_eq!(service.release, Some(release("0.3.0")));
+        assert!(matches!(service.download, Download::Installing));
+        // A new offer does not take the install away under it.
+        service.take_offer(Some(release("0.4.0")));
+        assert_eq!(service.release, Some(release("0.3.0")));
+    }
+
+    #[test]
+    fn an_install_ends_ready_to_restart_or_with_the_file_to_open_by_hand() {
+        let mut service = service();
+        service.download = Download::Installing;
+        service.take_download_event(DownloadEvent::Installed {
+            zip: "/tmp/Flint-0.3.0.zip".into(),
+            result: Ok("/Applications/Flint.app".into()),
+        });
         assert!(
-            matches!(&service.download, Download::Done(path) if path.ends_with("Flint-0.3.0.dmg"))
+            matches!(&service.download, Download::Installed { app } if app.ends_with("Flint.app"))
         );
+        // The server withdrew the build or has a newer one: what is installed
+        // still waits for the restart.
+        service.take_offer(None);
+        assert!(matches!(service.download, Download::Installed { .. }));
+
+        service.download = Download::Installing;
+        service.take_download_event(DownloadEvent::Installed {
+            zip: "/tmp/Flint-0.3.0.zip".into(),
+            result: Err("Could not install: no access.".into()),
+        });
+        let Download::Done { path, problem } = &service.download else {
+            panic!("a failed install must leave the file to open by hand");
+        };
+        assert!(path.ends_with("Flint-0.3.0.zip"));
+        assert_eq!(problem, "Could not install: no access.");
     }
 
     #[test]
@@ -531,10 +633,13 @@ mod tests {
         let path = dir.path().join("Flint-0.2.0.dmg");
         std::fs::write(&path, "build").unwrap();
         let mut service = service();
-        service.download = Download::Done(path.clone());
+        service.download = Download::Done {
+            path: path.clone(),
+            problem: String::new(),
+        };
 
         assert!(!service.forget_missing_download());
-        assert!(matches!(service.download, Download::Done(_)));
+        assert!(matches!(service.download, Download::Done { .. }));
 
         std::fs::remove_file(&path).unwrap();
         assert!(service.forget_missing_download());
