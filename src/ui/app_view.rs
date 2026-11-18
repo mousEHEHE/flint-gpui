@@ -1576,7 +1576,12 @@ impl AppView {
         };
         // The session keeps the forwards itself, so it can start the
         // auto-start ones again on every reconnect without the vault.
-        let forwards = forward_runtimes(&entry);
+        let is_team_host = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .is_some_and(|vm| vm.is_team_record(entry.id));
+        let forwards = forward_runtimes(&entry, is_team_host);
         drop(entry);
 
         let file_associations = self.file_associations.clone();
@@ -2545,7 +2550,12 @@ impl AppView {
                     // The form owns forwards, so a live session must not keep
                     // running rules the user just changed or deleted.
                     if !is_add {
-                        let forwards = forward_runtimes(entry);
+                        let is_team_host = this
+                            .vault_state
+                            .read(cx)
+                            .manager()
+                            .is_some_and(|vm| vm.is_team_record(id));
+                        let forwards = forward_runtimes(entry, is_team_host);
                         this.push_forwards_to_session(id, forwards, cx);
                     }
                     this.key_share_asked = None;
@@ -3060,15 +3070,16 @@ fn connection_info(entry: &ServerEntry) -> Connection {
 }
 
 /// A host's saved forwards as the runtime list a session tracks. Each starts
-/// out stopped: nothing is bound until the connection is up.
-fn forward_runtimes(entry: &ServerEntry) -> Vec<ForwardRuntime> {
+/// out stopped: nothing is bound until the connection is up. A team host's
+/// never start by themselves: anyone in the team could open ports on this computer.
+fn forward_runtimes(entry: &ServerEntry, is_team_host: bool) -> Vec<ForwardRuntime> {
     entry
         .forwards
         .iter()
         .map(|forward| ForwardRuntime {
             spec: forward.spec(),
             name: forward.name.clone(),
-            auto_start: forward.auto_start,
+            auto_start: forward.auto_start && !is_team_host,
             state: ForwardState::Stopped { reason: None },
         })
         .collect()

@@ -1587,7 +1587,7 @@ impl ServerFormView {
             return false;
         };
         let vault = self.vault_state.read(cx).manager();
-        vault.is_some_and(|vm| vm.team_of(id).is_some())
+        vault.is_some_and(|vm| vm.is_team_record(id))
     }
 
     fn render_agent_forwarding(&self, cx: &mut Context<Self>) -> impl IntoElement {
