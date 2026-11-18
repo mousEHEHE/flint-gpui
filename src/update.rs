@@ -286,7 +286,7 @@ pub fn download(
 /// is the only check left if the server itself was taken over. Best effort:
 /// a file system without these marks still gets the file.
 #[cfg(target_os = "macos")]
-fn mark_as_downloaded(path: &Path) {
+pub(crate) fn mark_as_downloaded(path: &Path) {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -302,7 +302,7 @@ fn mark_as_downloaded(path: &Path) {
 }
 
 #[cfg(windows)]
-fn mark_as_downloaded(path: &Path) {
+pub(crate) fn mark_as_downloaded(path: &Path) {
     // The "mark of the web": a second stream of the file, zone 3 = internet.
     let mut stream = path.as_os_str().to_owned();
     stream.push(":Zone.Identifier");
@@ -312,7 +312,7 @@ fn mark_as_downloaded(path: &Path) {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn mark_as_downloaded(_path: &Path) {}
+pub(crate) fn mark_as_downloaded(_path: &Path) {}
 
 /// A name of its own for every attempt. A cancelled download can still be
 /// running when the next one starts, and must not share its file.

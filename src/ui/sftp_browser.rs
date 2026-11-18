@@ -3108,6 +3108,9 @@ async fn download_to_cache(
         .download_file(remote, part.clone())
         .await
         .and_then(|done| {
+            // A file from the server is from the internet: macOS and Windows then ask
+            // before running it, as they would for a browser download.
+            crate::update::mark_as_downloaded(&part);
             std::fs::rename(&part, local)?;
             Ok(done)
         });
