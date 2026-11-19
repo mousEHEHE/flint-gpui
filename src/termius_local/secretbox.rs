@@ -12,22 +12,14 @@ use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 use zeroize::Zeroizing;
 
 /// Open a secretbox given the 32-byte key, 24-byte nonce and the
-/// `MAC || ciphertext` body (libsodium layout). Returns `None` on a bad key
-/// length or a failed authentication.
+/// `MAC || ciphertext` body (libsodium layout, which `crypto_secretbox` uses
+/// too). Returns `None` on a bad key length or a failed authentication.
 pub fn open(key: &[u8], nonce: &[u8], mac_then_ciphertext: &[u8]) -> Option<Vec<u8>> {
     if key.len() != 32 || nonce.len() != 24 || mac_then_ciphertext.len() < 16 {
         return None;
     }
-    // RustCrypto's AEAD expects the tag appended (`ciphertext || MAC`), while
-    // NaCl puts the MAC first. Reorder before opening.
-    let (mac, ciphertext) = mac_then_ciphertext.split_at(16);
-    let mut reordered = Vec::with_capacity(mac_then_ciphertext.len());
-    reordered.extend_from_slice(ciphertext);
-    reordered.extend_from_slice(mac);
-
-    let cipher = XSalsa20Poly1305::new(Key::from_slice(key));
-    cipher
-        .decrypt(Nonce::from_slice(nonce), reordered.as_slice())
+    XSalsa20Poly1305::new(Key::from_slice(key))
+        .decrypt(Nonce::from_slice(nonce), mac_then_ciphertext)
         .ok()
 }
 
@@ -116,27 +108,34 @@ mod tests {
     use crypto_secretbox::aead::{Aead, KeyInit};
     use crypto_secretbox::{Key, Nonce, XSalsa20Poly1305};
 
-    /// Seal with the crate, convert to NaCl layout, and check `open` recovers
-    /// the plaintext. This pins the MAC-first reordering against a vector the
-    /// crate itself produced.
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The secretbox test vector from NaCl and libsodium, in their
+    /// `MAC || ciphertext` layout. Termius writes fields with libsodium.
     #[test]
-    fn open_round_trips_nacl_layout() {
-        let key = [7u8; 32];
-        let nonce = [9u8; 24];
-        let plaintext = b"hunter2 the password";
-
-        let cipher = XSalsa20Poly1305::new(Key::from_slice(&key));
-        // crate output is `ciphertext || MAC`.
-        let sealed = cipher
-            .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
-            .unwrap();
-        let (ciphertext, mac) = sealed.split_at(sealed.len() - 16);
-        let mut nacl = Vec::new();
-        nacl.extend_from_slice(mac);
-        nacl.extend_from_slice(ciphertext);
-
-        let opened = open(&key, &nonce, &nacl).unwrap();
-        assert_eq!(opened, plaintext);
+    fn open_reads_the_libsodium_test_vector() {
+        let key = hex("1b27556473e985d462cd51197a9a46c76009549eac6474f206c4ee0844f68389");
+        let nonce = hex("69696ee955b62b73cd62bda875fc73d68219e0036b7a0b37");
+        let message = hex(concat!(
+            "be075fc53c81f2d5cf141316ebeb0c7b5228c52a4c62cbd44b66849b64244ffc",
+            "e5ecbaaf33bd751a1ac728d45e6c61296cdc3c01233561f41db66cce314adb31",
+            "0e3be8250c46f06dceea3a7fa1348057e2f6556ad6b1318a024a838f21af1fde",
+            "048977eb48f59ffd4924ca1c60902e52f0a089bc76897040e082f93776384864",
+            "5e0705",
+        ));
+        let boxed = hex(concat!(
+            "f3ffc7703f9400e52a7dfb4b3d3305d98e993b9f48681273c29650ba32fc76ce",
+            "48332ea7164d96a4476fb8c531a1186ac0dfc17c98dce87b4da7f011ec48c972",
+            "71d2c20f9b928fe2270d6fb863d51738b48eeee314a7cc8ab932164548e526ae",
+            "90224368517acfeabd6bb3732bc0e9da99832b61ca01b6de56244a9e88d5f9b3",
+            "7973f622a43d14a6599b1f654cb45a74e355a5",
+        ));
+        assert_eq!(open(&key, &nonce, &boxed), Some(message));
     }
 
     #[test]
@@ -159,12 +158,9 @@ mod tests {
         let sealed = cipher
             .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
             .unwrap();
-        let (ciphertext, mac) = sealed.split_at(sealed.len() - 16);
-
-        let mut raw = vec![0x04u8, 0x00];
+        let mut raw = vec![0x04u8, 0x01];
         raw.extend_from_slice(&nonce);
-        raw.extend_from_slice(mac);
-        raw.extend_from_slice(ciphertext);
+        raw.extend_from_slice(&sealed);
         let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
         assert!(encoded.starts_with("BA"));
 
