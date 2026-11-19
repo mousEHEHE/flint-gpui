@@ -5,6 +5,13 @@
 `assets/fonts/CascadiaCode.ttf` is Cascadia Code, © Microsoft Corporation,
 SIL Open Font License 1.1. Full text: `assets/fonts/CascadiaCode-LICENSE.txt`.
 
+`assets/fonts/CaskaydiaMonoNerdFontMono.ttf` is CaskaydiaMono Nerd Font Mono
+3.4.0 from [Nerd Fonts](https://github.com/ryanoasis/nerd-fonts): Cascadia Mono,
+© Microsoft Corporation, with the Nerd Fonts glyphs added, SIL Open Font
+License 1.1. Full text: `assets/fonts/CaskaydiaMono-LICENSE.txt`. The terminal
+draws Powerline and icon characters with it. The glyphs come from the icon sets
+Nerd Fonts lists, each under its own license.
+
 ## Icons
 
 The icons in `assets/icons/` are from [Lucide](https://lucide.dev), except

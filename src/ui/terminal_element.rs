@@ -428,6 +428,18 @@ struct TextStyleKey {
     underline: bool,
     strikethrough: bool,
     dim: bool,
+    is_symbol: bool,
+}
+
+/// The bundled face for Powerline and Nerd Font icons. gpui loads no font
+/// without an "m", so it is a whole Cascadia with them, not the symbols only.
+const SYMBOLS_FONT: &str = "CaskaydiaMono Nerd Font Mono";
+
+/// Private use characters: Powerline arrows and Nerd Font icons live there,
+/// and a regular face draws them as boxes. A font fallback cannot reach a
+/// font the app loaded itself on macOS, so these cells pick the face directly.
+fn is_symbol(c: char) -> bool {
+    matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}')
 }
 
 /// The default face is the one the rest of the app uses. A system monospace
@@ -552,9 +564,14 @@ fn layout_grid(
                 underline: cell.underline,
                 strikethrough: cell.strikethrough,
                 dim: cell.dim,
+                is_symbol: is_symbol(cell.c),
             };
 
-            let mut cell_font = term_font.clone();
+            let mut cell_font = if cell_txt_key.is_symbol {
+                font(SYMBOLS_FONT)
+            } else {
+                term_font.clone()
+            };
             if cell.bold {
                 cell_font.weight = FontWeight::BOLD;
             }

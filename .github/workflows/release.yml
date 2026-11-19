@@ -49,7 +49,7 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           Compress-Archive `
             -Path target/release/flint.exe, LICENSE, THIRD-PARTY.md, `
-              assets/fonts/CascadiaCode-LICENSE.txt, assets/icons/LUCIDE-LICENSE.txt `
+              assets/fonts/CascadiaCode-LICENSE.txt, assets/fonts/CaskaydiaMono-LICENSE.txt, assets/icons/LUCIDE-LICENSE.txt `
             -DestinationPath "Flint-$version-windows-x86_64.zip"
 
       - uses: actions/upload-artifact@v7

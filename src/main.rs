@@ -51,13 +51,15 @@ fn main() {
         .run(|cx: &mut App| {
             // The assets folder is embedded whole, so the font comes from
             // there and is not compiled in a second time.
-            let font = Assets
-                .load("fonts/CascadiaCode.ttf")
-                .expect("read the embedded assets")
-                .expect("Cascadia Code is among the embedded assets");
+            let fonts = ["fonts/CascadiaCode.ttf", "fonts/CaskaydiaMonoNerdFontMono.ttf"].map(|path| {
+                Assets
+                    .load(path)
+                    .expect("read the embedded assets")
+                    .expect("the fonts are among the embedded assets")
+            });
             cx.text_system()
-                .add_fonts(vec![font])
-                .expect("load Cascadia Code font");
+                .add_fonts(fonts.into())
+                .expect("load the bundled fonts");
 
             gpui_component::init(cx);
             crate::ui::terminal_view::init(cx);
