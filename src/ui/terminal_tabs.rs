@@ -90,6 +90,27 @@ fn split_after_close(split: SplitPanes, closed: usize) -> SplitPanes {
     Some((shift(left), shift(right)))
 }
 
+/// Where each tab lands after a reconnect brought `shells` fresh server
+/// shells: local tabs stay, server tabs take the shells in order, and a
+/// server tab left without one goes (`None`).
+fn tabs_after_reconnect(is_local: &[bool], shells: usize) -> Vec<Option<usize>> {
+    let mut kept = 0;
+    let mut used = 0;
+    is_local
+        .iter()
+        .map(|&is_local| {
+            if !is_local {
+                if used == shells {
+                    return None;
+                }
+                used += 1;
+            }
+            kept += 1;
+            Some(kept - 1)
+        })
+        .collect()
+}
+
 /// The panes after tab `target` is picked while `active` has the keys. A tab
 /// already on screen only gets the keys; any other takes the active pane.
 fn split_after_activate(split: SplitPanes, active: usize, target: usize) -> SplitPanes {
@@ -110,10 +131,22 @@ impl ServerSession {
     }
 
     /// Wrap a freshly opened shell in a terminal tab at the end of the strip.
-    pub(crate) fn add_terminal(&mut self, shell: ShellHandle, cx: &mut Context<Self>) {
-        let history = self.shell_history.clone();
+    /// `is_local`: the shell runs on this computer, not on the server.
+    pub(crate) fn add_terminal(
+        &mut self,
+        shell: ShellHandle,
+        is_local: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // The server's command history is no help in a shell on this computer.
+        let history = if is_local {
+            Vec::new()
+        } else {
+            self.shell_history.clone()
+        };
         let terminal = cx.new(|cx| {
             let mut view = TerminalView::new(shell, cx);
+            view.is_local = is_local;
             if !history.is_empty() {
                 view.set_history(history, cx);
             }
@@ -127,6 +160,70 @@ impl ServerSession {
         )
         .detach();
         self.terminals.push(terminal);
+    }
+
+    fn is_server_terminal(&self, ix: usize, cx: &App) -> bool {
+        self.terminals
+            .get(ix)
+            .is_some_and(|terminal| self.is_local || !terminal.read(cx).is_local)
+    }
+
+    pub(crate) fn server_terminal_count(&self, cx: &App) -> usize {
+        (0..self.terminals.len())
+            .filter(|&ix| self.is_server_terminal(ix, cx))
+            .count()
+    }
+
+    /// Where commands for the server go: the terminal in front, or when that
+    /// one runs on this computer, the other pane, then the first server tab.
+    pub(crate) fn server_terminal(&self, cx: &App) -> Option<&Entity<TerminalView>> {
+        let partner = self.split.map(|(left, right)| {
+            if self.active_terminal == left {
+                right
+            } else {
+                left
+            }
+        });
+        std::iter::once(self.active_terminal)
+            .chain(partner)
+            .chain(0..self.terminals.len())
+            .find(|&ix| self.is_server_terminal(ix, cx))
+            .and_then(|ix| self.terminals.get(ix))
+    }
+
+    /// A reconnect opened fresh server shells: the server tabs take them,
+    /// the local ones keep running as they are.
+    pub(crate) fn replace_server_shells(
+        &mut self,
+        shells: Vec<ShellHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        let old = std::mem::take(&mut self.terminals);
+        let is_local: Vec<bool> = old
+            .iter()
+            .map(|terminal| terminal.read(cx).is_local)
+            .collect();
+        let new_index = tabs_after_reconnect(&is_local, shells.len());
+        let mut shells = shells.into_iter();
+        for terminal in old {
+            if terminal.read(cx).is_local {
+                self.terminals.push(terminal);
+            } else if let Some(shell) = shells.next() {
+                self.add_terminal(shell, false, cx);
+            }
+        }
+        // The first connect, or a tab with only local terminals left.
+        for shell in shells {
+            self.add_terminal(shell, false, cx);
+        }
+        let moved = |ix: usize| new_index.get(ix).copied().flatten();
+        // A shell the server refused to reopen may have been the active one.
+        self.active_terminal = moved(self.active_terminal)
+            .unwrap_or(self.active_terminal)
+            .min(self.terminals.len().saturating_sub(1));
+        self.split = self
+            .split
+            .and_then(|(left, right)| Some((moved(left)?, moved(right)?)));
     }
 
     fn can_open_terminal(&self) -> bool {
@@ -216,7 +313,7 @@ impl ServerSession {
                             .detach();
                         path
                     });
-                    session.add_terminal(shell, cx);
+                    session.add_terminal(shell, false, cx);
                     if let Some(terminal) = session.terminals.last() {
                         terminal.update(cx, |view, _| view.edited_file = edited_file);
                     }
@@ -254,7 +351,7 @@ impl ServerSession {
             .unwrap_or((24, 80));
         match crate::local_shell::open_local_shell(rows, cols, None) {
             Ok(shell) => {
-                self.add_terminal(shell, cx);
+                self.add_terminal(shell, true, cx);
                 self.show_new_terminal();
                 cx.notify();
             }
@@ -305,6 +402,16 @@ impl ServerSession {
         }
         self.active_terminal = new;
         self.is_terminal_focus_pending = true;
+    }
+
+    /// A shell on this computer next to the server's, in the same tab: in a
+    /// new right pane, or as one more tab when the split is already there.
+    pub fn open_local_beside(&mut self, cx: &mut Context<Self>) {
+        if self.is_split_pending || !self.can_open_terminal() {
+            return;
+        }
+        self.is_split_pending = self.split.is_none();
+        self.open_local_terminal(cx);
     }
 
     /// Open a shell beside the current one, or show one terminal again.
@@ -595,8 +702,13 @@ impl ServerSession {
             let edited_file = self
                 .active_terminal()
                 .and_then(|terminal| terminal.read(cx).edited_file.clone());
+            let is_local_here = !self.is_local
+                && self
+                    .active_terminal()
+                    .is_some_and(|terminal| terminal.read(cx).is_local);
             let label = match &edited_file {
                 Some(path) => file_name(path).to_string(),
+                None if is_local_here => "Local".to_string(),
                 None => "Terminal".to_string(),
             };
             strip = strip.child(
@@ -635,6 +747,21 @@ impl ServerSession {
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.open_extra_terminal(cx))),
             );
+            // Windows has no local shell yet.
+            if !self.is_local && cfg!(unix) {
+                strip = strip.child(
+                    header_button("terminal-tab-local", cx)
+                        .child(local_icon().size(px(13.)))
+                        .tooltip(|window, cx| {
+                            Tooltip::new(format!(
+                                "Local terminal beside ({})",
+                                crate::ui::app_view::LOCAL_BESIDE_SHORTCUT
+                            ))
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.open_local_beside(cx))),
+                );
+            }
         }
         strip.into_any_element()
     }
@@ -663,8 +790,14 @@ impl ServerSession {
             .terminals
             .get(ix)
             .and_then(|terminal| terminal.read(cx).edited_file.clone());
+        let is_local_here = !self.is_local
+            && self
+                .terminals
+                .get(ix)
+                .is_some_and(|terminal| terminal.read(cx).is_local);
         let label = match &edited_file {
             Some(path) => format!("{} {}", ix + 1, file_name(path)),
+            None if is_local_here => format!("{} Local", ix + 1),
             None => (ix + 1).to_string(),
         };
 
@@ -679,6 +812,7 @@ impl ServerSession {
                     .font_semibold()
             })
             .on_click(cx.listener(move |this, _, _, cx| this.activate_terminal(ix, cx)))
+            .when(is_local_here, |el| el.child(local_icon().size(px(12.))))
             .child(div().max_w(px(140.)).truncate().child(label))
             .child(close)
             .into_any_element()
@@ -792,6 +926,15 @@ fn session_address(connection: &Connection) -> String {
     crate::ui::ssh_address(&connection.username, &connection.host, connection.port)
 }
 
+/// This computer, as the file panes show it.
+fn local_icon() -> Icon {
+    Icon::empty().path(if cfg!(target_os = "macos") {
+        "icons/laptop.svg"
+    } else {
+        "icons/monitor.svg"
+    })
+}
+
 fn terminal_icon() -> Icon {
     Icon::empty()
         .path("icons/square-terminal.svg")
@@ -832,6 +975,22 @@ fn toggle_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reconnect_keeps_local_tabs_and_drops_server_tabs_without_a_shell() {
+        // server, local, server, server: the server reopened two shells.
+        assert_eq!(
+            tabs_after_reconnect(&[false, true, false, false], 2),
+            [Some(0), Some(1), Some(2), None]
+        );
+        // Only one shell came back: the second server tab goes.
+        assert_eq!(
+            tabs_after_reconnect(&[false, false, true], 1),
+            [Some(0), None, Some(1)]
+        );
+        // The first connect has no tabs yet.
+        assert_eq!(tabs_after_reconnect(&[], 1), []);
+    }
 
     #[test]
     fn a_pane_closing_ends_the_split_and_other_tabs_move_down() {

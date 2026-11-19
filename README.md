@@ -35,6 +35,8 @@ For Linux and Intel Mac you need to build it yourself for now.
 - Terminal with tabs and search. It can suggest commands from shell history of the server.
 - Two terminals side by side: Cmd+D (Ctrl+Shift+D on Windows and Linux), again to join them.
 - A terminal on your own computer too (macOS and Linux): Option+Cmd+T, or "Local terminal" in the command palette.
+- A local terminal next to a server's, in the same tab: Shift+Cmd+D (Ctrl+Alt+Shift+D on Linux), or the laptop button by the terminal tabs.
+- Powerline and Nerd Font icons in prompts and status bars (starship, Zellij, tmux) show without installing a font.
 - Two-panel file manager, local and remote, or two servers. Drag and drop works.
 - Open a remote file in your local editor, it uploads back when you save (macOS and Windows).
 - Snippets.

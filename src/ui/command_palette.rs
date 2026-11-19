@@ -74,6 +74,7 @@ pub enum PaletteCommand {
     ChooseLeftSource,
     OpenLocalTerminal,
     ToggleSplit,
+    LocalTerminalBeside,
 }
 
 struct CommandSpec {
@@ -96,7 +97,7 @@ const fn chord(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 /// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 17] = [
+const COMMANDS: [CommandSpec; 18] = [
     CommandSpec {
         command: PaletteCommand::OpenLocalTerminal,
         label: "Local terminal",
@@ -183,6 +184,14 @@ const COMMANDS: [CommandSpec; 17] = [
         keywords: "pane side by side two shells",
         note: "",
         shortcut: Some(crate::ui::terminal_tabs::SPLIT_SHORTCUT),
+        needs_session: true,
+    },
+    CommandSpec {
+        command: PaletteCommand::LocalTerminalBeside,
+        label: "Local terminal beside",
+        keywords: "this computer shell mac laptop split pane side by side",
+        note: "next to the server's, in the same tab",
+        shortcut: Some(crate::ui::app_view::LOCAL_BESIDE_SHORTCUT),
         needs_session: true,
     },
     CommandSpec {
@@ -1033,7 +1042,9 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::ToggleServerPanel => return Icon::empty().path("icons/panel-right.svg"),
         PaletteCommand::LockVault => return Icon::empty().path("icons/lock.svg"),
         PaletteCommand::CloseSession => IconName::Close,
-        PaletteCommand::NewTerminal | PaletteCommand::OpenLocalTerminal => IconName::SquareTerminal,
+        PaletteCommand::NewTerminal
+        | PaletteCommand::OpenLocalTerminal
+        | PaletteCommand::LocalTerminalBeside => IconName::SquareTerminal,
         PaletteCommand::ToggleSplit => return Icon::empty().path("icons/panel-right.svg"),
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
@@ -1335,6 +1346,7 @@ mod tests {
                 "Local terminal",
                 "New terminal",
                 "Split or join terminals",
+                "Local terminal beside",
                 "Show or hide files"
             ]
         );

@@ -444,11 +444,11 @@ async fn drive_connection(
                         };
                         match conn.open_shell(24, 80).await {
                             Ok(shell) => {
-                                // A reconnect brings back as many terminal
-                                // tabs as the session had, each a fresh shell.
+                                // A reconnect brings back as many server
+                                // terminals as the session had, each a fresh shell.
                                 let extra_count = this
-                                    .update(cx, |session, _| {
-                                        session.terminals.len().saturating_sub(1)
+                                    .update(cx, |session, cx| {
+                                        session.server_terminal_count(cx).saturating_sub(1)
                                     })
                                     .unwrap_or(0);
                                 let mut shells = vec![shell];
@@ -618,17 +618,7 @@ async fn drive_connection(
                             });
                             session.browser = Some(browser);
                             session.restore_peer(left_server, cx);
-                            session.terminals.clear();
-                            for shell in shells {
-                                session.add_terminal(shell, cx);
-                            }
-                            // A shell the server refused to reopen may have
-                            // been the active one.
-                            session.active_terminal = session
-                                .active_terminal
-                                .min(session.terminals.len().saturating_sub(1));
-                            let count = session.terminals.len();
-                            session.split = session.split.filter(|&(_, right)| right < count);
+                            session.replace_server_shells(shells, cx);
                             session.is_terminal_focus_pending = true;
                             session.reconnecting = None;
                             session.disconnected = None;
@@ -1128,7 +1118,7 @@ impl ServerSession {
             is_split_pending: false,
             terminal_split_state: cx.new(|_| ResizableState::default()),
         };
-        local.add_terminal(shell, cx);
+        local.add_terminal(shell, true, cx);
         tracing::info!("local terminal opened");
         local
     }
@@ -1174,7 +1164,7 @@ impl ServerSession {
 
     /// Type `cd <path>` into this session's shell and run it.
     fn cd_terminal_to(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(terminal) = self.active_terminal().map(|terminal| terminal.read(cx)) else {
+        let Some(terminal) = self.server_terminal(cx).map(|terminal| terminal.read(cx)) else {
             cx.emit(ServerSessionEvent::StatusChanged(
                 "No terminal in this session".to_string(),
             ));
@@ -1415,7 +1405,9 @@ impl ServerSession {
                 session.shell_history = history.clone();
                 for terminal in session.terminals.clone() {
                     terminal.update(cx, |terminal, cx| {
-                        terminal.set_history(history.clone(), cx);
+                        if !terminal.is_local {
+                            terminal.set_history(history.clone(), cx);
+                        }
                     });
                 }
             })
@@ -1423,8 +1415,10 @@ impl ServerSession {
         }));
     }
 
+    /// The shell that snippets and `cd` go to: never one on this computer
+    /// in a server's tab.
     pub fn shell_handle(&self, cx: &App) -> Option<ShellHandle> {
-        self.active_terminal()
+        self.server_terminal(cx)
             .map(|terminal| terminal.read(cx).shell.clone())
     }
 

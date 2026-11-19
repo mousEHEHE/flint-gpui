@@ -125,6 +125,8 @@ pub struct TerminalView {
     pub(crate) shell: ShellHandle,
     /// The remote file this tab was opened to edit. Its name goes on the tab.
     pub(crate) edited_file: Option<String>,
+    /// A shell on this computer, also when it sits in a server's tab.
+    pub(crate) is_local: bool,
     pub last_snapshot: Option<TermSnapshot>,
     /// Bumped each time `last_snapshot` is replaced; used to invalidate the
     /// cached grid layout in the terminal element.
@@ -246,6 +248,7 @@ impl TerminalView {
             _event_task: event_task,
             shell,
             edited_file: None,
+            is_local: false,
             last_snapshot: None,
             snapshot_version: 0,
             cached_grid: None,

@@ -58,6 +58,7 @@ actions!(
         NewTerminal,
         OpenLocalTerminal,
         SplitTerminal,
+        SplitLocalTerminal,
         ToggleSftpPane,
         ToggleSidebar,
         ToggleServerPanel,
@@ -98,6 +99,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "cmd-shift-t", NewTerminal, None);
         bind_chord(cx, "cmd-alt-t", OpenLocalTerminal, None);
         bind_chord(cx, "cmd-d", SplitTerminal, None);
+        bind_chord(cx, "cmd-shift-d", SplitLocalTerminal, None);
         bind_chord(cx, "cmd-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
         bind_chord(cx, "cmd-i", ToggleServerPanel, None);
@@ -130,6 +132,7 @@ pub fn init(cx: &mut App) {
         bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
         bind_chord(cx, "ctrl-alt-shift-t", OpenLocalTerminal, None);
         bind_chord(cx, "ctrl-shift-d", SplitTerminal, None);
+        bind_chord(cx, "ctrl-alt-shift-d", SplitLocalTerminal, None);
         bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
         bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
         bind_chord(cx, "ctrl-shift-i", ToggleServerPanel, None);
@@ -172,6 +175,12 @@ pub const LOCK_SHORTCUT: &str = "Ctrl+Shift+L";
 pub const LOCAL_TERMINAL_SHORTCUT: &str = "\u{2325}\u{2318}T";
 #[cfg(not(target_os = "macos"))]
 pub const LOCAL_TERMINAL_SHORTCUT: &str = "Ctrl+Alt+Shift+T";
+
+/// Shown on the terminal strip and in the palette. Must track the binding above.
+#[cfg(target_os = "macos")]
+pub const LOCAL_BESIDE_SHORTCUT: &str = "\u{21E7}\u{2318}D";
+#[cfg(not(target_os = "macos"))]
+pub const LOCAL_BESIDE_SHORTCUT: &str = "Ctrl+Alt+Shift+D";
 
 /// Shown on the sidebar button and in the palette. Must track the binding above.
 #[cfg(target_os = "macos")]
@@ -657,6 +666,7 @@ impl AppView {
             }
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
             PaletteCommand::ToggleSplit => self.toggle_split(cx),
+            PaletteCommand::LocalTerminalBeside => self.open_local_beside(window, cx),
             PaletteCommand::OpenLocalTerminal => self.open_local_terminal(window, cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
             PaletteCommand::ToggleSidebar => self.toggle_sidebar(cx),
@@ -2651,6 +2661,16 @@ impl AppView {
         session.update(cx, |session, cx| session.open_extra_terminal(cx));
     }
 
+    /// A shell on this computer beside the server's in the tab in front, or
+    /// a local tab of its own when no tab is open.
+    fn open_local_beside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.tabs.get(self.active_tab) else {
+            self.open_local_terminal(window, cx);
+            return;
+        };
+        session.update(cx, |session, cx| session.open_local_beside(cx));
+    }
+
     fn toggle_split(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.tabs.get(self.active_tab) else {
             return;
@@ -2901,6 +2921,11 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &SplitTerminal, window, cx| {
                 if !this.is_overlay_open(window, cx) {
                     this.toggle_split(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitLocalTerminal, window, cx| {
+                if !this.is_overlay_open(window, cx) {
+                    this.open_local_beside(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenLocalTerminal, window, cx| {
