@@ -51,7 +51,11 @@ fn main() {
         .run(|cx: &mut App| {
             // The assets folder is embedded whole, so the font comes from
             // there and is not compiled in a second time.
-            let fonts = ["fonts/CascadiaCode.ttf", "fonts/CaskaydiaMonoNerdFontMono.ttf"].map(|path| {
+            let fonts = [
+                "fonts/CascadiaCode.ttf",
+                "fonts/CaskaydiaMonoNerdFontMono.ttf",
+            ]
+            .map(|path| {
                 Assets
                     .load(path)
                     .expect("read the embedded assets")
