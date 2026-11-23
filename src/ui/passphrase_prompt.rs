@@ -4,7 +4,7 @@
 //! wrong answers come back via `set_error`.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, EventEmitter, Window};
+use gpui::{div, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogHeader, DialogTitle},
@@ -13,6 +13,8 @@ use gpui_component::{
     v_flex, ActiveTheme as _, Sizable as _,
 };
 use zeroize::Zeroizing;
+
+use crate::ui::rems_from_px;
 
 pub enum PassphrasePromptEvent {
     Submitted(Zeroizing<String>),
@@ -81,12 +83,12 @@ impl Render for PassphrasePromptView {
         let theme = cx.theme();
 
         v_flex()
-            .p(px(12.))
-            .gap(px(8.))
+            .p(rems_from_px(12.))
+            .gap(rems_from_px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child("Key passphrase")))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.muted_foreground)
                     .child(format!(
                         "The key \"{}\" for {} is encrypted.",
@@ -96,13 +98,13 @@ impl Render for PassphrasePromptView {
             .child(Input::new(&self.input).mask_toggle())
             .children(self.error.as_ref().map(|msg| {
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rems_from_px(11.5))
                     .text_color(theme.danger)
                     .child(msg.clone())
             }))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .justify_end()
                     .child(
                         Button::new("passphrase-cancel")

@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, Context, Div, Entity, SharedString, Window};
+use gpui::{div, AnyElement, Context, Div, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::{note, section_title, ServerPanel, ServerPanelEvent};
 use crate::theme;
+use crate::ui::rems_from_px;
 use crate::vault::{HostSnippet, Snippet, SnippetBody, VaultError};
 
 /// The form that adds or edits one of the host's own snippets, in place of
@@ -228,16 +229,16 @@ impl ServerPanel {
     fn render_editor(&self, editor: &SnippetEditor, cx: &Context<Self>) -> Div {
         let is_new = editor.id.is_none();
         v_flex()
-            .gap(px(8.))
-            .p(px(8.))
-            .rounded(px(7.))
+            .gap(rems_from_px(8.))
+            .p(rems_from_px(8.))
+            .rounded(rems_from_px(7.))
             .border_1()
             .border_color(theme::border_focused())
             .bg(theme::card())
             .child(Input::new(&editor.name).small())
             .child(
                 Textarea::new(&editor.script)
-                    .h(px(70.))
+                    .h(rems_from_px(70.))
                     .font_family(theme::MONO_FONT),
             )
             .child(
@@ -253,13 +254,13 @@ impl ServerPanel {
             )
             .children(editor.error.clone().map(|error| {
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rems_from_px(11.5))
                     .text_color(cx.theme().danger)
                     .child(error)
             }))
             .child(
                 h_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(
                         Button::new("server-snippet-save")
                             .small()
@@ -357,17 +358,17 @@ fn snippet_row(
         div()
             .id(id)
             .flex_none()
-            .size(px(26.))
+            .size(rems_from_px(26.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
             .hover(move |s| s.bg(theme::field()).text_color(text))
             .active(|s| s.bg(theme::element_active()))
             .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-            .child(Icon::empty().path(icon).size(px(13.)))
+            .child(Icon::empty().path(icon).size(rems_from_px(13.)))
     };
     let run_id = if is_own {
         ("server-own-snippet-run", ix)
@@ -376,11 +377,11 @@ fn snippet_row(
     };
     h_flex()
         .group(group.clone())
-        .gap(px(4.))
-        .pl(px(8.))
-        .pr(px(4.))
-        .py(px(7.))
-        .rounded(px(7.))
+        .gap(rems_from_px(4.))
+        .pl(rems_from_px(8.))
+        .pr(rems_from_px(4.))
+        .py(rems_from_px(7.))
+        .rounded(rems_from_px(7.))
         .border_1()
         .border_color(theme::border())
         .bg(theme::card())
@@ -388,16 +389,16 @@ fn snippet_row(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(px(2.))
+                .gap(rems_from_px(2.))
                 .child(
                     h_flex()
-                        .gap(px(6.))
+                        .gap(rems_from_px(6.))
                         .items_center()
                         .child(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.5))
+                                .text_size(rems_from_px(12.5))
                                 .text_color(text)
                                 .child(row.name.clone()),
                         )
@@ -407,7 +408,7 @@ fn snippet_row(
                     div()
                         .truncate()
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(11.))
+                        .text_size(rems_from_px(11.))
                         .text_color(theme::text_dim())
                         .child(first_line(&row.script)),
                 ),
@@ -443,10 +444,10 @@ fn snippet_row(
 fn on_connect_tag(cx: &Context<ServerPanel>) -> Div {
     div()
         .flex_none()
-        .px(px(5.))
-        .rounded(px(4.))
+        .px(rems_from_px(5.))
+        .rounded(rems_from_px(4.))
         .bg(theme::accent_soft())
-        .text_size(px(10.5))
+        .text_size(rems_from_px(10.5))
         .text_color(cx.theme().primary)
         .child("on connect")
 }

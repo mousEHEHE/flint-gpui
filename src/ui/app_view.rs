@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, AnyElement, AnyWindowHandle, App, Context, Entity, EntityId, FocusHandle,
-    Focusable, ModifiersChangedEvent, StyleRefinement, SystemNotification, Task, WeakEntity,
-    Window,
+    actions, div, px, AnyElement, AnyWindowHandle, App, Context, DragMoveEvent, Entity, EntityId,
+    FocusHandle, Focusable, ModifiersChangedEvent, StyleRefinement, SystemNotification, Task,
+    WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -26,7 +26,7 @@ use crate::ui::app_picker::{AppPicker, AppPickerEvent};
 use crate::ui::command_palette::{CommandPalette, CommandPaletteEvent, PaletteCommand};
 use crate::ui::feedback_view::{FeedbackEvent, FeedbackView};
 use crate::ui::import_view::{plural, ImportView, ImportViewEvent};
-use crate::ui::keyboard_layout::bind_chord;
+use crate::ui::keymap;
 use crate::ui::passphrase_prompt::{PassphrasePromptEvent, PassphrasePromptView};
 use crate::ui::server_form::{FormEvent, FormMode, ServerFormView};
 use crate::ui::server_session::{
@@ -36,7 +36,7 @@ use crate::ui::servers_view::{ServersView, ServersViewEvent};
 use crate::ui::settings::{SettingsView, SettingsViewEvent};
 use crate::ui::sftp_browser::{RestorePaths, SftpBrowser, TransferKind};
 use crate::ui::shortcut_hints;
-use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent, SIDEBAR_WIDTH};
+use crate::ui::sidebar::{HostStatus, Sidebar, SidebarEvent};
 use crate::ui::sync_service::SyncService;
 use crate::ui::transfer_conflict::transfer_conflict_dialog;
 use crate::ui::update_consent_view::{UpdateConsentEvent, UpdateConsentView};
@@ -44,6 +44,8 @@ use crate::ui::update_service::{Download, UpdateService};
 use crate::ui::update_view::{UpdateView, UpdateViewEvent};
 use crate::ui::window_chrome;
 use crate::ui::{dialog_chrome, VaultState, DIALOG_FORM, DIALOG_NARROW, DIALOG_WIDE};
+use crate::ui::{rems_from_px, scaled_px};
+use crate::ui::{resize_edge, ResizeEdge};
 use crate::vault::{AuthMethod, ServerEntry};
 use flint_core::route::{self, CredentialIssue};
 
@@ -75,6 +77,9 @@ actions!(
         ActivateTab8,
         ActivateTab9,
         Quit,
+        IncreaseUiScale,
+        DecreaseUiScale,
+        ResetUiScale,
     ]
 );
 
@@ -86,107 +91,19 @@ pub fn init(cx: &mut App) {
         tracing::info!("quit from the keyboard");
         cx.quit();
     });
-
-    // `bind_chord` also registers each chord as it arrives on the Russian
-    // layout; chords with no letter in them come out as a single binding.
-    #[cfg(target_os = "macos")]
-    {
-        bind_chord(cx, "cmd-q", Quit, None);
-        bind_chord(cx, "cmd-,", ToggleSettings, None);
-        bind_chord(cx, "cmd-p", ToggleCommandPalette, None);
-        bind_chord(cx, "cmd-l", LockVault, None);
-        bind_chord(cx, "cmd-t", NewConnection, None);
-        bind_chord(cx, "cmd-shift-t", NewTerminal, None);
-        bind_chord(cx, "cmd-alt-t", OpenLocalTerminal, None);
-        bind_chord(cx, "cmd-d", SplitTerminal, None);
-        bind_chord(cx, "cmd-shift-d", SplitLocalTerminal, None);
-        bind_chord(cx, "cmd-b", ToggleSftpPane, None);
-        bind_chord(cx, "ctrl-cmd-s", ToggleSidebar, None);
-        bind_chord(cx, "cmd-i", ToggleServerPanel, None);
-        bind_chord(cx, "cmd-w", CloseTab, None);
-        bind_chord(cx, "cmd-shift-e", ToggleFilesFocus, None);
-        bind_chord(cx, "cmd-shift-]", NextTab, None);
-        bind_chord(cx, "cmd-shift-[", PrevTab, None);
-        bind_chord(cx, "cmd-1", ActivateTab1, None);
-        bind_chord(cx, "cmd-2", ActivateTab2, None);
-        bind_chord(cx, "cmd-3", ActivateTab3, None);
-        bind_chord(cx, "cmd-4", ActivateTab4, None);
-        bind_chord(cx, "cmd-5", ActivateTab5, None);
-        bind_chord(cx, "cmd-6", ActivateTab6, None);
-        bind_chord(cx, "cmd-7", ActivateTab7, None);
-        bind_chord(cx, "cmd-8", ActivateTab8, None);
-        bind_chord(cx, "cmd-9", ActivateTab9, None);
-    }
-
-    // Windows/Linux equivalents. Plain Ctrl+P/T/W/L belong to readline at a shell
-    // prompt, so the chords that would collide take Ctrl+Shift, the same
-    // convention Windows Terminal uses. Tab cycling goes through Ctrl+Tab:
-    // bracket keys are shifted on most layouts, so "ctrl-shift-]" would arrive
-    // as "ctrl-}" and never match.
-    #[cfg(not(target_os = "macos"))]
-    {
-        bind_chord(cx, "ctrl-,", ToggleSettings, None);
-        bind_chord(cx, "ctrl-shift-p", ToggleCommandPalette, None);
-        bind_chord(cx, "ctrl-shift-l", LockVault, None);
-        bind_chord(cx, "ctrl-shift-t", NewConnection, None);
-        bind_chord(cx, "ctrl-shift-n", NewTerminal, None);
-        bind_chord(cx, "ctrl-alt-shift-t", OpenLocalTerminal, None);
-        bind_chord(cx, "ctrl-shift-d", SplitTerminal, None);
-        bind_chord(cx, "ctrl-alt-shift-d", SplitLocalTerminal, None);
-        bind_chord(cx, "ctrl-shift-b", ToggleSftpPane, None);
-        bind_chord(cx, "ctrl-shift-s", ToggleSidebar, None);
-        bind_chord(cx, "ctrl-shift-i", ToggleServerPanel, None);
-        bind_chord(cx, "ctrl-shift-w", CloseTab, None);
-        bind_chord(cx, "ctrl-shift-e", ToggleFilesFocus, None);
-        bind_chord(cx, "ctrl-tab", NextTab, None);
-        bind_chord(cx, "ctrl-shift-tab", PrevTab, None);
-        bind_chord(cx, "ctrl-1", ActivateTab1, None);
-        bind_chord(cx, "ctrl-2", ActivateTab2, None);
-        bind_chord(cx, "ctrl-3", ActivateTab3, None);
-        bind_chord(cx, "ctrl-4", ActivateTab4, None);
-        bind_chord(cx, "ctrl-5", ActivateTab5, None);
-        bind_chord(cx, "ctrl-6", ActivateTab6, None);
-        bind_chord(cx, "ctrl-7", ActivateTab7, None);
-        bind_chord(cx, "ctrl-8", ActivateTab8, None);
-        bind_chord(cx, "ctrl-9", ActivateTab9, None);
-    }
+    cx.on_action(|_: &IncreaseUiScale, cx| crate::theme::step_ui_scale(true, cx));
+    cx.on_action(|_: &DecreaseUiScale, cx| crate::theme::step_ui_scale(false, cx));
+    cx.on_action(|_: &ResetUiScale, cx| crate::theme::set_ui_scale(None, cx));
 }
 
-/// Label on the title-bar palette trigger. Must track the binding above.
-#[cfg(target_os = "macos")]
-const PALETTE_SHORTCUT: &str = "\u{2318}P";
-#[cfg(not(target_os = "macos"))]
-const PALETTE_SHORTCUT: &str = "Ctrl+Shift+P";
-
+/// The terminal and the server panel at their smallest, so a wide sidebar
+/// never hides them.
+const MIN_CARD_WIDTH: f32 = 520.;
 /// How long after an unlock the "Check for updates?" question waits.
 const UPDATE_QUESTION_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
 /// How long small vault changes, like the last folder of a host, wait before
 /// they are written. Folder changes come in bursts.
 const VAULT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Shown next to "Lock now" and the palette command. Must track the binding above.
-#[cfg(target_os = "macos")]
-pub const LOCK_SHORTCUT: &str = "\u{2318}L";
-#[cfg(not(target_os = "macos"))]
-pub const LOCK_SHORTCUT: &str = "Ctrl+Shift+L";
-
-/// Shown in the palette. Must track the binding above.
-#[cfg(target_os = "macos")]
-pub const LOCAL_TERMINAL_SHORTCUT: &str = "\u{2325}\u{2318}T";
-#[cfg(not(target_os = "macos"))]
-pub const LOCAL_TERMINAL_SHORTCUT: &str = "Ctrl+Alt+Shift+T";
-
-/// Shown on the terminal strip and in the palette. Must track the binding above.
-#[cfg(target_os = "macos")]
-pub const LOCAL_BESIDE_SHORTCUT: &str = "\u{21E7}\u{2318}D";
-#[cfg(not(target_os = "macos"))]
-pub const LOCAL_BESIDE_SHORTCUT: &str = "Ctrl+Alt+Shift+D";
-
-/// Shown on the sidebar button and in the palette. Must track the binding above.
-#[cfg(target_os = "macos")]
-pub const SIDEBAR_SHORTCUT: &str = "\u{2303}\u{2318}S";
-#[cfg(not(target_os = "macos"))]
-pub const SIDEBAR_SHORTCUT: &str = "Ctrl+Shift+S";
 
 /// What a connect that may first ask for a key passphrase is for.
 #[derive(Clone)]
@@ -268,6 +185,9 @@ impl AppView {
             SidebarEvent::DeleteServerRequested(id) => this.show_remove_dialog(*id, window, cx),
             SidebarEvent::SettingsRequested => this.toggle_settings(window, cx),
             SidebarEvent::FeedbackRequested => this.show_feedback_dialog(window, cx),
+            SidebarEvent::ExportKeyRequested { host, key } => {
+                this.add_key_to_host(*host, *key, window, cx)
+            }
             SidebarEvent::ShowTab(session_id) => {
                 if let Some(idx) = this.tab_index_for_host(session_id, cx) {
                     this.change_active_tab(idx, cx);
@@ -296,6 +216,9 @@ impl AppView {
                 ServersViewEvent::DuplicateServerRequested(id) => this.duplicate_server(*id, cx),
                 ServersViewEvent::DeleteServerRequested(id) => {
                     this.show_remove_dialog(*id, window, cx)
+                }
+                ServersViewEvent::ExportKeyRequested { host, key } => {
+                    this.add_key_to_host(*host, *key, window, cx)
                 }
             },
         )
@@ -392,6 +315,8 @@ impl AppView {
 
         self.close_overlays(window, cx);
 
+        // A lock must hold after a restart too.
+        crate::touch_id::forget_remembered();
         self.vault_state.update(cx, |vault_state, cx| {
             vault_state.lock();
             cx.notify();
@@ -503,8 +428,10 @@ impl AppView {
             },
         )
         .detach();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(DIALOG_NARROW).child(view.clone())
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
+            dialog_chrome(dialog)
+                .w(scaled_px(DIALOG_NARROW, cx))
+                .child(view.clone())
         });
     }
 
@@ -566,6 +493,10 @@ impl AppView {
         } else {
             self.settings_view = None;
             let has_active_server = self.active_session_shell_handle(cx).is_some();
+            let is_split = self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|s| s.read(cx).split.is_some());
             let active_server_id: Option<Uuid> = self
                 .tabs
                 .get(self.active_tab)
@@ -580,6 +511,7 @@ impl AppView {
                 CommandPalette::new(
                     vault_state,
                     has_active_server,
+                    is_split,
                     active_server_id,
                     connected_ids,
                     window,
@@ -666,6 +598,11 @@ impl AppView {
             }
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
             PaletteCommand::ToggleSplit => self.toggle_split(cx),
+            PaletteCommand::SwapPanes => {
+                if let Some(session) = self.tabs.get(self.active_tab) {
+                    session.update(cx, |session, cx| session.swap_panes(cx));
+                }
+            }
             PaletteCommand::LocalTerminalBeside => self.open_local_beside(window, cx),
             PaletteCommand::OpenLocalTerminal => self.open_local_terminal(window, cx),
             PaletteCommand::ToggleSftpPane => self.toggle_sftp_pane(cx),
@@ -890,10 +827,7 @@ impl AppView {
                 this.command_palette = None;
                 this.focus_handle.focus(window, cx);
                 if let Some(host) = host {
-                    this.pending_key_for_server = Some((host.to_string(), key_id));
-                    // Connects with the host's own sign-in and its prompts; an open tab is reused.
-                    this.open_server_by_id(host, window, cx);
-                    this.try_drain_pending_key(cx);
+                    this.add_key_to_host(host, key_id, window, cx);
                 }
                 cx.notify();
             },
@@ -901,6 +835,19 @@ impl AppView {
         .detach();
         self.command_palette = Some(palette);
         cx.notify();
+    }
+
+    /// Connects with the host's own sign-in (an open tab is reused) and adds the key once connected.
+    fn add_key_to_host(
+        &mut self,
+        host: Uuid,
+        key_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_key_for_server = Some((host.to_string(), key_id));
+        self.open_server_by_id(host, window, cx);
+        self.try_drain_pending_key(cx);
     }
 
     fn try_drain_pending_key(&mut self, cx: &mut Context<Self>) {
@@ -1535,9 +1482,9 @@ impl AppView {
         .detach();
 
         let view_for_dialog = view.clone();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
             dialog_chrome(dialog)
-                .w(DIALOG_NARROW)
+                .w(scaled_px(DIALOG_NARROW, cx))
                 .child(view_for_dialog.clone())
         });
     }
@@ -1983,13 +1930,13 @@ impl AppView {
                     .and_then(|n| n.to_str())
                     .unwrap_or("file")
                     .to_string();
-                window.open_dialog(cx, move |dialog, _, _| {
+                window.open_dialog(cx, move |dialog, _, cx| {
                     let (lx, ws_x) = (local.clone(), weak_session.clone());
                     let (lc, ws_c) = (local.clone(), weak_session.clone());
                     let (lr, ws_r) = (local.clone(), weak_session.clone());
                     let (lo, ws_o) = (local.clone(), weak_session.clone());
                     dialog_chrome(dialog)
-                        .w(DIALOG_WIDE)
+                        .w(scaled_px(DIALOG_WIDE, cx))
                         // Escape or a click outside: the same as Cancel.
                         .on_close(move |_, _, cx| {
                             answer_conflict(&ws_x, &lx, cx, |b, local, cx| {
@@ -1998,15 +1945,15 @@ impl AppView {
                         })
                         .child(
                             v_flex()
-                                .p(px(12.))
-                                .gap(px(8.))
+                                .p(rems_from_px(12.))
+                                .gap(rems_from_px(8.))
                                 .child(
                                     DialogHeader::new().child(
                                         DialogTitle::new()
                                             .child(format!("{filename} changed on the host")),
                                     ),
                                 )
-                                .child(div().text_size(px(12.5)).child(format!(
+                                .child(div().text_size(rems_from_px(12.5)).child(format!(
                                     "\"{filename}\" changed on the host while you were editing it here.",
                                 )))
                                 .child(
@@ -2098,8 +2045,10 @@ impl AppView {
         let wh = self.window_handle;
         cx.spawn(async move |_, cx| {
             cx.update_window(wh, |_, window, cx| {
-                window.open_dialog(cx, move |dialog, _, _| {
-                    dialog_chrome(dialog).w(DIALOG_WIDE).child(picker.clone())
+                window.open_dialog(cx, move |dialog, _, cx| {
+                    dialog_chrome(dialog)
+                        .w(scaled_px(DIALOG_WIDE, cx))
+                        .child(picker.clone())
                 });
             })
             .ok();
@@ -2141,21 +2090,21 @@ impl AppView {
             let (weak2, label2) = (weak.clone(), label.clone());
             let jump_warning = jump_warning.clone();
             let warning_color = cx.theme().warning;
-            dialog_chrome(dialog).w(DIALOG_NARROW).child(
+            dialog_chrome(dialog).w(scaled_px(DIALOG_NARROW, cx)).child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(rems_from_px(12.))
+                    .gap(rems_from_px(8.))
                     .child(
                         DialogHeader::new()
                             .child(DialogTitle::new().child("Delete host")),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(rems_from_px(12.5))
                             .child(format!("Delete \"{}\"? This cannot be undone.", label2)),
                     )
                     .when_some(jump_warning, |el, warning| {
-                        el.child(div().text_size(px(12.5)).text_color(warning_color).child(warning))
+                        el.child(div().text_size(rems_from_px(12.5)).text_color(warning_color).child(warning))
                     })
                     .child(
                         DialogFooter::new().child(
@@ -2196,6 +2145,11 @@ impl AppView {
                                                                 r
                                                             },
                                                         );
+                                                        if matches!(result, Some(Ok(_)))
+                                                            && Preferences::is_pinned(id, inner_cx)
+                                                        {
+                                                            Preferences::set_pinned(id, false, inner_cx);
+                                                        }
                                                         if let Some(Err(e)) = result {
                                                             tracing::error!(
                                                                 ?e,
@@ -2269,9 +2223,9 @@ impl AppView {
         .detach();
 
         let view_for_dialog = view.clone();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
             dialog_chrome(dialog)
-                .w(DIALOG_WIDE)
+                .w(scaled_px(DIALOG_WIDE, cx))
                 .child(view_for_dialog.clone())
         });
     }
@@ -2385,8 +2339,10 @@ impl AppView {
             },
         )
         .detach();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(DIALOG_WIDE).child(view.clone())
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
+            dialog_chrome(dialog)
+                .w(scaled_px(DIALOG_WIDE, cx))
+                .child(view.clone())
         });
     }
 
@@ -2415,13 +2371,13 @@ impl AppView {
             h_flex()
                 .id("titlebar-update")
                 .flex_none()
-                .h(px(22.))
-                .px(px(8.))
-                .gap(px(4.))
+                .h(rems_from_px(22.))
+                .px(rems_from_px(8.))
+                .gap(rems_from_px(4.))
                 .items_center()
-                .rounded(px(4.))
+                .rounded(rems_from_px(4.))
                 .bg(bg)
-                .text_size(px(11.))
+                .text_size(rems_from_px(11.))
                 .text_color(fg)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover_bg))
@@ -2429,7 +2385,7 @@ impl AppView {
                 .child(
                     Icon::empty()
                         .path("icons/download.svg")
-                        .size(px(11.))
+                        .size(rems_from_px(11.))
                         .text_color(fg),
                 )
                 .child(text)
@@ -2439,25 +2395,36 @@ impl AppView {
 
     fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tooltip = if Preferences::is_sidebar_shown(cx) {
-            format!("Hide sidebar ({SIDEBAR_SHORTCUT})")
+            keymap::with_label("Hide sidebar", "app.toggle_sidebar", cx)
         } else {
-            format!("Show sidebar ({SIDEBAR_SHORTCUT})")
+            keymap::with_label("Show sidebar", "app.toggle_sidebar", cx)
         };
+        let hint = shortcut_hints::key("app.toggle_sidebar", cx);
         let text = cx.theme().foreground;
         div()
             .id("titlebar-sidebar-toggle")
             .flex_none()
-            .size(px(24.))
+            .h(rems_from_px(24.))
+            .min_w(rems_from_px(24.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
             .hover(move |s| s.bg(crate::theme::field()).text_color(text))
             .active(|s| s.bg(crate::theme::element_active()))
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .child(Icon::empty().path("icons/panel-left.svg").size(px(16.)))
+            .child(
+                if let Some(hint) = hint.filter(|_| shortcut_hints::is_shown(cx)) {
+                    shortcut_hints::badge(hint).into_any_element()
+                } else {
+                    Icon::empty()
+                        .path("icons/panel-left.svg")
+                        .size(rems_from_px(16.))
+                        .into_any_element()
+                },
+            )
             .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
     }
 
@@ -2475,8 +2442,10 @@ impl AppView {
             },
         )
         .detach();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
-            dialog_chrome(dialog).w(DIALOG_WIDE).child(view.clone())
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
+            dialog_chrome(dialog)
+                .w(scaled_px(DIALOG_WIDE, cx))
+                .child(view.clone())
         });
     }
 
@@ -2580,14 +2549,18 @@ impl AppView {
                     this.key_share_asked = None;
                     window.close_dialog(cx);
                 }
+                // The dialog stays open, so the user's edits survive.
+                FormEvent::ExportKeyToHost { host, key } => {
+                    this.add_key_to_host(*host, *key, window, cx)
+                }
             }
         })
         .detach();
 
         let form_for_dialog = form.clone();
-        window.open_dialog(&mut *cx, move |dialog, _, _| {
+        window.open_dialog(&mut *cx, move |dialog, _, cx| {
             dialog_chrome(dialog)
-                .w(DIALOG_FORM)
+                .w(scaled_px(DIALOG_FORM, cx))
                 .child(form_for_dialog.clone())
         });
         // A new host starts from its address; pasting `user@host:port` there
@@ -2626,24 +2599,7 @@ impl AppView {
         if self.is_overlay_open(window, cx) {
             return;
         }
-        // Off macOS the chord is Ctrl+Shift+N, which is New Folder in a file
-        // pane. Passing it on lets the pane's own key handler have it.
-        if !cfg!(target_os = "macos") && self.is_file_pane_focused(window, cx) {
-            cx.propagate();
-            return;
-        }
         self.open_extra_terminal(cx);
-    }
-
-    fn is_file_pane_focused(&self, window: &Window, cx: &App) -> bool {
-        let Some(session) = self.tabs.get(self.active_tab) else {
-            return false;
-        };
-        session
-            .read(cx)
-            .browser
-            .as_ref()
-            .is_some_and(|browser| browser.read(cx).has_focus(window, cx))
     }
 
     fn shortcut_toggle_sftp_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2716,29 +2672,42 @@ impl AppView {
         if self.is_overlay_open(window, cx) {
             return;
         }
-        let Some(next) = next_tab_index(self.active_tab, self.tabs.len()) else {
+        let order = self.tab_order(cx);
+        let Some(next) = next_tab_index(position_in(&order, self.active_tab), order.len()) else {
             return;
         };
-        self.set_active_tab(next, window, cx);
+        self.set_active_tab(order[next], window, cx);
     }
 
     fn shortcut_prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_overlay_open(window, cx) {
             return;
         }
-        let Some(prev) = prev_tab_index(self.active_tab, self.tabs.len()) else {
+        let order = self.tab_order(cx);
+        let Some(prev) = prev_tab_index(position_in(&order, self.active_tab), order.len()) else {
             return;
         };
-        self.set_active_tab(prev, window, cx);
+        self.set_active_tab(order[prev], window, cx);
     }
 
     fn shortcut_activate_tab(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_overlay_open(window, cx) {
             return;
         }
-        if idx < self.tabs.len() {
-            self.set_active_tab(idx, window, cx);
+        if let Some(&tab) = self.tab_order(cx).get(idx) {
+            self.set_active_tab(tab, window, cx);
         }
+    }
+
+    /// The tabs as the sidebar lists them, top to bottom.
+    fn tab_order(&self, cx: &App) -> Vec<usize> {
+        let ids: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.read(cx).server_id.clone())
+            .collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        crate::ui::sidebar::tab_order(&ids, &Preferences::pinned_hosts(cx))
     }
 
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2763,21 +2732,21 @@ impl AppView {
             .absolute()
             .left(gpui::relative(0.5))
             .top(gpui::relative(0.5))
-            .h(px(24.))
-            .w(px(360.))
-            .px(px(10.))
-            .gap(px(8.))
+            .h(rems_from_px(24.))
+            .w(rems_from_px(360.))
+            .px(rems_from_px(10.))
+            .gap(rems_from_px(8.))
             .items_center()
             .bg(field)
-            .rounded(px(7.))
-            .text_size(px(12.5))
+            .rounded(rems_from_px(7.))
+            .text_size(rems_from_px(12.5))
             .text_color(text_placeholder)
             .cursor_pointer()
             .hover(|s| s.bg(crate::theme::element()).text_color(text_muted))
             .active(|s| s.bg(crate::theme::element_active()).text_color(text_muted))
             .child(
                 Icon::new(IconName::Search)
-                    .size(px(13.))
+                    .size(rems_from_px(13.))
                     .text_color(text_placeholder),
             )
             .child(
@@ -2788,27 +2757,35 @@ impl AppView {
                     .child("Go to host, snippet or command"),
             )
             // Lit up like the other shortcut hints while the modifier is held.
-            .child(if shortcut_hints::is_shown(cx) {
-                shortcut_hints::badge(PALETTE_SHORTCUT).into_any_element()
-            } else {
-                div()
-                    .flex()
-                    .items_center()
-                    .px(px(5.))
-                    .py(px(1.))
-                    .rounded(px(4.))
-                    .bg(field)
-                    .text_size(px(10.5))
-                    .text_color(text_muted)
-                    .child(PALETTE_SHORTCUT)
-                    .into_any_element()
-            })
+            .when_some(
+                keymap::label("app.command_palette", cx),
+                |el, palette_label| {
+                    el.child(if shortcut_hints::is_shown(cx) {
+                        shortcut_hints::badge(palette_label).into_any_element()
+                    } else {
+                        div()
+                            .flex()
+                            .items_center()
+                            .px(rems_from_px(5.))
+                            .py(px(1.))
+                            .rounded(rems_from_px(4.))
+                            .bg(field)
+                            .text_size(rems_from_px(10.5))
+                            .text_color(text_muted)
+                            .child(palette_label)
+                            .into_any_element()
+                    })
+                },
+            )
             .on_click(cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)));
 
         // Pull palette trigger up & left by half its size via negative margins.
         // `.occlude()` makes its hitbox opaque so clicks land on it instead of
         // falling through to the draggable title-bar region beneath it.
-        let palette_trigger = palette_trigger.ml(px(-180.)).mt(px(-12.)).occlude();
+        let palette_trigger = palette_trigger
+            .ml(rems_from_px(-180.))
+            .mt(rems_from_px(-12.))
+            .occlude();
 
         let update_mark = self.render_update_mark(cx);
         let sidebar_toggle = self.render_sidebar_toggle(cx);
@@ -2828,15 +2805,15 @@ impl AppView {
             .w_full()
             .h(window_chrome::TITLE_BAR_HEIGHT)
             .pl(left_pad)
-            .pr(px(6.))
-            .gap(px(8.))
+            .pr(rems_from_px(6.))
+            .gap(rems_from_px(8.))
             .bg(bg_elevated)
             .items_center()
             .child(sidebar_toggle)
             .when(cfg!(not(target_os = "macos")), |bar| {
                 bar.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(text_muted)
                         .child("Flint"),
                 )
@@ -2873,6 +2850,17 @@ impl Render for AppView {
         let panel = cx.theme().background;
         let border = crate::theme::border();
         let is_sidebar_shown = Preferences::is_sidebar_shown(cx);
+        let sidebar_width = rems_from_px(Preferences::sidebar_width(cx));
+        // At a large UI scale the two minimums outgrow the smallest window; the
+        // card gives way, or the row would cut off the terminal's right side.
+        let window_width = f32::from(window.viewport_size().width) / f32::from(window.rem_size())
+            * crate::theme::UI_REM_BASE;
+        let beside_card = if is_sidebar_shown {
+            crate::preferences::MIN_SIDEBAR_WIDTH + 8.
+        } else {
+            16.
+        };
+        let min_card_width = MIN_CARD_WIDTH.min((window_width - beside_card).max(0.));
 
         let title_bar = self.render_title_bar(window, cx);
         let active_body = self.render_active_tab();
@@ -2884,21 +2872,21 @@ impl Render for AppView {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(16.))
+                .bottom(rems_from_px(16.))
                 .flex()
                 .justify_center()
                 .child(
                     div()
-                        .max_w(px(480.))
-                        .px(px(12.))
-                        .py(px(6.))
-                        .rounded(px(8.))
+                        .max_w(rems_from_px(480.))
+                        .px(rems_from_px(12.))
+                        .py(rems_from_px(6.))
+                        .rounded(rems_from_px(8.))
                         .border_1()
                         .border_color(border)
                         .bg(crate::theme::card())
                         .shadow_md()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(cx.theme().foreground)
                         .child(self.status.clone()),
                 )
@@ -2992,28 +2980,47 @@ impl Render for AppView {
                     .min_h_0()
                     .items_stretch()
                     .overflow_hidden()
+                    .on_drag_move(cx.listener(|_, event: &DragMoveEvent<ResizeEdge>, _, cx| {
+                        if *event.drag(cx) != ResizeEdge::Sidebar {
+                            return;
+                        }
+                        // The sidebar starts at the row's left edge.
+                        let width = (event.event.position.x - event.bounds.left()).min(
+                            event.bounds.size.width
+                                - px(MIN_CARD_WIDTH + 8.) * crate::theme::ui_scale(cx),
+                        );
+                        ResizeEdge::Sidebar.set_width(f32::from(width), cx);
+                        cx.notify();
+                    }))
                     // Cached like the hosts view: a terminal frame or a
                     // transfer tick redraws this view, and the sidebar has
-                    // not changed. The style repeats the sidebar's own size.
+                    // not changed.
                     .when(is_sidebar_shown, |row| {
                         row.child(
-                            self.sidebar.clone().cached(
-                                StyleRefinement::default()
-                                    .w(px(SIDEBAR_WIDTH))
-                                    .flex_none()
-                                    .h_full(),
-                            ),
+                            div()
+                                .relative()
+                                .flex_shrink(1.)
+                                .min_w(rems_from_px(crate::preferences::MIN_SIDEBAR_WIDTH))
+                                .h_full()
+                                .w(sidebar_width)
+                                .child(
+                                    self.sidebar
+                                        .clone()
+                                        .cached(StyleRefinement::default().size_full()),
+                                )
+                                // After the sidebar so its hitbox is on top.
+                                .child(resize_edge(ResizeEdge::Sidebar)),
                         )
                     })
                     .child(
                         v_flex()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(rems_from_px(min_card_width))
                             .min_h_0()
-                            .when(!is_sidebar_shown, |card| card.ml(px(8.)))
-                            .mr(px(8.))
-                            .mb(px(8.))
-                            .rounded(px(crate::ui::PANEL_RADIUS))
+                            .when(!is_sidebar_shown, |card| card.ml(rems_from_px(8.)))
+                            .mr(rems_from_px(8.))
+                            .mb(rems_from_px(8.))
+                            .rounded(rems_from_px(crate::ui::PANEL_RADIUS))
                             .border_1()
                             .border_color(border)
                             .relative()
@@ -3145,6 +3152,14 @@ fn next_tab_index(active: usize, tab_count: usize) -> Option<usize> {
         return Some(0);
     }
     Some((active + 1) % tab_count)
+}
+
+/// Where `tab` sits in `order`; past the end for the home view, which has no tab.
+fn position_in(order: &[usize], tab: usize) -> usize {
+    order
+        .iter()
+        .position(|ix| *ix == tab)
+        .unwrap_or(order.len())
 }
 
 /// Tab to show after "previous tab". From the home view the cycle enters at

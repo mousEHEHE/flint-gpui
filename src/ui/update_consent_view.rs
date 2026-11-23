@@ -3,7 +3,7 @@
 //! start.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, EventEmitter, Window};
+use gpui::{div, Context, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogHeader, DialogTitle},
@@ -11,6 +11,7 @@ use gpui_component::{
 };
 
 use crate::preferences::UpdateChecks;
+use crate::ui::rems_from_px;
 use crate::ui::update_service::UpdateService;
 
 pub enum UpdateConsentEvent {
@@ -45,22 +46,22 @@ impl Render for UpdateConsentView {
         let (fg, muted_fg) = (theme.foreground, theme.muted_foreground);
 
         v_flex()
-            .p(px(12.))
-            .gap(px(8.))
+            .p(rems_from_px(12.))
+            .gap(rems_from_px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child("Check for updates?")))
-            .child(div().text_size(px(12.)).text_color(fg).child(
+            .child(div().text_size(rems_from_px(12.)).text_color(fg).child(
                 "flint can check for a new version on start and every 6 hours. \
                  It sends only your OS name.",
             ))
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(rems_from_px(11.))
                     .text_color(muted_fg)
                     .child("You can change it later in Settings → About."),
             )
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .justify_end()
                     .child(Self::answer_button(
                         "update-consent-manual",

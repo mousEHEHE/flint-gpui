@@ -1,8 +1,9 @@
 use gpui::prelude::*;
-use gpui::{div, px, App};
+use gpui::{div, App};
 use gpui_component::{h_flex, theme::Theme, v_flex, ActiveTheme as _};
 
 use crate::ui::lock_screen;
+use crate::ui::rems_from_px;
 
 const GRID_COLUMNS: usize = 4;
 
@@ -24,10 +25,10 @@ fn word_cell(number: usize, word: &str, theme: &Theme) -> impl IntoElement {
     h_flex()
         .flex_1()
         .min_w_0()
-        .gap(px(6.))
+        .gap(rems_from_px(6.))
         .child(
             div()
-                .w(px(18.))
+                .w(rems_from_px(18.))
                 .flex_none()
                 .text_xs()
                 .text_right()
@@ -46,12 +47,15 @@ fn word_grid(phrase: &str, theme: &Theme) -> impl IntoElement {
             .map(|(column, word)| word_cell(row * GRID_COLUMNS + column + 1, word, theme));
         // Empty cells keep a short last row aligned with the columns above it.
         let padding = (chunk.len()..GRID_COLUMNS).map(|_| div().flex_1().min_w_0());
-        h_flex().gap(px(8.)).children(cells).children(padding)
+        h_flex()
+            .gap(rems_from_px(8.))
+            .children(cells)
+            .children(padding)
     });
 
     v_flex()
-        .p(px(12.))
-        .gap(px(6.))
+        .p(rems_from_px(12.))
+        .gap(rems_from_px(6.))
         .rounded_md()
         .bg(theme.muted)
         .text_sm()
@@ -65,7 +69,7 @@ pub(crate) fn phrase_panel(
     cx: &App,
 ) -> impl IntoElement {
     v_flex()
-        .gap(px(8.))
+        .gap(rems_from_px(8.))
         .child(lock_screen::header(header, Some(subtitle), cx))
         .child(word_grid(phrase, cx.theme()))
 }

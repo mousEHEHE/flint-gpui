@@ -17,19 +17,21 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::preferences::{
-    Preferences, TerminalFont, TerminalScheme, ThemePreference, UpdateChecks,
-    DEFAULT_EDITOR_COMMAND, DEFAULT_TERMINAL_FONT_SIZE,
+    HostSubtitle, PanelSection, Preferences, TerminalFont, TerminalScheme, ThemePreference,
+    UpdateChecks, DEFAULT_EDITOR_COMMAND, DEFAULT_TERMINAL_FONT_SIZE, RECENT_HOSTS_LIMITS,
 };
 use crate::ui::server_form::read_key_file;
 use crate::ui::sync_service::SyncService;
 use crate::ui::terminal_palette::TerminalColors;
 use crate::ui::update_service::UpdateService;
 use crate::ui::{dialog_chrome, VaultState};
+use crate::ui::{rems_from_px, scaled_px};
 use crate::vault::{
     ProxyAuth, ProxyChoice, ProxyDefSummary, ProxyKind, ProxyMode, ProxyRouting, Snippet,
     SnippetBody, SshKey, SshKeySummary, VaultError,
 };
 
+use super::shortcuts_pane::ShortcutsPane;
 use super::sync_pane::SyncPane;
 use super::teams_pane::{OpenSync, TeamsPane};
 use super::vault_pane::{VaultPane, VaultPaneEvent};
@@ -89,6 +91,7 @@ enum SettingsMode {
     Teams,
     Appearance,
     Terminal,
+    Shortcuts,
     KeysList,
     AddKey,
     SnippetsList,
@@ -148,6 +151,7 @@ pub struct SettingsView {
     vault_pane: Entity<VaultPane>,
     sync_pane: Entity<SyncPane>,
     teams_pane: Entity<TeamsPane>,
+    shortcuts_pane: Entity<ShortcutsPane>,
 }
 
 impl EventEmitter<SettingsViewEvent> for SettingsView {}
@@ -222,6 +226,7 @@ impl SettingsView {
         })
         .detach();
         let vault_pane = cx.new(|cx| VaultPane::new(vault_state.clone(), window, cx));
+        let shortcuts_pane = cx.new(|cx| ShortcutsPane::new(window, cx));
         cx.subscribe(
             &vault_pane,
             |_, _, event: &VaultPaneEvent, cx| match event {
@@ -274,6 +279,7 @@ impl SettingsView {
             vault_pane,
             sync_pane,
             teams_pane,
+            shortcuts_pane,
         }
     }
 
@@ -450,12 +456,12 @@ impl SettingsView {
         };
 
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let (w2, m2) = (weak.clone(), msg.clone());
-            dialog_chrome(dialog).w(px(380.)).child(
+            dialog_chrome(dialog).w(scaled_px(px(380.), cx)).child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(rems_from_px(12.))
+                    .gap(rems_from_px(8.))
                     .child(DialogHeader::new().child(DialogTitle::new().child("Delete key")))
                     .child(div().text_sm().child(m2))
                     .child(
@@ -507,12 +513,12 @@ impl SettingsView {
             .new(|cx| InputState::new(window, cx).default_value(SharedString::from(current_name)));
         let weak = cx.weak_entity();
         let ri = rename_input.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let (ri2, w2) = (ri.clone(), weak.clone());
-            dialog_chrome(dialog).w(px(320.)).child(
+            dialog_chrome(dialog).w(scaled_px(px(320.), cx)).child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(rems_from_px(12.))
+                    .gap(rems_from_px(8.))
                     .child(DialogHeader::new().child(DialogTitle::new().child("Rename key")))
                     .child(Input::new(&ri2))
                     .child(
@@ -674,12 +680,12 @@ impl SettingsView {
              connection. This cannot be undone."
         );
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let (w2, m2) = (weak.clone(), msg.clone());
-            dialog_chrome(dialog).w(px(380.)).child(
+            dialog_chrome(dialog).w(scaled_px(px(380.), cx)).child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(rems_from_px(12.))
+                    .gap(rems_from_px(8.))
                     .child(DialogHeader::new().child(DialogTitle::new().child("Delete proxy")))
                     .child(div().text_sm().child(m2))
                     .child(
@@ -787,8 +793,8 @@ impl SettingsView {
 
         let profile_rows: gpui::AnyElement = if proxies.is_empty() {
             div()
-                .py(px(18.))
-                .text_size(px(13.))
+                .py(rems_from_px(18.))
+                .text_size(rems_from_px(13.))
                 .text_color(muted_fg)
                 .child("No proxies yet. Add one to route hosts through it.")
                 .into_any_element()
@@ -813,10 +819,10 @@ impl SettingsView {
                         ))
                         .child(
                             div()
-                                .w(px(180.))
+                                .w(rems_from_px(180.))
                                 .flex_shrink(1.)
-                                .min_w(px(80.))
-                                .text_size(px(13.))
+                                .min_w(rems_from_px(80.))
+                                .text_size(rems_from_px(13.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(fg)
                                 .truncate()
@@ -828,14 +834,16 @@ impl SettingsView {
                                 .flex_1()
                                 .min_w_0()
                                 .font_family(crate::theme::MONO_FONT)
-                                .text_size(px(12.))
+                                .text_size(rems_from_px(12.))
                                 .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(meta),
                         )
                         .child(icon_button(
                             SharedString::from(format!("proxy-edit-{id}")),
-                            Icon::empty().path("icons/pen-line.svg").size(px(12.)),
+                            Icon::empty()
+                                .path("icons/pen-line.svg")
+                                .size(rems_from_px(12.)),
                             false,
                             cx.listener(move |this, _, window, cx| {
                                 this.enter_edit_proxy(id, window, cx)
@@ -844,7 +852,9 @@ impl SettingsView {
                         ))
                         .child(icon_button(
                             SharedString::from(format!("proxy-del-{id}")),
-                            Icon::empty().path("icons/trash.svg").size(px(12.)),
+                            Icon::empty()
+                                .path("icons/trash.svg")
+                                .size(rems_from_px(12.)),
                             true,
                             cx.listener(move |this, _, window, cx| {
                                 this.confirm_delete_proxy(id, window, cx)
@@ -862,7 +872,7 @@ impl SettingsView {
             let mode_all = routing.mode == ProxyMode::AllExcept;
 
             let default_chips = h_flex()
-                .gap(px(6.))
+                .gap(rems_from_px(6.))
                 .flex_wrap()
                 .child(
                     select_chip(
@@ -890,7 +900,7 @@ impl SettingsView {
                 }));
 
             let mode_rows = v_flex()
-                .gap(px(8.))
+                .gap(rems_from_px(8.))
                 .child(
                     radio_row(
                         "proxy-mode-all",
@@ -916,8 +926,8 @@ impl SettingsView {
 
             let server_rows: gpui::AnyElement = if servers.is_empty() {
                 div()
-                    .py(px(12.))
-                    .text_size(px(13.))
+                    .py(rems_from_px(12.))
+                    .text_size(rems_from_px(13.))
                     .text_color(muted_fg)
                     .child("No hosts saved yet.")
                     .into_any_element()
@@ -956,10 +966,10 @@ impl SettingsView {
                         // rule: an override wins over it.
                         let checkbox = div()
                             .id(("srv-chk", ix))
-                            .w(px(16.))
-                            .h(px(16.))
+                            .w(rems_from_px(16.))
+                            .h(rems_from_px(16.))
                             .flex_none()
-                            .rounded(px(4.))
+                            .rounded(rems_from_px(4.))
                             .border_1()
                             .border_color(if in_set && is_rule {
                                 accent
@@ -975,7 +985,7 @@ impl SettingsView {
                             .items_center()
                             .justify_center()
                             .when(in_set, |el| {
-                                el.child(Icon::new(IconName::Check).size(px(11.)))
+                                el.child(Icon::new(IconName::Check).size(rems_from_px(11.)))
                             })
                             .when(is_rule, |el| {
                                 el.cursor_pointer()
@@ -998,7 +1008,7 @@ impl SettingsView {
                         // Wraps onto a second line rather than run past the
                         // page when there are many proxies or little room.
                         let mut overrides = h_flex()
-                            .gap(px(4.))
+                            .gap(rems_from_px(4.))
                             .flex_wrap()
                             .justify_end()
                             .flex_shrink(1.)
@@ -1042,20 +1052,20 @@ impl SettingsView {
 
                         h_flex()
                             .id(("srv-row", ix))
-                            .min_h(px(36.))
-                            .py(px(4.))
+                            .min_h(rems_from_px(36.))
+                            .py(rems_from_px(4.))
                             .items_center()
-                            .gap(px(10.))
-                            .px(px(8.))
-                            .rounded(px(7.))
+                            .gap(rems_from_px(10.))
+                            .px(rems_from_px(8.))
+                            .rounded(rems_from_px(7.))
                             .hover(|s| s.bg(crate::theme::field()))
                             .child(checkbox)
                             .child(
                                 div()
                                     .flex_shrink(1.)
-                                    .min_w(px(60.))
-                                    .max_w(px(160.))
-                                    .text_size(px(13.))
+                                    .min_w(rems_from_px(60.))
+                                    .max_w(rems_from_px(160.))
+                                    .text_size(rems_from_px(13.))
                                     .text_color(fg)
                                     .truncate()
                                     // A host without a name goes by its address.
@@ -1069,7 +1079,7 @@ impl SettingsView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(11.5))
+                                    .text_size(rems_from_px(11.5))
                                     .text_color(muted_fg)
                                     .truncate()
                                     .child(SharedString::from(format!(
@@ -1083,7 +1093,7 @@ impl SettingsView {
                                         .flex_shrink(1.)
                                         .min_w_0()
                                         .truncate()
-                                        .text_size(px(11.5))
+                                        .text_size(rems_from_px(11.5))
                                         .text_color(muted_fg)
                                         .child(badge_text),
                                 )
@@ -1094,11 +1104,11 @@ impl SettingsView {
             };
 
             v_flex()
-                .gap(px(8.))
+                .gap(rems_from_px(8.))
                 .child(section_header("Routing", None))
                 .child(
                     v_flex()
-                        .gap(px(6.))
+                        .gap(rems_from_px(6.))
                         .child(field_label("Default proxy", cx))
                         .child(default_chips),
                 )
@@ -1113,9 +1123,9 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .child(header)
             .child(profile_rows)
             .child(routing_section)
@@ -1132,35 +1142,38 @@ impl SettingsView {
         let is_socks = self.proxy_kind == ProxyKind::Socks5;
 
         let fields = v_flex()
-            .max_w(px(420.))
-            .gap(px(8.))
+            .max_w(rems_from_px(420.))
+            .gap(rems_from_px(8.))
             .child(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Name", cx))
                     .child(Input::new(&self.proxy_name).small()),
             )
             .child(
-                v_flex().gap(px(6.)).child(field_label("Type", cx)).child(
-                    h_flex()
-                        .gap(px(12.))
-                        .child(
-                            radio_row("proxy-kind-socks", "SOCKS5", is_socks, cx).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.proxy_kind = ProxyKind::Socks5;
-                                    cx.notify();
-                                }),
+                v_flex()
+                    .gap(rems_from_px(6.))
+                    .child(field_label("Type", cx))
+                    .child(
+                        h_flex()
+                            .gap(rems_from_px(12.))
+                            .child(
+                                radio_row("proxy-kind-socks", "SOCKS5", is_socks, cx).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.proxy_kind = ProxyKind::Socks5;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                radio_row("proxy-kind-http", "HTTP", !is_socks, cx).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.proxy_kind = ProxyKind::Http;
+                                        cx.notify();
+                                    }),
+                                ),
                             ),
-                        )
-                        .child(
-                            radio_row("proxy-kind-http", "HTTP", !is_socks, cx).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.proxy_kind = ProxyKind::Http;
-                                    cx.notify();
-                                }),
-                            ),
-                        ),
-                ),
+                    ),
             )
             .child(
                 h_flex()
@@ -1168,27 +1181,27 @@ impl SettingsView {
                     .child(
                         v_flex()
                             .flex_1()
-                            .gap(px(6.))
+                            .gap(rems_from_px(6.))
                             .child(field_label("Host", cx))
                             .child(Input::new(&self.proxy_host).small()),
                     )
                     .child(
                         v_flex()
-                            .w(px(110.))
-                            .gap(px(6.))
+                            .w(rems_from_px(110.))
+                            .gap(rems_from_px(6.))
                             .child(field_label("Port", cx))
                             .child(Input::new(&self.proxy_port).small()),
                     ),
             )
             .child(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Username (optional)", cx))
                     .child(Input::new(&self.proxy_user).small()),
             )
             .child(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Password (optional)", cx))
                     .child(Input::new(&self.proxy_pass).small().mask_toggle()),
             )
@@ -1223,10 +1236,10 @@ impl SettingsView {
         v_flex()
             .id("proxy-editor")
             .size_full()
-            .px(px(20.))
-            .pt(px(14.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pt(rems_from_px(14.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .overflow_y_scroll()
             .child(
                 h_flex()
@@ -1243,7 +1256,7 @@ impl SettingsView {
                     ))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(rems_from_px(17.))
                             .font_semibold()
                             .text_color(fg)
                             .child(title),
@@ -1266,13 +1279,13 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .child(group_title("Theme", cx))
             .child(
                 v_flex()
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .children(choices.into_iter().enumerate().map(|(ix, pref)| {
                         radio_row(("theme-choice", ix), pref.label(), pref == current, cx).on_click(
                             cx.listener(move |_, _, window, cx| {
@@ -1280,6 +1293,87 @@ impl SettingsView {
                                 cx.notify();
                             }),
                         )
+                    })),
+            )
+            .child(group_title("Interface size", cx).mt(rems_from_px(6.)))
+            .child(render_ui_scale_chips(cx))
+            .child(group_title("Sidebar", cx).mt(rems_from_px(6.)))
+            .child(self.render_sidebar_options(cx))
+            .child(group_title("Server panel", cx).mt(rems_from_px(6.)))
+            .child(render_panel_section_options(cx))
+    }
+
+    fn render_sidebar_options(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_recent_shown = Preferences::is_recent_hosts_shown(cx);
+        let recent_limit = Preferences::recent_hosts_limit(cx);
+        let subtitle = Preferences::host_subtitle(cx);
+
+        let limit_chips = h_flex()
+            .pl(rems_from_px(22.))
+            .gap(rems_from_px(4.))
+            .children(RECENT_HOSTS_LIMITS.into_iter().map(|limit| {
+                select_chip(
+                    ("sidebar-recent-limit", limit),
+                    limit.to_string(),
+                    limit == recent_limit,
+                    cx,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    Preferences::update(cx, |prefs| prefs.recent_hosts_limit = limit);
+                    cx.notify();
+                }))
+            }));
+        let subtitle_chips = h_flex().flex_wrap().gap(rems_from_px(4.)).children(
+            HostSubtitle::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(ix, choice)| {
+                    select_chip(
+                        ("sidebar-subtitle", ix),
+                        choice.label(),
+                        choice == subtitle,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        Preferences::update(cx, |prefs| prefs.host_subtitle = choice);
+                        cx.notify();
+                    }))
+                }),
+        );
+
+        v_flex()
+            .gap(rems_from_px(8.))
+            .child(
+                Checkbox::new("sidebar-recent")
+                    .checked(is_recent_shown)
+                    .label("Show recent hosts")
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let is_shown = *checked;
+                        Preferences::update(cx, |prefs| prefs.is_recent_hosts_shown = is_shown);
+                        cx.notify();
+                    })),
+            )
+            .when(is_recent_shown, |el| el.child(limit_chips))
+            .child(field_label("Next to a host's name", cx))
+            .child(subtitle_chips)
+            .child(
+                Checkbox::new("sidebar-compact")
+                    .checked(Preferences::is_sidebar_compact(cx))
+                    .label("Compact rows")
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let is_compact = *checked;
+                        Preferences::update(cx, |prefs| prefs.is_sidebar_compact = is_compact);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Checkbox::new("sidebar-feedback")
+                    .checked(Preferences::is_feedback_button_shown(cx))
+                    .label("Show the feedback button")
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let is_shown = *checked;
+                        Preferences::update(cx, |prefs| prefs.is_feedback_button_shown = is_shown);
+                        cx.notify();
                     })),
             )
     }
@@ -1290,18 +1384,18 @@ impl SettingsView {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .child(group_title("Font size", cx))
             .child(self.render_terminal_font_size(cx))
-            .child(group_title("Font", cx).mt(px(6.)))
+            .child(group_title("Font", cx).mt(rems_from_px(6.)))
             .child(self.render_terminal_fonts(cx))
-            .child(group_title("Color scheme", cx).mt(px(6.)))
+            .child(group_title("Color scheme", cx).mt(rems_from_px(6.)))
             .child(self.render_terminal_schemes(cx))
-            .child(group_title("Typing", cx).mt(px(6.)))
+            .child(group_title("Typing", cx).mt(rems_from_px(6.)))
             .child(self.render_terminal_typing(cx))
-            .child(group_title("Editing remote files", cx).mt(px(6.)))
+            .child(group_title("Editing remote files", cx).mt(rems_from_px(6.)))
             .child(self.render_terminal_editor(cx))
     }
 
@@ -1309,23 +1403,23 @@ impl SettingsView {
         let muted_fg = cx.theme().muted_foreground;
         let caption = move |text: &'static str| {
             div()
-                .max_w(px(520.))
-                .text_size(px(11.5))
+                .max_w(rems_from_px(520.))
+                .text_size(rems_from_px(11.5))
                 .text_color(muted_fg)
                 .child(text)
         };
         let current = Preferences::editor_command(cx);
 
         v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .child(
                 h_flex()
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .child(
                         div()
-                            .w(px(220.))
-                            .mr(px(4.))
+                            .w(rems_from_px(220.))
+                            .mr(rems_from_px(4.))
                             .child(Input::new(&self.editor_command).small()),
                     )
                     .children(["vim", "vi", "nvim", "nano"].into_iter().enumerate().map(
@@ -1350,7 +1444,7 @@ impl SettingsView {
             ))
             .child(
                 Checkbox::new("terminal-editor-default")
-                    .mt(px(4.))
+                    .mt(rems_from_px(4.))
                     .checked(Preferences::is_editor_default_open(cx))
                     .label("Open files in this editor on double-click and Enter")
                     .on_click(cx.listener(|_, checked: &bool, _, cx| {
@@ -1364,7 +1458,7 @@ impl SettingsView {
                     "Images, archives and other binary files still open on this computer. \
                  Open and Open With stay in the right-click menu.",
                 )
-                .pl(px(22.)),
+                .pl(rems_from_px(22.)),
             )
     }
 
@@ -1375,11 +1469,11 @@ impl SettingsView {
         let size = Preferences::terminal_font_size(cx);
 
         h_flex()
-            .gap(px(4.))
+            .gap(rems_from_px(4.))
             .items_center()
             .child(icon_button(
                 "terminal-font-smaller",
-                Icon::new(IconName::Minus).size(px(12.)),
+                Icon::new(IconName::Minus).size(rems_from_px(12.)),
                 false,
                 cx.listener(move |_, _, _, cx| {
                     Preferences::set_terminal_font_size(size - 1.0, cx);
@@ -1389,15 +1483,15 @@ impl SettingsView {
             ))
             .child(
                 div()
-                    .w(px(40.))
+                    .w(rems_from_px(40.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(rems_from_px(13.))
                     .text_color(fg)
                     .child(format!("{size} px")),
             )
             .child(icon_button(
                 "terminal-font-larger",
-                Icon::new(IconName::Plus).size(px(12.)),
+                Icon::new(IconName::Plus).size(rems_from_px(12.)),
                 false,
                 cx.listener(move |_, _, _, cx| {
                     Preferences::set_terminal_font_size(size + 1.0, cx);
@@ -1408,7 +1502,7 @@ impl SettingsView {
             .when(size != DEFAULT_TERMINAL_FONT_SIZE, |el| {
                 el.child(
                     select_chip("terminal-font-reset", "Reset", false, cx)
-                        .ml(px(4.))
+                        .ml(rems_from_px(4.))
                         .on_click(cx.listener(|_, _, _, cx| {
                             Preferences::set_terminal_font_size(DEFAULT_TERMINAL_FONT_SIZE, cx);
                             cx.notify();
@@ -1417,8 +1511,8 @@ impl SettingsView {
             })
             .child(
                 div()
-                    .ml(px(6.))
-                    .text_size(px(11.5))
+                    .ml(rems_from_px(6.))
+                    .text_size(rems_from_px(11.5))
                     .text_color(muted_fg)
                     .child("Shared by every terminal. The zoom shortcuts change it too."),
             )
@@ -1435,7 +1529,7 @@ impl SettingsView {
 
         h_flex()
             .flex_wrap()
-            .gap(px(4.))
+            .gap(rems_from_px(4.))
             .children(fonts.into_iter().enumerate().map(|(ix, font)| {
                 select_chip(("terminal-font", ix), font.family(), font == current, cx)
                     .font_family(font.family())
@@ -1451,7 +1545,7 @@ impl SettingsView {
         let border = cx.theme().title_bar_border;
 
         v_flex()
-            .gap(px(4.))
+            .gap(rems_from_px(4.))
             .children(
                 TerminalScheme::ALL
                     .into_iter()
@@ -1459,7 +1553,7 @@ impl SettingsView {
                     .map(|(ix, scheme)| {
                         let (swatch_bg, dots) = TerminalColors::swatch(scheme);
                         h_flex()
-                            .gap(px(8.))
+                            .gap(rems_from_px(8.))
                             .items_center()
                             .child(
                                 radio_row(
@@ -1468,7 +1562,7 @@ impl SettingsView {
                                     scheme == current,
                                     cx,
                                 )
-                                .w(px(150.))
+                                .w(rems_from_px(150.))
                                 .on_click(cx.listener(
                                     move |_, _, _, cx| {
                                         Preferences::update(cx, |prefs| {
@@ -1480,18 +1574,17 @@ impl SettingsView {
                             )
                             .child(
                                 h_flex()
-                                    .h(px(14.))
-                                    .px(px(5.))
-                                    .gap(px(3.))
+                                    .h(rems_from_px(14.))
+                                    .px(rems_from_px(5.))
+                                    .gap(rems_from_px(3.))
                                     .items_center()
-                                    .rounded(px(3.))
+                                    .rounded(rems_from_px(3.))
                                     .border_1()
                                     .border_color(border)
                                     .bg(swatch_bg)
-                                    .children(
-                                        dots.into_iter()
-                                            .map(|dot| div().size(px(6.)).rounded_full().bg(dot)),
-                                    ),
+                                    .children(dots.into_iter().map(|dot| {
+                                        div().size(rems_from_px(6.)).rounded_full().bg(dot)
+                                    })),
                             )
                     }),
             )
@@ -1501,14 +1594,14 @@ impl SettingsView {
         let muted_fg = cx.theme().muted_foreground;
         let caption = move |text: &'static str| {
             div()
-                .pl(px(22.))
-                .text_size(px(11.5))
+                .pl(rems_from_px(22.))
+                .text_size(rems_from_px(11.5))
                 .text_color(muted_fg)
                 .child(text)
         };
 
         v_flex()
-            .gap(px(4.))
+            .gap(rems_from_px(4.))
             .child(
                 Checkbox::new("terminal-suggestions")
                     .checked(Preferences::is_suggestions_enabled(cx))
@@ -1555,14 +1648,14 @@ impl SettingsView {
         // min_h, not h: a long log path wraps onto a second line.
         let kv = |label: &'static str, value: String| {
             h_flex()
-                .min_h(px(22.))
+                .min_h(rems_from_px(22.))
                 .items_center()
-                .gap(px(12.))
+                .gap(rems_from_px(12.))
                 .child(
                     div()
-                        .w(px(80.))
+                        .w(rems_from_px(80.))
                         .flex_none()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(muted_fg)
                         .child(label),
                 )
@@ -1570,16 +1663,16 @@ impl SettingsView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .text_color(fg)
                         .child(value),
                 )
         };
 
         v_flex()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .child(group_title("About flint", cx))
             .child(
                 v_flex()
@@ -1590,15 +1683,15 @@ impl SettingsView {
             .children(updates)
             .child(
                 h_flex()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(10.))
-                    .rounded(px(6.))
+                    .gap(rems_from_px(10.))
+                    .px(rems_from_px(12.))
+                    .py(rems_from_px(10.))
+                    .rounded(rems_from_px(6.))
                     .bg(crate::theme::element())
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .text_color(fg)
                             .child("Like flint? A star on GitHub helps other people find it."),
                     )
@@ -1608,8 +1701,12 @@ impl SettingsView {
                             .small()
                             .child(
                                 h_flex()
-                                    .gap(px(6.))
-                                    .child(Icon::empty().path("icons/star.svg").size(px(13.)))
+                                    .gap(rems_from_px(6.))
+                                    .child(
+                                        Icon::empty()
+                                            .path("icons/star.svg")
+                                            .size(rems_from_px(13.)),
+                                    )
                                     .child("Star"),
                             )
                             .on_click(|_, _, cx| cx.open_url(crate::logging::REPOSITORY_URL)),
@@ -1617,7 +1714,7 @@ impl SettingsView {
             )
             .child(
                 h_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .flex_wrap()
                     .child(
                         Button::new("about-repository")
@@ -1642,13 +1739,18 @@ impl SettingsView {
                             }),
                     ),
             )
-            .child(div().text_size(px(12.)).text_color(muted_fg).child(
-                "Diagnostics are just the version and your OS. The log file has host and \
-                         user names, so look through it before you attach it.",
-            ))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
+                    .text_color(muted_fg)
+                    .child(
+                        "Diagnostics are just the version and your OS. The log file has host and \
+                         user names, so look through it before you attach it.",
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(rems_from_px(12.))
                     .text_color(muted_fg)
                     .child("flint is free software (GPL-3.0) with no warranty."),
             )
@@ -1666,7 +1768,7 @@ impl SettingsView {
         };
 
         v_flex()
-            .gap(px(4.))
+            .gap(rems_from_px(4.))
             .child(
                 Checkbox::new("about-check-for-updates")
                     .checked(is_automatic)
@@ -1683,15 +1785,15 @@ impl SettingsView {
             )
             .child(
                 div()
-                    .pl(px(22.))
-                    .text_size(px(11.5))
+                    .pl(rems_from_px(22.))
+                    .text_size(rems_from_px(11.5))
                     .text_color(muted_fg)
                     .child("On start and every 6 hours. It sends only your OS name."),
             )
             .child(
                 h_flex()
-                    .pl(px(22.))
-                    .gap(px(8.))
+                    .pl(rems_from_px(22.))
+                    .gap(rems_from_px(8.))
                     .items_center()
                     .child(
                         Button::new("about-check-now")
@@ -1709,7 +1811,7 @@ impl SettingsView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .text_color(muted_fg)
                             .child(result),
                     ),
@@ -1815,7 +1917,7 @@ impl SettingsView {
                         format!("{} · added {}", key.key_type, fmt_relative(key.created_at));
                     let usage = div()
                         .flex_none()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(if in_use_count > 0 {
                             muted_fg
                         } else {
@@ -1838,10 +1940,10 @@ impl SettingsView {
                         ))
                         .child(
                             div()
-                                .w(px(200.))
+                                .w(rems_from_px(200.))
                                 .flex_shrink(1.)
-                                .min_w(px(80.))
-                                .text_size(px(13.))
+                                .min_w(rems_from_px(80.))
+                                .text_size(rems_from_px(13.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(fg)
                                 .truncate()
@@ -1851,7 +1953,7 @@ impl SettingsView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(12.))
+                                .text_size(rems_from_px(12.))
                                 .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(meta_line),
@@ -1895,7 +1997,7 @@ impl SettingsView {
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .text_color(muted_fg)
                         .child("This key is no longer in the vault."),
                 )
@@ -1934,10 +2036,10 @@ impl SettingsView {
 
         let det_head = h_flex()
             .flex_none()
-            .h(px(52.))
+            .h(rems_from_px(52.))
             .items_center()
-            .gap(px(10.))
-            .px(px(20.))
+            .gap(rems_from_px(10.))
+            .px(rems_from_px(20.))
             .border_b_1()
             .border_color(border)
             .child(back_button(
@@ -1951,7 +2053,7 @@ impl SettingsView {
             .child(type_pill(&key.key_type, accent, accent_soft, accent_border))
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(rems_from_px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(fg)
                     .truncate()
@@ -1960,7 +2062,9 @@ impl SettingsView {
             .child(div().flex_1())
             .child(icon_button(
                 "key-rename",
-                Icon::empty().path("icons/pen-line.svg").size(px(13.)),
+                Icon::empty()
+                    .path("icons/pen-line.svg")
+                    .size(rems_from_px(13.)),
                 false,
                 cx.listener(move |this, _, window, cx| {
                     let name = this
@@ -1976,7 +2080,9 @@ impl SettingsView {
             ))
             .child(icon_button(
                 "key-delete",
-                Icon::empty().path("icons/trash.svg").size(px(13.)),
+                Icon::empty()
+                    .path("icons/trash.svg")
+                    .size(rems_from_px(13.)),
                 true,
                 cx.listener(move |this, _, window, cx| {
                     this.confirm_delete(key_id, window, cx);
@@ -1985,17 +2091,17 @@ impl SettingsView {
             ));
 
         let fingerprint = v_flex()
-            .gap(px(2.))
+            .gap(rems_from_px(2.))
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(rems_from_px(12.5))
                     .text_color(text_editor)
                     .font_family(terminal_font)
                     .child(SharedString::from(key.fingerprint.clone())),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rems_from_px(11.5))
                     .text_color(muted_fg)
                     .child(format!("added {added_relative}")),
             );
@@ -2003,9 +2109,9 @@ impl SettingsView {
         let in_use_section_h = section_header("In use by", Some(in_use.len()));
         let in_use_body: gpui::AnyElement = if in_use.is_empty() {
             div()
-                .px(px(2.))
-                .py(px(4.))
-                .text_size(px(13.))
+                .px(rems_from_px(2.))
+                .py(rems_from_px(4.))
+                .text_size(rems_from_px(13.))
                 .text_color(muted_fg)
                 .child("Not bound to any host yet.")
                 .into_any_element()
@@ -2017,7 +2123,7 @@ impl SettingsView {
             });
             h_flex()
                 .flex_wrap()
-                .gap(px(6.))
+                .gap(rems_from_px(6.))
                 .children(pills)
                 .into_any_element()
         };
@@ -2039,12 +2145,12 @@ impl SettingsView {
             .items_center()
             .child(section_header("Public key", None).flex_1())
             .child(
-                Button::new("pub-add-to-host")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .child("Add to host\u{2026}")
-                    .tooltip("Sign in to a host and add this key to its authorized_keys")
+                Button::new("pub-export-to-host")
+                    .outline()
+                    .small()
+                    .icon(Icon::empty().path("icons/key-round.svg"))
+                    .child("Export to host\u{2026}")
+                    .tooltip("Sign in to a host and add this key to its ~/.ssh/authorized_keys")
                     .disabled(!has_public_key)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(SettingsViewEvent::AddKeyToHost(key_id));
@@ -2066,13 +2172,13 @@ impl SettingsView {
             );
         let pubkey_block = div()
             .id("pubkey-body")
-            .p(px(12.))
-            .rounded(px(8.))
+            .p(rems_from_px(12.))
+            .rounded(rems_from_px(8.))
             .bg(bg_deep)
             .border_1()
             .border_color(border)
             .font_family(terminal_font)
-            .text_size(px(12.5))
+            .text_size(rems_from_px(12.5))
             .text_color(text_editor)
             .child(pub_line);
 
@@ -2087,9 +2193,9 @@ impl SettingsView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .gap(px(12.))
-                    .px(px(20.))
-                    .py(px(16.))
+                    .gap(rems_from_px(12.))
+                    .px(rems_from_px(20.))
+                    .py(rems_from_px(16.))
                     .child(fingerprint)
                     .child(in_use_section_h)
                     .child(in_use_body)
@@ -2097,7 +2203,7 @@ impl SettingsView {
                     .child(pubkey_block)
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(rems_from_px(11.5))
                             .text_color(muted_fg)
                             .child("The private key stays encrypted in the vault."),
                     ),
@@ -2157,26 +2263,26 @@ impl SettingsView {
                 .into_any_element()
         } else {
             Textarea::new(&self.add_paste)
-                .h(px(120.))
+                .h(rems_from_px(120.))
                 .into_any_element()
         };
 
         let fields = v_flex()
-            .max_w(px(420.))
-            .gap(px(8.))
+            .max_w(rems_from_px(420.))
+            .gap(rems_from_px(8.))
             .child(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Name", cx))
                     .child(Input::new(&self.add_name).small()),
             )
             .child(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Key source", cx))
                     .child(
                         h_flex()
-                            .gap(px(12.))
+                            .gap(rems_from_px(12.))
                             .child(
                                 radio_row("pem-src-file", "From file", is_file, cx).on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -2208,7 +2314,7 @@ impl SettingsView {
             .when(self.add_encrypted, |el| {
                 el.child(
                     v_flex()
-                        .gap(px(6.))
+                        .gap(rems_from_px(6.))
                         .child(field_label("Passphrase (key is encrypted)", cx))
                         .child(Input::new(&self.add_passphrase).small().mask_toggle()),
                 )
@@ -2244,10 +2350,10 @@ impl SettingsView {
         v_flex()
             .id("add-key-form")
             .size_full()
-            .px(px(20.))
-            .pt(px(14.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pt(rems_from_px(14.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .overflow_y_scroll()
             .child(
                 h_flex()
@@ -2264,7 +2370,7 @@ impl SettingsView {
                     ))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(rems_from_px(17.))
                             .font_semibold()
                             .text_color(fg)
                             .child("Add key"),
@@ -2415,10 +2521,10 @@ impl SettingsView {
             ))
             .child(
                 div()
-                    .w(px(180.))
+                    .w(rems_from_px(180.))
                     .flex_shrink(1.)
-                    .min_w(px(80.))
-                    .text_size(px(13.))
+                    .min_w(rems_from_px(80.))
+                    .text_size(rems_from_px(13.))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(fg)
                     .truncate()
@@ -2429,7 +2535,7 @@ impl SettingsView {
                     .flex_1()
                     .min_w_0()
                     .font_family(crate::theme::MONO_FONT)
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(crate::theme::text_dim())
                     .truncate()
                     .child(preview),
@@ -2437,7 +2543,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(muted_fg)
                     .child(updated_label),
             )
@@ -2468,7 +2574,7 @@ impl SettingsView {
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .text_color(muted_fg)
                         .child("This snippet is no longer in the vault."),
                 )
@@ -2530,7 +2636,7 @@ impl SettingsView {
         let description_row: Option<gpui::AnyElement> = if in_edit {
             Some(
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("Description", cx))
                     .child(Input::new(&self.edit_description))
                     .into_any_element(),
@@ -2542,7 +2648,7 @@ impl SettingsView {
                 .filter(|desc| !desc.is_empty())
                 .map(|desc| {
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .text_color(cx.theme().foreground)
                         .child(desc)
                         .into_any_element()
@@ -2551,13 +2657,13 @@ impl SettingsView {
 
         let content_block: gpui::AnyElement = if in_edit {
             v_flex()
-                .gap(px(6.))
+                .gap(rems_from_px(6.))
                 .child(field_label("Content", cx))
-                .child(Textarea::new(&self.edit_content).h(px(220.)))
+                .child(Textarea::new(&self.edit_content).h(rems_from_px(220.)))
                 .into_any_element()
         } else {
             v_flex()
-                .gap(px(6.))
+                .gap(rems_from_px(6.))
                 .child(field_label("Content", cx))
                 .child(code_block(&content, cx))
                 .into_any_element()
@@ -2568,9 +2674,9 @@ impl SettingsView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .gap(px(12.))
-            .px(px(20.))
-            .py(px(16.))
+            .gap(rems_from_px(12.))
+            .px(rems_from_px(20.))
+            .py(rems_from_px(16.))
             .children(description_row)
             .child(content_block);
 
@@ -2617,7 +2723,7 @@ impl SettingsView {
         let updated = (!creating).then(|| {
             div()
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(rems_from_px(11.5))
                 .text_color(muted_fg)
                 .child(format!(
                     "updated {}",
@@ -2637,7 +2743,7 @@ impl SettingsView {
                 .min_w(px(0.))
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(fg)
                         .truncate()
@@ -2649,9 +2755,9 @@ impl SettingsView {
         h_flex()
             .flex_none()
             .items_center()
-            .h(px(52.))
-            .gap(px(10.))
-            .px(px(20.))
+            .h(rems_from_px(52.))
+            .gap(rems_from_px(10.))
+            .px(rems_from_px(20.))
             .border_b_1()
             .border_color(border)
             .child(back_button(
@@ -2693,7 +2799,7 @@ impl SettingsView {
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(danger)
                     .truncate()
                     .child(msg)
@@ -2705,10 +2811,10 @@ impl SettingsView {
 
         let bar = h_flex()
             .flex_none()
-            .h(px(52.))
-            .px(px(20.))
+            .h(rems_from_px(52.))
+            .px(rems_from_px(20.))
             .items_center()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .border_t_1()
             .border_color(border);
 
@@ -2930,12 +3036,12 @@ impl SettingsView {
             snippet_name
         );
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let (w2, m2) = (weak.clone(), msg.clone());
-            dialog_chrome(dialog).w(px(380.)).child(
+            dialog_chrome(dialog).w(scaled_px(px(380.), cx)).child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(rems_from_px(12.))
+                    .gap(rems_from_px(8.))
                     .child(DialogHeader::new().child(DialogTitle::new().child("Delete snippet")))
                     .child(div().text_sm().child(m2))
                     .child(
@@ -2978,6 +3084,30 @@ impl SettingsView {
             )
         });
     }
+
+    pub fn show_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.active_section = section;
+        self.shortcuts_pane
+            .update(cx, |pane, cx| pane.stop_recording(cx));
+        self.mode = match section {
+            SettingsSection::Vault => SettingsMode::Vault,
+            SettingsSection::Sync => SettingsMode::Sync,
+            SettingsSection::Teams => SettingsMode::Teams,
+            SettingsSection::Appearance => SettingsMode::Appearance,
+            SettingsSection::Terminal => SettingsMode::Terminal,
+            SettingsSection::Shortcuts => SettingsMode::Shortcuts,
+            SettingsSection::Keys => SettingsMode::KeysList,
+            SettingsSection::Snippets => SettingsMode::SnippetsList,
+            SettingsSection::Network => SettingsMode::ProxyList,
+            SettingsSection::About => SettingsMode::About,
+        };
+        if matches!(section, SettingsSection::Sync | SettingsSection::Teams) {
+            SyncService::global(cx).update(cx, |service, cx| service.refresh_if_stale(cx));
+        }
+        self.add_error = None;
+        self.edit_error = None;
+        cx.notify();
+    }
 }
 
 impl Render for SettingsView {
@@ -2987,7 +3117,7 @@ impl Render for SettingsView {
         let muted_fg = theme.muted_foreground;
         // gpui does not clip children to rounded corners, so the rail rounds
         // its own outer corners to sit inside the card's.
-        let inner_radius = px(CARD_RADIUS - 1.);
+        let inner_radius = rems_from_px(CARD_RADIUS - 1.);
 
         let rail_items = SettingsSection::all()
             .iter()
@@ -3004,12 +3134,12 @@ impl Render for SettingsView {
                 h_flex()
                     .id(("settings-section", ix))
                     .w_full()
-                    .h(px(30.))
+                    .h(rems_from_px(30.))
                     .items_center()
-                    .gap(px(10.))
-                    .px(px(10.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
+                    .gap(rems_from_px(10.))
+                    .px(rems_from_px(10.))
+                    .rounded(rems_from_px(6.))
+                    .text_size(rems_from_px(13.))
                     .text_color(if is_active { fg } else { muted_fg })
                     .cursor_pointer()
                     .when(is_active, |el| el.bg(crate::theme::element()))
@@ -3017,39 +3147,26 @@ impl Render for SettingsView {
                         el.hover(|s| s.bg(crate::theme::field()).text_color(fg))
                             .active(|s| s.bg(crate::theme::element_active()))
                     })
-                    .child(section.icon().size(px(15.)).text_color(icon_color))
+                    .child(
+                        section
+                            .icon()
+                            .size(rems_from_px(15.))
+                            .text_color(icon_color),
+                    )
                     .child(section.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active_section = section;
-                        this.mode = match section {
-                            SettingsSection::Vault => SettingsMode::Vault,
-                            SettingsSection::Sync => SettingsMode::Sync,
-                            SettingsSection::Teams => SettingsMode::Teams,
-                            SettingsSection::Appearance => SettingsMode::Appearance,
-                            SettingsSection::Terminal => SettingsMode::Terminal,
-                            SettingsSection::Keys => SettingsMode::KeysList,
-                            SettingsSection::Snippets => SettingsMode::SnippetsList,
-                            SettingsSection::Network => SettingsMode::ProxyList,
-                            SettingsSection::About => SettingsMode::About,
-                        };
-                        if matches!(section, SettingsSection::Sync | SettingsSection::Teams) {
-                            SyncService::global(cx)
-                                .update(cx, |service, cx| service.refresh_if_stale(cx));
-                        }
-                        this.add_error = None;
-                        this.edit_error = None;
-                        cx.notify();
+                        this.show_section(section, cx);
                     }))
             });
 
         let close_button = div()
             .id("settings-close")
-            .size(px(26.))
+            .size(rems_from_px(26.))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .cursor_pointer()
             .text_color(muted_fg)
             .hover(move |s| s.bg(crate::theme::field()).text_color(fg))
@@ -3060,28 +3177,28 @@ impl Render for SettingsView {
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(SettingsViewEvent::Close);
             }))
-            .child(gpui_component::Icon::new(IconName::Close).size(px(14.)));
+            .child(gpui_component::Icon::new(IconName::Close).size(rems_from_px(14.)));
 
         let rail = v_flex()
-            .w(px(200.))
+            .w(rems_from_px(200.))
             .h_full()
             .flex_none()
             .rounded_l(inner_radius)
             .bg(crate::theme::modal_rail())
             .border_r_1()
             .border_color(crate::theme::border())
-            .px(px(8.))
-            .pb(px(8.))
-            .gap(px(2.))
+            .px(rems_from_px(8.))
+            .pb(rems_from_px(8.))
+            .gap(rems_from_px(2.))
             .child(
                 h_flex()
-                    .h(px(52.))
-                    .pl(px(10.))
+                    .h(rems_from_px(52.))
+                    .pl(rems_from_px(10.))
                     .items_center()
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_size(rems_from_px(15.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(fg)
                             .child("Settings"),
@@ -3108,6 +3225,7 @@ impl Render for SettingsView {
             SettingsMode::Teams => self.teams_pane.clone().into_any_element(),
             SettingsMode::Appearance => self.render_appearance(cx).into_any_element(),
             SettingsMode::Terminal => self.render_terminal(cx).into_any_element(),
+            SettingsMode::Shortcuts => self.shortcuts_pane.clone().into_any_element(),
             SettingsMode::KeysList => self.render_keys_list(cx).into_any_element(),
             SettingsMode::AddKey => self.render_add_key(cx).into_any_element(),
             SettingsMode::SnippetsList => self.render_snippets_list(cx).into_any_element(),
@@ -3143,7 +3261,7 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(32.))
+            .p(rems_from_px(32.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, _, _, cx| {
@@ -3160,13 +3278,13 @@ impl Render for SettingsView {
                     .id("settings-card")
                     .w_full()
                     .h_full()
-                    .max_w(px(980.))
-                    .max_h(px(680.))
+                    .max_w(rems_from_px(980.))
+                    .max_h(rems_from_px(680.))
                     .items_stretch()
                     .bg(crate::theme::modal_surface())
                     .border_1()
                     .border_color(crate::theme::float_border())
-                    .rounded(px(CARD_RADIUS))
+                    .rounded(rems_from_px(CARD_RADIUS))
                     .shadow(crate::ui::modal_shadow())
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3190,16 +3308,16 @@ const CARD_RADIUS: f32 = 12.;
 
 /// The top of a settings page: its name, and the count of what it lists.
 /// List pages add their filter and button to the right.
-fn page_head(title: &'static str, count: Option<usize>) -> gpui::Div {
+pub(super) fn page_head(title: &'static str, count: Option<usize>) -> gpui::Div {
     h_flex()
         .flex_none()
-        .h(px(60.))
-        .px(px(20.))
-        .gap(px(10.))
+        .h(rems_from_px(60.))
+        .px(rems_from_px(20.))
+        .gap(rems_from_px(10.))
         .items_center()
         .child(
             div()
-                .text_size(px(17.))
+                .text_size(rems_from_px(17.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(crate::theme::text())
                 .child(title),
@@ -3208,23 +3326,23 @@ fn page_head(title: &'static str, count: Option<usize>) -> gpui::Div {
 }
 
 /// The filter field of a list page: a fill, an outline and a search icon.
-fn filter_field(input: &Entity<InputState>) -> impl IntoElement {
+pub(super) fn filter_field(input: &Entity<InputState>) -> impl IntoElement {
     h_flex()
-        .w(px(220.))
+        .w(rems_from_px(220.))
         .flex_shrink(1.)
-        .min_w(px(120.))
-        .h(px(28.))
-        .pl(px(10.))
-        .pr(px(6.))
-        .gap(px(7.))
+        .min_w(rems_from_px(120.))
+        .h(rems_from_px(28.))
+        .pl(rems_from_px(10.))
+        .pr(rems_from_px(6.))
+        .gap(rems_from_px(7.))
         .items_center()
-        .rounded(px(7.))
+        .rounded(rems_from_px(7.))
         .bg(crate::theme::field())
         .border_1()
         .border_color(crate::theme::border())
         .child(
             Icon::new(IconName::Search)
-                .size(px(13.))
+                .size(rems_from_px(13.))
                 .text_color(crate::theme::text_dim()),
         )
         .child(
@@ -3236,11 +3354,11 @@ fn filter_field(input: &Entity<InputState>) -> impl IntoElement {
 }
 
 /// The rows of a list page, as one card a step lighter than the page.
-fn list_card() -> gpui::Div {
+pub(super) fn list_card() -> gpui::Div {
     v_flex()
-        .mx(px(20.))
-        .mb(px(20.))
-        .rounded(px(CARD_RADIUS - 2.))
+        .mx(rems_from_px(20.))
+        .mb(rems_from_px(20.))
+        .rounded(rems_from_px(CARD_RADIUS - 2.))
         .border_1()
         .border_color(crate::theme::border())
         .bg(crate::theme::card())
@@ -3254,14 +3372,14 @@ fn card_row(
     is_first: bool,
     is_last: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let inner_radius = px(CARD_RADIUS - 3.);
+    let inner_radius = rems_from_px(CARD_RADIUS - 3.);
     h_flex()
         .id(id)
         .relative()
         .w_full()
-        .h(px(44.))
-        .px(px(12.))
-        .gap(px(12.))
+        .h(rems_from_px(44.))
+        .px(rems_from_px(12.))
+        .gap(rems_from_px(12.))
         .items_center()
         .when(is_first, |row| row.rounded_t(inner_radius))
         .when(is_last, |row| row.rounded_b(inner_radius))
@@ -3273,7 +3391,7 @@ fn card_row(
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(52.))
+                    .left(rems_from_px(52.))
                     .right_0()
                     .h(px(1.))
                     .bg(crate::theme::border()),
@@ -3285,19 +3403,60 @@ fn card_row(
 fn row_tile(icon: Icon, color: Hsla) -> impl IntoElement {
     div()
         .flex_none()
-        .size(px(28.))
+        .size(rems_from_px(28.))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(7.))
+        .rounded(rems_from_px(7.))
         .bg(color.opacity(0.16))
-        .child(icon.size(px(15.)).text_color(color))
+        .child(icon.size(rems_from_px(15.)).text_color(color))
 }
 
 /// Heading of one group of controls on a settings page.
+/// Which blocks the server panel shows. The panel's own menu does the same.
+fn render_panel_section_options(cx: &mut Context<SettingsView>) -> gpui::Div {
+    h_flex().flex_wrap().gap(rems_from_px(8.)).children(
+        PanelSection::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(ix, section)| {
+                Checkbox::new(("panel-section", ix))
+                    .w(rems_from_px(150.))
+                    .checked(Preferences::is_panel_section_shown(section, cx))
+                    .label(section.label())
+                    .on_click(cx.listener(move |_, checked: &bool, _, cx| {
+                        Preferences::set_panel_section_shown(section, *checked, cx);
+                        cx.notify();
+                    }))
+            }),
+    )
+}
+
+fn render_ui_scale_chips(cx: &mut Context<SettingsView>) -> gpui::Div {
+    let current = Preferences::ui_scale(cx);
+    let percent = |scale: f32| format!("{}%", (scale * 100.).round());
+    h_flex().flex_wrap().gap(rems_from_px(4.)).children(
+        std::iter::once(None)
+            .chain(crate::theme::UI_SCALE_STEPS.map(Some))
+            .enumerate()
+            .map(|(ix, choice)| {
+                let label = match choice {
+                    None => format!("Auto ({})", percent(crate::theme::auto_ui_scale_now())),
+                    Some(scale) => percent(scale),
+                };
+                select_chip(("ui-scale", ix), label, current == choice, cx).on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        crate::theme::set_ui_scale(choice, cx);
+                        cx.notify();
+                    },
+                ))
+            }),
+    )
+}
+
 fn group_title(text: &'static str, cx: &App) -> gpui::Div {
     div()
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(cx.theme().foreground)
         .child(text)
@@ -3305,7 +3464,7 @@ fn group_title(text: &'static str, cx: &App) -> gpui::Div {
 
 fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_size(px(12.))
+        .text_size(rems_from_px(12.))
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }
@@ -3314,7 +3473,7 @@ fn radio_dot(selected: bool, cx: &App) -> impl IntoElement {
     let accent = cx.theme().primary;
     div()
         .flex_none()
-        .size(px(16.))
+        .size(rems_from_px(16.))
         .rounded_full()
         .border_1()
         .border_color(if selected {
@@ -3327,7 +3486,7 @@ fn radio_dot(selected: bool, cx: &App) -> impl IntoElement {
         .items_center()
         .justify_center()
         .when(selected, |el| {
-            el.child(div().size(px(8.)).rounded_full().bg(accent))
+            el.child(div().size(rems_from_px(8.)).rounded_full().bg(accent))
         })
 }
 
@@ -3376,11 +3535,11 @@ fn fmt_relative(timestamp: u64) -> String {
 }
 
 /// What a list page says when it has no rows to show.
-fn empty_note(text: &'static str) -> impl IntoElement {
+pub(super) fn empty_note(text: &'static str) -> impl IntoElement {
     div()
-        .mx(px(20.))
-        .py(px(24.))
-        .text_size(px(13.))
+        .mx(rems_from_px(20.))
+        .py(rems_from_px(24.))
+        .text_size(rems_from_px(13.))
         .text_color(crate::theme::text_dim())
         .child(text)
 }
@@ -3388,7 +3547,7 @@ fn empty_note(text: &'static str) -> impl IntoElement {
 /// Plain "N" count shown next to a page title.
 fn count_chip(n: usize) -> impl IntoElement {
     div()
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .text_color(crate::theme::text_dim())
         .child(n.to_string())
 }
@@ -3398,17 +3557,17 @@ fn type_pill(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
     let t = text.to_uppercase();
     h_flex()
         .flex_none()
-        .h(px(22.))
-        .px(px(8.))
+        .h(rems_from_px(22.))
+        .px(rems_from_px(8.))
         .items_center()
-        .gap(px(6.))
-        .rounded(px(6.))
+        .gap(rems_from_px(6.))
+        .rounded(rems_from_px(6.))
         .bg(bg)
         .border_1()
         .border_color(border)
-        .text_size(px(11.5))
+        .text_size(rems_from_px(11.5))
         .text_color(fg)
-        .child(Icon::new(IconName::Asterisk).size(px(11.)))
+        .child(Icon::new(IconName::Asterisk).size(rems_from_px(11.)))
         .child(SharedString::from(t))
 }
 
@@ -3416,11 +3575,11 @@ fn type_pill(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
 fn section_header(label: &'static str, count: Option<usize>) -> gpui::Div {
     h_flex()
         .items_center()
-        .gap(px(8.))
-        .mt(px(8.))
+        .gap(rems_from_px(8.))
+        .mt(rems_from_px(8.))
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(crate::theme::text())
                 .child(label),
@@ -3428,7 +3587,7 @@ fn section_header(label: &'static str, count: Option<usize>) -> gpui::Div {
         .when_some(count, |el, n| {
             el.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(crate::theme::text_dim())
                     .child(n.to_string()),
             )
@@ -3456,10 +3615,10 @@ where
     let hover_bg = crate::theme::field();
     div()
         .id(id)
-        .w(px(26.))
-        .h(px(26.))
+        .w(rems_from_px(26.))
+        .h(rems_from_px(26.))
         .flex_none()
-        .rounded(px(6.))
+        .rounded(rems_from_px(6.))
         .flex()
         .items_center()
         .justify_center()
@@ -3477,20 +3636,20 @@ fn host_pill(ix: usize, label: SharedString, sub: SharedString, cx: &App) -> imp
     h_flex()
         .id(("host-pill", ix))
         .flex_none()
-        .h(px(26.))
-        .px(px(9.))
-        .gap(px(6.))
+        .h(rems_from_px(26.))
+        .px(rems_from_px(9.))
+        .gap(rems_from_px(6.))
         .items_center()
-        .rounded(px(6.))
+        .rounded(rems_from_px(6.))
         .bg(crate::theme::field())
         .border_1()
         .border_color(crate::theme::border())
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .text_color(theme.foreground)
         .child(div().child(label))
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(theme.muted_foreground)
                 .child(sub),
         )
@@ -3512,18 +3671,18 @@ where
     h_flex()
         .id(id)
         .flex_none()
-        .h(px(26.))
-        .px(px(8.))
-        .gap(px(6.))
+        .h(rems_from_px(26.))
+        .px(rems_from_px(8.))
+        .gap(rems_from_px(6.))
         .items_center()
-        .rounded(px(6.))
-        .text_size(px(12.5))
+        .rounded(rems_from_px(6.))
+        .text_size(rems_from_px(12.5))
         .text_color(muted)
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg).text_color(fg))
         .active(move |s| s.bg(crate::theme::element_active()).text_color(fg))
         .on_click(on_click)
-        .child(Icon::new(IconName::ArrowLeft).size(px(14.)))
+        .child(Icon::new(IconName::ArrowLeft).size(rems_from_px(14.)))
         .child("Back")
 }
 
@@ -3536,12 +3695,12 @@ fn code_block(content: &str, cx: &App) -> impl IntoElement {
         h_flex()
             .flex_wrap()
             .items_baseline()
-            .min_h(px(18.))
+            .min_h(rems_from_px(18.))
             .children(split_variables(line).into_iter().map(|(is_var, text)| {
                 if is_var {
                     div()
-                        .px(px(3.))
-                        .rounded(px(3.))
+                        .px(rems_from_px(3.))
+                        .rounded(rems_from_px(3.))
                         .bg(yellow_bg)
                         .text_color(yellow)
                         .child(SharedString::from(text))
@@ -3554,13 +3713,13 @@ fn code_block(content: &str, cx: &App) -> impl IntoElement {
     });
 
     v_flex()
-        .p(px(12.))
-        .rounded(px(8.))
+        .p(rems_from_px(12.))
+        .rounded(rems_from_px(8.))
         .bg(crate::theme::surface_sunken())
         .border_1()
         .border_color(crate::theme::border())
-        .text_size(px(13.))
-        .line_height(px(18.))
+        .text_size(rems_from_px(13.))
+        .line_height(rems_from_px(18.))
         .font_family(Preferences::terminal_font(cx).family())
         .children(lines)
 }
@@ -3614,10 +3773,10 @@ fn select_chip(
     let accent = theme.primary;
     h_flex()
         .id(id)
-        .h(px(26.))
-        .px(px(9.))
+        .h(rems_from_px(26.))
+        .px(rems_from_px(9.))
         .items_center()
-        .rounded(px(6.))
+        .rounded(rems_from_px(6.))
         .border_1()
         .border_color(if active {
             accent
@@ -3632,7 +3791,7 @@ fn select_chip(
         .when(!active, |el| {
             el.hover(|s| s.bg(crate::theme::element_hover()))
         })
-        .text_size(px(12.5))
+        .text_size(rems_from_px(12.5))
         .text_color(if active {
             theme.foreground
         } else {
@@ -3643,7 +3802,7 @@ fn select_chip(
 }
 
 /// A clickable radio option: dot + label.
-fn radio_row(
+pub(super) fn radio_row(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     active: bool,
@@ -3651,14 +3810,14 @@ fn radio_row(
 ) -> gpui::Stateful<gpui::Div> {
     h_flex()
         .id(id)
-        .h(px(28.))
-        .gap(px(10.))
+        .h(rems_from_px(28.))
+        .gap(rems_from_px(10.))
         .items_center()
         .cursor_pointer()
         .child(radio_dot(active, cx))
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .text_color(cx.theme().foreground)
                 .child(label.into()),
         )
@@ -3669,15 +3828,15 @@ fn proxy_kind_pill(kind: ProxyKind, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .flex_none()
-        .h(px(20.))
-        .px(px(6.))
+        .h(rems_from_px(20.))
+        .px(rems_from_px(6.))
         .flex()
         .items_center()
-        .rounded(px(5.))
+        .rounded(rems_from_px(5.))
         .bg(crate::theme::field())
         .border_1()
         .border_color(crate::theme::border())
-        .text_size(px(11.5))
+        .text_size(rems_from_px(11.5))
         .text_color(theme.foreground)
         .child(kind.display_label())
 }

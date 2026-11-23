@@ -6,9 +6,7 @@
 //! worker, which owns the terminal buffer: see [`flint_core::term_emulator`].
 
 use gpui::prelude::*;
-use gpui::{
-    actions, div, px, AnyElement, App, Context, Entity, Focusable as _, KeyBinding, Window,
-};
+use gpui::{actions, div, AnyElement, App, Context, Entity, Focusable as _, KeyBinding, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -17,7 +15,7 @@ use gpui_component::{
 };
 
 use crate::theme as flint_theme;
-use crate::ui::keyboard_layout::bind_chord;
+use crate::ui::rems_from_px;
 use crate::ui::terminal_view::{TerminalView, SIDE_PADDING};
 
 actions!(
@@ -38,14 +36,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-enter", SearchPrev, Some(CONTEXT)),
         KeyBinding::new("escape", CloseSearch, Some(CONTEXT)),
     ]);
-
-    #[cfg(target_os = "macos")]
-    bind_chord(cx, "cmd-f", ToggleSearch, Some("Terminal"));
-
-    // Cmd is free on macOS, but on Linux/Windows Ctrl+F belongs to the shell
-    // (forward-char in readline), so the chord takes Shift as well.
-    #[cfg(not(target_os = "macos"))]
-    bind_chord(cx, "ctrl-shift-f", ToggleSearch, Some("Terminal"));
 }
 
 #[derive(Default)]
@@ -247,19 +237,19 @@ impl TerminalView {
                 .on_action(cx.listener(Self::on_close_search))
                 .occlude()
                 .absolute()
-                .top(px(8.))
+                .top(rems_from_px(8.))
                 // Clear of the scrollbar's grab band on the right edge, or the
                 // bar's hitbox would swallow clicks meant for the thumb.
-                .right(px(20. + SIDE_PADDING))
-                .w(px(300.))
+                .right(rems_from_px(20. + SIDE_PADDING))
+                .w(rems_from_px(300.))
                 .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .py(px(4.))
+                .gap(rems_from_px(6.))
+                .px(rems_from_px(8.))
+                .py(rems_from_px(4.))
                 .bg(flint_theme::pop_surface())
                 .border_1()
                 .border_color(border)
-                .rounded(px(4.))
+                .rounded(rems_from_px(4.))
                 .shadow_md()
                 .child(
                     div()
@@ -269,7 +259,7 @@ impl TerminalView {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.))
+                        .text_size(rems_from_px(10.))
                         .text_color(flint_theme::muted_gray())
                         .child(self.search_status()),
                 )

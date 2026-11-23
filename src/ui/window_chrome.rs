@@ -1,11 +1,13 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, Stateful, Window, WindowControlArea};
+use gpui::{div, Div, ElementId, Stateful, Window, WindowControlArea};
 
 #[cfg(not(target_os = "macos"))]
 use gpui_component::{h_flex, Icon, IconName};
 
+use crate::ui::rems_from_px;
+
 /// Height of the title bar strip, on the main screen and the lock screens.
-pub const TITLE_BAR_HEIGHT: gpui::Pixels = px(32.);
+pub const TITLE_BAR_HEIGHT: gpui::Rems = rems_from_px(32.);
 
 /// An empty strip that moves the window when dragged. It grows to fill the
 /// row it sits in.
@@ -44,15 +46,15 @@ pub fn window_controls(window: &Window) -> Div {
     let btn = move |id: &'static str, icon: IconName, area: WindowControlArea, is_close: bool| {
         let button = div()
             .id(id)
-            .size(px(22.))
+            .size(rems_from_px(22.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
+            .rounded(rems_from_px(3.))
             .text_color(text_dim)
             .cursor_pointer()
             .window_control_area(area)
-            .child(Icon::new(icon).size(px(12.)));
+            .child(Icon::new(icon).size(rems_from_px(12.)));
         if is_close {
             button.hover(move |s| s.bg(close_bg).text_color(gpui::white()))
         } else {
@@ -96,7 +98,7 @@ pub fn window_controls(window: &Window) -> Div {
 
     h_flex()
         .flex_none()
-        .gap(px(4.))
+        .gap(rems_from_px(4.))
         .child(minimize)
         .child(maximize)
         .child(close)
@@ -109,7 +111,7 @@ pub fn bare_title_bar(window: &Window) -> Div {
         .flex_none()
         .w_full()
         .h(TITLE_BAR_HEIGHT)
-        .pr(px(6.))
+        .pr(rems_from_px(6.))
         .items_center()
         .child(drag_region("lock-titlebar-drag"));
 

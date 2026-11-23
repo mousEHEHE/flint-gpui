@@ -10,9 +10,11 @@ use gpui::{
 use gpui_component::{chart::AreaChart, h_flex, v_flex, ActiveTheme as _, StyledExt as _};
 
 use super::{format_bytes, info_row, note, section_title, share, Reading, ServerPanel, TICK};
+use crate::preferences::{PanelSection, Preferences};
 use crate::server_stats::SystemInfo;
 use crate::theme;
 use crate::ui::host_icon::host_icon;
+use crate::ui::rems_from_px;
 use crate::vault::{AuthMethod, ProxyChoice, ServerEntry, VaultManager};
 
 const CHART_HEIGHT: f32 = 48.;
@@ -30,7 +32,12 @@ impl ServerPanel {
                 .into_any_element();
         };
         let os_label = info.os_name.clone().unwrap_or_else(|| info.kernel.clone());
-        let subtitle = match self.last_sample.as_ref() {
+        // Uptime comes with the readings, which stop while no metric is shown.
+        let sample = self
+            .last_sample
+            .as_ref()
+            .filter(|_| super::is_any_metric_shown(cx));
+        let subtitle = match sample {
             Some(sample) => format!(
                 "{} \u{b7} up {}",
                 info.hostname,
@@ -44,10 +51,11 @@ impl ServerPanel {
 
     pub(super) fn render_overview(&self, cx: &Context<Self>) -> Vec<AnyElement> {
         let mut children = vec![self.render_identity(cx)];
-        if self.is_unsupported {
+        let metrics = self.render_metrics(cx);
+        if self.is_unsupported && !metrics.is_empty() {
             children.push(note("Live metrics need a Linux server.").into_any_element());
         } else {
-            children.extend(self.render_metrics(cx));
+            children.extend(metrics);
         }
         // Disks and System come with the host's first answer, in one fade.
         if self.info.is_some() || self.last_sample.is_some() {
@@ -57,8 +65,13 @@ impl ServerPanel {
     }
 
     fn render_details(&self, cx: &Context<Self>) -> Div {
-        let mut details = v_flex().gap(px(10.));
-        if let Some(sample) = self.last_sample.as_ref().filter(|s| !s.disks.is_empty()) {
+        let is_shown = |section| Preferences::is_panel_section_shown(section, cx);
+        let mut details = v_flex().gap(rems_from_px(10.));
+        let disks = self
+            .last_sample
+            .as_ref()
+            .filter(|s| !s.disks.is_empty() && is_shown(PanelSection::Disks));
+        if let Some(sample) = disks {
             details = details.child(section_title("Disks")).children(
                 sample
                     .disks
@@ -66,8 +79,25 @@ impl ServerPanel {
                     .map(|disk| disk_row(&disk.mount, disk.used, disk.size, cx)),
             );
         }
-        let mut rows = self.info.as_ref().map(system_rows).unwrap_or_default();
-        rows.extend(self.connection_rows(cx));
+        let mut rows = Vec::new();
+        if let Some(info) = &self.info {
+            if is_shown(PanelSection::System) {
+                rows.extend(system_rows(info));
+            }
+            if is_shown(PanelSection::Addresses) {
+                rows.extend(
+                    info.addresses
+                        .iter()
+                        .map(|(label, ip)| (*label, ip.clone())),
+                );
+            }
+        }
+        if is_shown(PanelSection::Connection) {
+            rows.extend(self.connection_rows(cx));
+        }
+        if rows.is_empty() {
+            return details;
+        }
         details.child(section_title("System")).children(
             rows.into_iter()
                 .filter(|(_, value)| !value.is_empty())
@@ -123,7 +153,7 @@ impl ServerPanel {
         });
         let network = latest.map(|reading| {
             let legend = h_flex()
-                .gap(px(12.))
+                .gap(rems_from_px(12.))
                 .child(legend_item("in", reading.rx, rx_color))
                 .child(legend_item("out", reading.tx, tx_color));
             (
@@ -132,8 +162,10 @@ impl ServerPanel {
             )
         });
 
-        vec![
-            metric_card(
+        let is_shown = |section| Preferences::is_panel_section_shown(section, cx);
+        let mut cards = Vec::new();
+        if is_shown(PanelSection::Cpu) {
+            cards.push(metric_card(
                 "cpu",
                 "CPU",
                 cpu,
@@ -141,8 +173,10 @@ impl ServerPanel {
                     percent_chart("server-cpu-chart", points, |p| p.reading.cpu, theme.chart_1)
                 }),
                 cx,
-            ),
-            metric_card(
+            ));
+        }
+        if is_shown(PanelSection::Memory) {
+            cards.push(metric_card(
                 "memory",
                 "Memory",
                 memory,
@@ -155,15 +189,18 @@ impl ServerPanel {
                     )
                 }),
                 cx,
-            ),
-            metric_card(
+            ));
+        }
+        if is_shown(PanelSection::Network) {
+            cards.push(metric_card(
                 "network",
                 "Network",
                 network,
                 points.map(|points| network_chart(points, rx_color, tx_color)),
                 cx,
-            ),
-        ]
+            ));
+        }
+        cards
     }
 
     fn chart_points(&self) -> Vec<ChartPoint> {
@@ -205,7 +242,7 @@ fn identity_row(
     cx: &Context<ServerPanel>,
 ) -> Div {
     h_flex()
-        .gap(px(10.))
+        .gap(rems_from_px(10.))
         .items_center()
         .child(host_icon(os_label, false, cx.theme().background, 32.))
         .child(
@@ -215,7 +252,7 @@ fn identity_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .font_semibold()
                         .text_color(if subtitle.is_some() {
                             cx.theme().foreground
@@ -227,7 +264,7 @@ fn identity_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(cx.theme().muted_foreground)
                         .child(subtitle.unwrap_or_else(|| BLANK.to_string())),
                 ),
@@ -308,7 +345,7 @@ fn metric_card(
         .min_w_0()
         .truncate()
         .text_right()
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .font_semibold()
         .text_color(cx.theme().foreground);
     let value = match value {
@@ -320,12 +357,12 @@ fn metric_card(
         None => caption(BLANK.to_string()),
     };
     let header = h_flex()
-        .gap(px(8.))
+        .gap(rems_from_px(8.))
         .items_center()
         .child(
             div()
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(rems_from_px(11.5))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
                 .child(title),
@@ -334,30 +371,37 @@ fn metric_card(
     // flex_none: a clipped card would otherwise shrink to nothing in the column.
     v_flex()
         .flex_none()
-        .rounded(px(8.))
+        .rounded(rems_from_px(8.))
         .border_1()
         .border_color(theme::border())
         .bg(theme::card())
         .overflow_hidden()
         .child(
             v_flex()
-                .px(px(10.))
-                .pt(px(10.))
-                .gap(px(4.))
+                .px(rems_from_px(10.))
+                .pt(rems_from_px(10.))
+                .gap(rems_from_px(4.))
                 .child(header)
                 .child(caption_element),
         )
         // Edge to edge: the graph runs to the card's sides and bottom.
-        .child(div().mt(px(8.)).h(px(CHART_HEIGHT)).children(
-            chart.map(|chart| fade_in(format!("{id}-chart"), div().size_full().child(chart))),
-        ))
+        .child(
+            div()
+                .mt(rems_from_px(8.))
+                .h(rems_from_px(CHART_HEIGHT))
+                .children(
+                    chart.map(|chart| {
+                        fade_in(format!("{id}-chart"), div().size_full().child(chart))
+                    }),
+                ),
+        )
         .into_any_element()
 }
 
 fn caption(text: String) -> AnyElement {
     div()
         .truncate()
-        .text_size(px(11.))
+        .text_size(rems_from_px(11.))
         .text_color(theme::text_dim())
         .child(text)
         .into_any_element()
@@ -367,11 +411,11 @@ fn caption(text: String) -> AnyElement {
 fn legend_item(name: &'static str, rate: f64, color: Hsla) -> Div {
     let rate = format_rate(rate);
     h_flex()
-        .gap(px(5.))
+        .gap(rems_from_px(5.))
         .items_center()
-        .text_size(px(11.))
+        .text_size(rems_from_px(11.))
         .text_color(theme::text_dim())
-        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(div().size(rems_from_px(6.)).rounded_full().bg(color))
         .child(format!("{name} {rate}"))
 }
 
@@ -383,35 +427,39 @@ fn disk_row(mount: &str, used: u64, size: u64, cx: &Context<ServerPanel>) -> Div
         _ => cx.theme().chart_1,
     };
     v_flex()
-        .gap(px(5.))
+        .gap(rems_from_px(5.))
         .child(
             h_flex()
-                .gap(px(8.))
+                .gap(rems_from_px(8.))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(cx.theme().foreground)
                         .child(mount.to_string()),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("{} / {}", format_bytes(used), format_bytes(size))),
                 ),
         )
         .child(
-            div().h(px(4.)).rounded_full().bg(theme::field()).child(
-                div()
-                    .h_full()
-                    .rounded_full()
-                    .w(relative(fraction.clamp(0., 1.) as f32))
-                    .bg(color),
-            ),
+            div()
+                .h(rems_from_px(4.))
+                .rounded_full()
+                .bg(theme::field())
+                .child(
+                    div()
+                        .h_full()
+                        .rounded_full()
+                        .w(relative(fraction.clamp(0., 1.) as f32))
+                        .bg(color),
+                ),
         )
 }
 
@@ -428,11 +476,6 @@ fn system_rows(info: &SystemInfo) -> Vec<(&'static str, String)> {
     if let Some(count) = info.cpu_count {
         rows.push(("Cores", count.to_string()));
     }
-    rows.extend(
-        info.addresses
-            .iter()
-            .map(|address| ("Address", address.clone())),
-    );
     rows
 }
 
@@ -447,7 +490,7 @@ fn connection_rows(entry: &ServerEntry, vault: &VaultManager) -> Vec<(&'static s
             entry.port
         ),
     )];
-    let login = match &entry.auth {
+    let auth = match &entry.auth {
         AuthMethod::Password(_) => "Password".to_string(),
         AuthMethod::PrivateKey { key_id } => match vault.get_key(*key_id) {
             Ok(key) => format!("Key \u{b7} {}", key.name),
@@ -455,7 +498,7 @@ fn connection_rows(entry: &ServerEntry, vault: &VaultManager) -> Vec<(&'static s
         },
         AuthMethod::Agent => "SSH agent".to_string(),
     };
-    rows.push(("Login", login));
+    rows.push(("Auth", auth));
     if let Some(jump_id) = entry.jump_host {
         let jump = vault
             .get_entry(jump_id)

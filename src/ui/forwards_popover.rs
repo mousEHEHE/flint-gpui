@@ -20,6 +20,7 @@ use gpui_component::{
 use crate::connection::{is_loopback_bind, ForwardKind};
 use crate::ssh::ForwardState;
 use crate::theme;
+use crate::ui::rems_from_px;
 use crate::ui::server_session::{ForwardRuntime, ServerSession};
 use crate::ui::terminal_tabs::{header_button, SESSION_HEADER_HEIGHT};
 
@@ -75,7 +76,7 @@ impl ServerSession {
 
         Some(
             header_button("forward-chip", cx)
-                .gap(px(4.))
+                .gap(rems_from_px(4.))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_forwards(cx)))
                 .child("Forwards")
                 .child(
@@ -102,22 +103,22 @@ impl ServerSession {
         let popover = v_flex()
             .occlude()
             .absolute()
-            .right(px(8.))
-            .top(px(SESSION_HEADER_HEIGHT + 4.))
-            .w(px(POPOVER_W))
+            .right(rems_from_px(8.))
+            .top(rems_from_px(SESSION_HEADER_HEIGHT + 4.))
+            .w(rems_from_px(POPOVER_W))
             .bg(theme::pop_surface())
             .border_1()
             .border_color(theme::border_focused())
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .shadow_lg()
             .overflow_hidden()
             .child(self.render_forwards_head(cx))
             .child(
                 div()
                     .id("forwards-pop-body")
-                    .max_h(px(360.))
+                    .max_h(rems_from_px(360.))
                     .overflow_y_scroll()
-                    .p(px(3.))
+                    .p(rems_from_px(3.))
                     .child(v_flex().gap(px(1.)).children(rows)),
             );
 
@@ -126,17 +127,17 @@ impl ServerSession {
 
     fn render_forwards_head(&self, cx: &Context<Self>) -> AnyElement {
         h_flex()
-            .h(px(28.))
-            .pl(px(11.))
-            .pr(px(6.))
+            .h(rems_from_px(28.))
+            .pl(rems_from_px(11.))
+            .pr(rems_from_px(6.))
             .items_center()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(theme::sunken_soft())
             .child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(rems_from_px(10.))
                     .font_semibold()
                     .text_color(theme::muted_gray())
                     .child("PORT FORWARDING"),
@@ -164,25 +165,25 @@ impl ServerSession {
 
         h_flex()
             .id(("forward-row", index))
-            .h(px(40.))
+            .h(rems_from_px(40.))
             .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .rounded(px(3.))
+            .gap(rems_from_px(8.))
+            .px(rems_from_px(8.))
+            .rounded(rems_from_px(3.))
             .child(forward_kind_pill(forward.spec.kind))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(2.))
+                    .gap(rems_from_px(2.))
                     .child(
                         h_flex()
-                            .gap(px(5.))
+                            .gap(rems_from_px(5.))
                             .items_center()
                             .child(
                                 div()
                                     .min_w_0()
-                                    .text_size(px(12.))
+                                    .text_size(rems_from_px(12.))
                                     .font_semibold()
                                     .text_color(cx.theme().foreground)
                                     .truncate()
@@ -192,7 +193,7 @@ impl ServerSession {
                                 el.child(
                                     div()
                                         .flex_shrink_0()
-                                        .text_size(px(10.))
+                                        .text_size(rems_from_px(10.))
                                         .font_semibold()
                                         .text_color(theme::warning())
                                         .child("PUBLIC"),
@@ -209,9 +210,9 @@ impl ServerSession {
                                 div()
                                     .id(("forward-state", index))
                                     .flex_shrink_0()
-                                    .max_w(px(140.))
+                                    .max_w(rems_from_px(140.))
                                     .truncate()
-                                    .text_size(px(10.5))
+                                    .text_size(rems_from_px(10.5))
                                     .text_color(state_color(&forward.state))
                                     .tooltip(move |window, cx| {
                                         Tooltip::new(tooltip_text.clone()).build(window, cx)
@@ -221,7 +222,7 @@ impl ServerSession {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(rems_from_px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .truncate()
                             .child(SharedString::from(forward.spec.route_label())),
@@ -277,13 +278,13 @@ fn state_color(state: &ForwardState) -> Hsla {
 fn forward_kind_pill(kind: ForwardKind) -> impl IntoElement {
     div()
         .flex_none()
-        .h(px(18.))
-        .px(px(4.))
+        .h(rems_from_px(18.))
+        .px(rems_from_px(4.))
         .flex()
         .items_center()
-        .rounded(px(3.))
+        .rounded(rems_from_px(3.))
         .bg(theme::element())
-        .text_size(px(10.))
+        .text_size(rems_from_px(10.))
         .text_color(theme::muted_gray())
         .child(kind.display_label())
 }

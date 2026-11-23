@@ -13,18 +13,20 @@ use crate::ssh::{
 };
 use crate::theme as flint_theme;
 use crate::ui::peer_link::{Link, PeerLink};
-use crate::ui::server_panel::{ServerPanel, ServerPanelEvent, PANEL_WIDTH};
+use crate::ui::rems_from_px;
+use crate::ui::server_panel::{ServerPanel, ServerPanelEvent};
 use crate::ui::sftp_browser::{
     BrowserEvent, PreservedFiles, RestorePaths, SftpBrowser, TransferKind,
 };
 use crate::ui::terminal_view::TerminalView;
 use crate::ui::transfer_rate::TransferRate;
 use crate::ui::VaultState;
+use crate::ui::{resize_edge, ResizeEdge};
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, AsyncApp, BackgroundExecutor, ClipboardItem, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable as _, MouseButton, Pixels, StyleRefinement, Task,
-    WeakEntity, Window,
+    div, px, AnyElement, App, AsyncApp, BackgroundExecutor, ClipboardItem, Context, Div,
+    DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable as _, MouseButton, Pixels,
+    StyleRefinement, Task, WeakEntity, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -774,6 +776,8 @@ pub struct ServerSession {
     pub(crate) terminals: Vec<Entity<TerminalView>>,
     /// Index into `terminals` of the tab on screen.
     pub(crate) active_terminal: usize,
+    /// The tab being renamed and its name field.
+    pub(crate) tab_rename: Option<(Entity<TerminalView>, Entity<InputState>)>,
     /// The active terminal should take the keyboard on the next render.
     pub(crate) is_terminal_focus_pending: bool,
     /// The file panes are hidden and the terminal fills the tab.
@@ -1004,6 +1008,7 @@ impl ServerSession {
             browser: None,
             terminals: Vec::new(),
             active_terminal: 0,
+            tab_rename: None,
             is_terminal_focus_pending: false,
             is_sftp_hidden: false,
             shell_history: Vec::new(),
@@ -1084,6 +1089,7 @@ impl ServerSession {
             browser: None,
             terminals: Vec::new(),
             active_terminal: 0,
+            tab_rename: None,
             is_terminal_focus_pending: true,
             is_sftp_hidden: true,
             shell_history: Vec::new(),
@@ -1792,18 +1798,18 @@ impl ServerSession {
         // Fixed width, not max_w: same wrapped-text problem as the host-key
         // card below.
         let mut card = v_flex()
-            .px(px(12.))
-            .py(px(10.))
-            .w(px(380.))
+            .px(rems_from_px(12.))
+            .py(rems_from_px(10.))
+            .w(rems_from_px(380.))
             .bg(flint_theme::pop_surface())
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .border_1()
             .border_color(flint_theme::border_focused())
             .shadow_lg()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(rems_from_px(13.))
                     .font_semibold()
                     .text_color(theme.danger)
                     .child(format!(
@@ -1813,7 +1819,7 @@ impl ServerSession {
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.muted_foreground)
                     .child(message.clone()),
             );
@@ -1923,7 +1929,7 @@ impl ServerSession {
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(rems_from_px(11.))
                         .text_color(theme.muted_foreground)
                         .child(label.to_string()),
                 )
@@ -1934,7 +1940,7 @@ impl ServerSession {
                         .rounded_md()
                         .bg(theme.muted)
                         .font_family("Cascadia Code")
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(color)
                         .child(value),
                 )
@@ -1944,11 +1950,11 @@ impl ServerSession {
         // under-reports the card's height and the footer buttons render
         // outside the painted box (same convention as the app's dialogs).
         let mut card = v_flex()
-            .px(px(12.))
-            .py(px(10.))
-            .w(px(480.))
+            .px(rems_from_px(12.))
+            .py(rems_from_px(10.))
+            .w(rems_from_px(480.))
             .bg(flint_theme::pop_surface())
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .border_1()
             .border_color(if mismatch {
                 theme.danger
@@ -1956,23 +1962,28 @@ impl ServerSession {
                 flint_theme::border_focused()
             })
             .shadow_lg()
-            .gap(px(8.));
+            .gap(rems_from_px(8.));
 
         if mismatch {
             card = card
                 .child(
                     div()
                         .text_color(theme.danger)
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .font_semibold()
                         .child(format!("Host key for {host} changed")),
                 )
-                .child(div().text_size(px(12.)).text_color(theme.foreground).child(
-                    "The host presented a different key than the one you trusted \
+                .child(
+                    div()
+                        .text_size(rems_from_px(12.))
+                        .text_color(theme.foreground)
+                        .child(
+                            "The host presented a different key than the one you trusted \
                              before. It may have been reinstalled, or someone may be \
                              intercepting the connection. Do not trust the new key unless \
                              you know why it changed.",
-                ))
+                        ),
+                )
                 .child(fingerprint_row(
                     "Previously trusted",
                     prompt.stored_fingerprint.clone().unwrap_or_default(),
@@ -2010,14 +2021,14 @@ impl ServerSession {
             card = card
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .font_semibold()
                         .text_color(theme.foreground)
                         .child(format!("Verify host key for {host}")),
                 )
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(theme.muted_foreground)
                         .child(
                             "First connection to this host. Compare this fingerprint \
@@ -2083,25 +2094,25 @@ impl ServerSession {
         // Fixed width, not max_w: same wrapped-text problem as the host-key
         // card above.
         let mut card = v_flex()
-            .px(px(12.))
-            .py(px(10.))
-            .w(px(380.))
+            .px(rems_from_px(12.))
+            .py(rems_from_px(10.))
+            .w(rems_from_px(380.))
             .bg(flint_theme::pop_surface())
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .border_1()
             .border_color(flint_theme::border_focused())
             .shadow_lg()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(rems_from_px(13.))
                     .font_semibold()
                     .text_color(theme.foreground)
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.muted_foreground)
                     .child(subtitle),
             );
@@ -2112,7 +2123,7 @@ impl ServerSession {
         if hop.is_jump {
             card = card.child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(rems_from_px(11.))
                     .text_color(theme.warning)
                     .child(format!(
                         "Asked by jump host {} ({}@{}) on the way to {}.",
@@ -2130,7 +2141,7 @@ impl ServerSession {
             if !label.is_empty() {
                 row = row.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(rems_from_px(11.))
                         .text_color(theme.muted_foreground)
                         .child(label),
                 );
@@ -2177,7 +2188,7 @@ fn modal_overlay(color: gpui::Hsla) -> Div {
         .inset_0()
         // The working area is a rounded card; gpui does not clip to its
         // corners, so the overlay rounds its own top ones.
-        .rounded_t(px(crate::ui::PANEL_RADIUS - 1.))
+        .rounded_t(rems_from_px(crate::ui::PANEL_RADIUS - 1.))
         .bg(color)
         .flex()
         .items_center()
@@ -2211,6 +2222,8 @@ fn is_same_route(a: &ForwardSpec, b: &ForwardSpec) -> bool {
         && a.target_port == b.target_port
 }
 
+/// Matches the terminal's smallest split, so a wide server panel never hides it.
+const MIN_TERMINAL_WIDTH: f32 = 240.;
 const HISTORY_CAP: usize = 8;
 
 /// How long the OS probe and the history fetch may each take.
@@ -2239,11 +2252,18 @@ impl ServerSession {
             return None;
         }
         // Redrawn on its own ticks, not on every terminal frame.
-        let style = StyleRefinement::default()
-            .w(px(PANEL_WIDTH))
-            .flex_none()
-            .h_full();
-        Some(self.server_panel.clone().cached(style).into_any_element())
+        let style = StyleRefinement::default().size_full();
+        Some(
+            div()
+                .relative()
+                .flex_shrink(1.)
+                .min_w(rems_from_px(crate::preferences::MIN_SERVER_PANEL_WIDTH))
+                .h_full()
+                .w(rems_from_px(Preferences::server_panel_width(cx)))
+                .child(self.server_panel.clone().cached(style))
+                .child(resize_edge(ResizeEdge::ServerPanel))
+                .into_any_element(),
+        )
     }
 }
 
@@ -2264,10 +2284,10 @@ impl Render for ServerSession {
             (&self.browser, self.active_terminal())
         {
             let term_header = h_flex()
-                .h(px(38.))
+                .h(rems_from_px(38.))
                 .flex_none()
                 .min_w_0()
-                .px(px(8.))
+                .px(rems_from_px(8.))
                 .items_center()
                 .child(self.render_terminal_tabs(cx));
 
@@ -2292,6 +2312,7 @@ impl Render for ServerSession {
             // The initial sizes only set the ratio: the panels are scaled to
             // fill whatever room there is. With the file panes hidden the
             // terminal is the whole tab.
+            let ui_scale = crate::theme::ui_scale(cx);
             let panes = if self.is_sftp_hidden {
                 terminal_block.into_any_element()
             } else {
@@ -2301,13 +2322,13 @@ impl Render for ServerSession {
                         .child(
                             resizable_panel()
                                 .size(px(400.))
-                                .size_range(px(120.)..Pixels::MAX)
+                                .size_range(px(120.) * ui_scale..Pixels::MAX)
                                 .child(files_block),
                         )
                         .child(
                             resizable_panel()
                                 .size(px(400.))
-                                .size_range(px(120.)..Pixels::MAX)
+                                .size_range(px(120.) * ui_scale..Pixels::MAX)
                                 .child(terminal_block),
                         )
                         .into_any_element(),
@@ -2317,13 +2338,13 @@ impl Render for ServerSession {
                         .child(
                             resizable_panel()
                                 .size(px(600.))
-                                .size_range(px(240.)..Pixels::MAX)
+                                .size_range(px(240.) * ui_scale..Pixels::MAX)
                                 .child(terminal_block),
                         )
                         .child(
                             resizable_panel()
                                 .size(px(400.))
-                                .size_range(px(240.)..Pixels::MAX)
+                                .size_range(px(240.) * ui_scale..Pixels::MAX)
                                 .child(files_block),
                         )
                         .into_any_element(),
@@ -2337,10 +2358,22 @@ impl Render for ServerSession {
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
+                        .on_drag_move(cx.listener(|_, event: &DragMoveEvent<ResizeEdge>, _, cx| {
+                            if *event.drag(cx) != ResizeEdge::ServerPanel {
+                                return;
+                            }
+                            // The panel ends at the row's right edge.
+                            let width = (event.bounds.right() - event.event.position.x).min(
+                                event.bounds.size.width
+                                    - px(MIN_TERMINAL_WIDTH) * crate::theme::ui_scale(cx),
+                            );
+                            ResizeEdge::ServerPanel.set_width(f32::from(width), cx);
+                            cx.notify();
+                        }))
                         .child(
                             div()
                                 .flex_1()
-                                .min_w_0()
+                                .min_w(rems_from_px(MIN_TERMINAL_WIDTH))
                                 .h_full()
                                 .overflow_hidden()
                                 .child(panes),
@@ -2360,33 +2393,37 @@ impl Render for ServerSession {
                     .child(
                         modal_overlay(theme.overlay).child(
                             v_flex()
-                                .px(px(12.))
-                                .py(px(10.))
-                                .w(px(380.))
+                                .px(rems_from_px(12.))
+                                .py(rems_from_px(10.))
+                                .w(rems_from_px(380.))
                                 .bg(flint_theme::pop_surface())
-                                .rounded(px(6.))
+                                .rounded(rems_from_px(6.))
                                 .border_1()
                                 .border_color(flint_theme::border_focused())
                                 .shadow_lg()
-                                .gap(px(8.))
+                                .gap(rems_from_px(8.))
                                 .child(
                                     div()
                                         .text_color(theme.danger)
-                                        .text_size(px(13.))
+                                        .text_size(rems_from_px(13.))
                                         .font_semibold()
                                         .child(format!("Connection to {} lost", host)),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(rems_from_px(12.))
                                         .text_color(theme.muted_foreground)
                                         .child(reason),
                                 )
                                 .when(preserved_count > 0, |el| {
                                     el.child(
-                                        div().text_size(px(12.)).text_color(theme.warning).child(
-                                            preserved_files_note(preserved_count, &cache_path),
-                                        ),
+                                        div()
+                                            .text_size(rems_from_px(12.))
+                                            .text_color(theme.warning)
+                                            .child(preserved_files_note(
+                                                preserved_count,
+                                                &cache_path,
+                                            )),
                                     )
                                 })
                                 .child(
@@ -2426,31 +2463,31 @@ impl Render for ServerSession {
                     .child(
                         modal_overlay(theme.overlay).child(
                             v_flex()
-                                .px(px(12.))
-                                .py(px(10.))
-                                .w(px(380.))
+                                .px(rems_from_px(12.))
+                                .py(rems_from_px(10.))
+                                .w(rems_from_px(380.))
                                 .bg(flint_theme::pop_surface())
-                                .rounded(px(6.))
+                                .rounded(rems_from_px(6.))
                                 .border_1()
                                 .border_color(flint_theme::border_focused())
                                 .shadow_lg()
-                                .gap(px(8.))
+                                .gap(rems_from_px(8.))
                                 .child(
                                     h_flex()
-                                        .gap(px(8.))
+                                        .gap(rems_from_px(8.))
                                         .items_center()
                                         .child(Spinner::new())
                                         .child(
                                             div()
                                                 .text_color(theme.foreground)
-                                                .text_size(px(13.))
+                                                .text_size(rems_from_px(13.))
                                                 .font_semibold()
                                                 .child(format!("Reconnecting to {host}…")),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(rems_from_px(12.))
                                         .text_color(theme.muted_foreground)
                                         .child(format!(
                                             "Attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}"
@@ -2467,13 +2504,13 @@ impl Render for ServerSession {
         } else {
             v_flex()
                 .size_full()
-                .gap(px(8.))
+                .gap(rems_from_px(8.))
                 .items_center()
                 .justify_center()
                 .child(Spinner::new().large())
                 .child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(theme.muted_foreground)
                         .child(match self.reconnecting {
                             Some(n) => {

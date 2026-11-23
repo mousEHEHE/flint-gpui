@@ -1,15 +1,17 @@
 use gpui::prelude::*;
-use gpui::{px, AnyElement, App, Context, Entity, FocusHandle, Focusable, Window};
+use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     ActiveTheme as _, Disableable as _, Icon,
 };
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
-use crate::preferences::Preferences;
-use crate::touch_id::{self, TouchIdError};
+use crate::preferences::{Preferences, RememberUnlock};
+use crate::touch_id::{self, TouchIdError, METHOD_NAME};
+use crate::ui::rems_from_px;
 use crate::ui::{lock_screen, VaultState};
 
 const RECOVERY_WORD_COUNT: usize = 24;
@@ -71,6 +73,7 @@ enum Step {
     PasswordForm,
     PasswordWorking,
     TouchIdWorking,
+    RememberedWorking,
     RecoveryForm,
     RecoveryWorking,
     DeleteForm,
@@ -88,6 +91,10 @@ pub struct UnlockView {
     error: Option<String>,
     /// Asked of the system each time the screen shows, not on every frame.
     is_touch_id_available: bool,
+    /// The "next time" box under the password, shown while the setting is off.
+    is_touch_id_wanted: bool,
+    /// Flint started before Windows Hello said whether it is there.
+    is_touch_id_offer_waiting: bool,
 }
 
 impl Focusable for UnlockView {
@@ -157,6 +164,18 @@ impl UnlockView {
 
         cx.subscribe(&delete_word, Self::on_delete_input).detach();
 
+        let availability = touch_id::availability();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(is_available) = availability.recv().await else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.on_touch_id_availability(is_available, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             vault_state,
@@ -168,6 +187,9 @@ impl UnlockView {
             delete_word,
             error: None,
             is_touch_id_available: touch_id::is_available(),
+            // Off by default so an opt-out in Settings is never undone.
+            is_touch_id_wanted: false,
+            is_touch_id_offer_waiting: false,
         }
     }
 
@@ -183,10 +205,63 @@ impl UnlockView {
         self.is_touch_id_available && Preferences::is_touch_id_enabled(cx)
     }
 
-    /// At the start of flint, ask for the finger right away.
-    pub fn offer_touch_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn can_offer_touch_id(&self, cx: &App) -> bool {
+        self.is_touch_id_available && !Preferences::is_touch_id_enabled(cx)
+    }
+
+    /// At the start of flint: a remembered unlock first, then the finger.
+    pub fn unlock_on_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if Preferences::remember_unlock(cx) == RememberUnlock::Never {
+            touch_id::forget_remembered();
+            self.offer_touch_id(window, cx);
+            return;
+        }
+        self.step = Step::RememberedWorking;
+        cx.notify();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.try_send(touch_id::open_remembered_vault());
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(manager) = rx.recv().await else { return };
+            this.update_in(cx, |this, window, cx| {
+                this.step = Step::PasswordForm;
+                cx.notify();
+                let Some(manager) = manager else {
+                    this.offer_touch_id(window, cx);
+                    return;
+                };
+                tracing::info!("vault unlocked with the remembered key");
+                this.vault_state.update(cx, |vs, cx| {
+                    *vs = VaultState::Unlocked { manager };
+                    cx.notify();
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn offer_touch_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_use_touch_id(cx) {
             self.unlock_with_touch_id(window, cx);
+        } else {
+            self.is_touch_id_offer_waiting = true;
+        }
+    }
+
+    fn on_touch_id_availability(
+        &mut self,
+        is_available: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_touch_id_available = is_available;
+        cx.notify();
+        if std::mem::take(&mut self.is_touch_id_offer_waiting)
+            && matches!(self.step, Step::PasswordForm)
+        {
+            self.offer_touch_id(window, cx);
         }
     }
 
@@ -196,6 +271,10 @@ impl UnlockView {
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::PasswordForm;
         self.error = None;
+        self.is_touch_id_offer_waiting = false;
+        // A tick from an earlier unlock would turn the feature back on after the
+        // user turned it off in Settings.
+        self.is_touch_id_wanted = false;
         self.phrase_input
             .update(cx, |state, cx| state.set_value("", window, cx));
         for input in [
@@ -221,6 +300,7 @@ impl UnlockView {
         self.step = Step::PasswordWorking;
         self.error = None;
         cx.notify();
+        let is_enabling_touch_id = self.can_offer_touch_id(cx) && self.is_touch_id_wanted;
 
         let (tx, rx) = async_channel::bounded::<
             Result<crate::vault::VaultManager, crate::vault::VaultError>,
@@ -244,6 +324,10 @@ impl UnlockView {
                         cx.notify();
                     });
                     touch_id::save_key_again(&this.vault_state, cx);
+                    touch_id::remember_unlock(&this.vault_state, cx);
+                    if is_enabling_touch_id {
+                        touch_id::enable(&this.vault_state, cx).detach_and_log_err(cx);
+                    }
                 }
                 Err(crate::vault::VaultError::InvalidPassword) => {
                     this.step = Step::PasswordForm;
@@ -269,9 +353,10 @@ impl UnlockView {
         self.error = None;
         cx.notify();
 
+        let parent = touch_id::parent_window(window);
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.try_send(touch_id::open_vault());
+            let _ = tx.try_send(touch_id::open_vault(parent));
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -279,27 +364,27 @@ impl UnlockView {
             this.update_in(cx, |this, window, cx| {
                 let error = match result {
                     Ok(manager) => {
-                        tracing::info!("vault unlocked with Touch ID");
+                        tracing::info!("vault unlocked with {METHOD_NAME}");
                         this.vault_state.update(cx, |vs, cx| {
                             *vs = VaultState::Unlocked { manager };
                             cx.notify();
                         });
+                        touch_id::remember_unlock(&this.vault_state, cx);
                         return;
                     }
                     Err(TouchIdError::Cancelled) => None,
                     // The next unlock with the password saves it again.
                     Err(TouchIdError::Stale) => {
-                        tracing::warn!("the Touch ID key no longer opens the vault");
+                        tracing::warn!("the {METHOD_NAME} key no longer opens the vault");
                         touch_id::delete_key();
-                        Some(
-                            "Touch ID no longer opens the vault. Unlock with the password to \
-                             set it up again."
-                                .to_string(),
-                        )
+                        Some(format!(
+                            "{METHOD_NAME} no longer opens the vault. Unlock with the password \
+                             to set it up again."
+                        ))
                     }
                     Err(e) => {
-                        tracing::error!(?e, "Touch ID unlock failed");
-                        Some(format!("Touch ID failed: {e}"))
+                        tracing::error!(?e, "{METHOD_NAME} unlock failed");
+                        Some(format!("{METHOD_NAME} failed: {e}"))
                     }
                 };
                 this.step = Step::PasswordForm;
@@ -389,6 +474,7 @@ impl UnlockView {
             let Ok(result) = rx.recv().await else { return };
             this.update(cx, |this, cx| match result {
                 Ok((manager, new_phrase)) => {
+                    touch_id::forget_remembered();
                     this.vault_state.update(cx, |vs, cx| {
                         *vs = VaultState::AwaitingPhraseConfirmation {
                             manager,
@@ -450,6 +536,17 @@ impl UnlockView {
         lock_screen::column()
             .child(lock_screen::header("Unlock vault", None, cx))
             .child(Input::new(&self.password).mask_toggle())
+            .when(self.can_offer_touch_id(cx), |el| {
+                el.child(
+                    Checkbox::new("unlock-enable-touch-id")
+                        .checked(self.is_touch_id_wanted)
+                        .label(format!("Use {METHOD_NAME} next time"))
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.is_touch_id_wanted = *checked;
+                            cx.notify();
+                        })),
+                )
+            })
             .children(self.error.as_deref().map(|e| lock_screen::error(e, cx)))
             .child(
                 Button::new("unlock-vault")
@@ -461,7 +558,7 @@ impl UnlockView {
                 el.child(
                     Button::new("unlock-touch-id")
                         .icon(Icon::empty().path("icons/fingerprint-pattern.svg"))
-                        .child("Unlock with Touch ID")
+                        .child(format!("Unlock with {METHOD_NAME}"))
                         .on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.unlock_with_touch_id(window, cx)
@@ -504,7 +601,7 @@ impl UnlockView {
                 Some("Enter your 24-word recovery phrase and choose a new password."),
                 cx,
             ))
-            .child(Textarea::new(&self.phrase_input).h(px(72.)))
+            .child(Textarea::new(&self.phrase_input).h(rems_from_px(72.)))
             .child(lock_screen::note(
                 format!("{word_count} / {RECOVERY_WORD_COUNT} words"),
                 word_count_color,
@@ -601,7 +698,10 @@ impl Render for UnlockView {
         let content = match self.step {
             Step::PasswordForm => self.render_password_form(cx),
             Step::PasswordWorking => lock_screen::working("Unlocking\u{2026}", cx),
-            Step::TouchIdWorking => lock_screen::working("Waiting for Touch ID\u{2026}", cx),
+            Step::TouchIdWorking => {
+                lock_screen::working(format!("Waiting for {METHOD_NAME}\u{2026}"), cx)
+            }
+            Step::RememberedWorking => lock_screen::working("Unlocking\u{2026}", cx),
             Step::RecoveryForm => self.render_recovery_form(cx),
             Step::RecoveryWorking => lock_screen::working("Recovering\u{2026}", cx),
             Step::DeleteForm => self.render_delete_form(cx),

@@ -33,6 +33,7 @@ use crate::ui::file_pane::{
     SourcePillClick, StagedFile, SyncIndicator,
 };
 use crate::ui::file_pane_keys::{pane_command, PaneCommand, SwitchPane, KEY_CONTEXT};
+use crate::ui::rems_from_px;
 use crate::ui::transfer_conflict::{
     free_name, ConflictChoice, Endpoint, FileFacts, TransferConflict,
 };
@@ -2946,9 +2947,9 @@ impl SftpBrowser {
             cx.emit(BrowserEvent::LeftSourcePickerRequested);
         }));
         let header = h_flex()
-            .h(px(38.))
+            .h(rems_from_px(38.))
             .flex_none()
-            .px(px(6.))
+            .px(rems_from_px(6.))
             .items_center()
             .child(source_pill(
                 source_icon(PaneKind::Peer),
@@ -2966,7 +2967,7 @@ impl SftpBrowser {
 
         let body = v_flex()
             .flex_1()
-            .px(px(16.))
+            .px(rems_from_px(16.))
             .gap_2()
             .items_center()
             .justify_center();
@@ -2995,7 +2996,7 @@ impl SftpBrowser {
                     body.child(
                         div()
                             .w_full()
-                            .max_w(px(260.))
+                            .max_w(rems_from_px(260.))
                             .child(Input::new(input).small()),
                     )
                 })

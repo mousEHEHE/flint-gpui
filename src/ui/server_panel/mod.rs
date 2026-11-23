@@ -12,18 +12,25 @@ use futures::channel::mpsc;
 use futures::StreamExt as _;
 use gpui::prelude::*;
 use gpui::{
-    div, px, BackgroundExecutor, ClipboardItem, Context, Div, Entity, EventEmitter, Task,
-    WeakEntity, Window,
+    div, BackgroundExecutor, ClipboardItem, Context, Div, Entity, EventEmitter, Task, WeakEntity,
+    Window,
 };
-use gpui_component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, StyledExt as _};
+use gpui_component::{
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    tooltip::Tooltip,
+    v_flex, ActiveTheme as _, Icon, Sizable as _, StyledExt as _,
+};
 
+use crate::preferences::{PanelSection, Preferences};
 use crate::server_stats::{self, Sample, SystemInfo};
 use crate::ssh::SshConnection;
 use crate::theme;
+use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
+use crate::ui::rems_from_px;
 use crate::ui::server_session::{run_command, ServerSession};
 use crate::ui::VaultState;
 
-pub const PANEL_WIDTH: f32 = 320.;
 const TICK: Duration = Duration::from_secs(2);
 /// The first two readings come this fast, so the numbers and the graphs show
 /// within a second of opening: each reading needs the sample before it.
@@ -63,6 +70,10 @@ pub struct ServerPanel {
     last_sample: Option<Sample>,
     history: VecDeque<Reading>,
     snippet_editor: Option<snippets::SnippetEditor>,
+    is_sections_menu_open: bool,
+    /// When the sections menu last closed itself, so the click on its button
+    /// that closed it does not open it again.
+    sections_menu_dismissed_at: Option<Instant>,
     /// Polling stops when the panel is off screen: hidden, or its tab is not
     /// in front. Every poll ends in a redraw, which keeps this fresh. `None`
     /// until the first render.
@@ -93,6 +104,9 @@ impl ServerPanel {
     ) -> Self {
         // The snippets and the connection rows show what the vault holds.
         cx.observe(&vault_state, |_, _, cx| cx.notify()).detach();
+        // Sections shown or hidden in Settings.
+        cx.observe_global::<Preferences>(|_, cx| cx.notify())
+            .detach();
         let (wake, mut woken) = mpsc::unbounded();
         let poll_task = cx.spawn(async move |this, cx| {
             let mut delay = Duration::ZERO;
@@ -131,6 +145,8 @@ impl ServerPanel {
             last_sample: None,
             history: VecDeque::with_capacity(HISTORY_LEN),
             snippet_editor: None,
+            is_sections_menu_open: false,
+            sections_menu_dismissed_at: None,
             last_rendered: None,
             wake,
             _poll_task: poll_task,
@@ -155,7 +171,7 @@ impl ServerPanel {
             return NextStep::Wait(CONNECT_RETRY);
         };
         let needs_info = self.info.is_none();
-        let needs_sample = !self.is_unsupported;
+        let needs_sample = !self.is_unsupported && is_any_metric_shown(cx);
         if !needs_info && !needs_sample {
             return NextStep::Wait(TICK);
         }
@@ -241,19 +257,83 @@ impl ServerPanel {
         cx.notify();
     }
 
+    /// The Snippets tab can be hidden; the panel then shows Overview only.
+    fn visible_tab(&self, cx: &gpui::App) -> Tab {
+        if Preferences::is_panel_section_shown(PanelSection::Snippets, cx) {
+            self.tab
+        } else {
+            Tab::Overview
+        }
+    }
+
+    fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
+        let is_snippets_shown = Preferences::is_panel_section_shown(PanelSection::Snippets, cx);
+        h_flex()
+            .gap(rems_from_px(6.))
+            .justify_end()
+            .when(is_snippets_shown, |el| el.child(self.render_tabs(cx)))
+            .child(self.render_sections_menu(cx))
+    }
+
+    /// Picks which blocks the panel shows. Stays open while toggling.
+    fn render_sections_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let trigger = Button::new("server-panel-sections")
+            .ghost()
+            .small()
+            .icon(Icon::empty().path("icons/sliders-horizontal.svg"))
+            .tooltip("Choose what the panel shows")
+            .on_click(cx.listener(|this, _, _, cx| {
+                // The menu closes on mouse-down, before this click arrives.
+                let is_toggled_off = this
+                    .sections_menu_dismissed_at
+                    .take()
+                    .is_some_and(|at| at.elapsed() < Duration::from_millis(200));
+                this.is_sections_menu_open = !this.is_sections_menu_open && !is_toggled_off;
+                cx.notify();
+            }));
+        let items = PanelSection::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(ix, section)| {
+                let is_shown = Preferences::is_panel_section_shown(section, cx);
+                let item = ContextMenuItem::new(
+                    ("server-panel-section", ix),
+                    section.label(),
+                    move |_, _, cx| Preferences::set_panel_section_shown(section, !is_shown, cx),
+                );
+                if is_shown {
+                    item.icon("icons/check.svg")
+                } else {
+                    item
+                }
+            });
+        PopoverMenu::new(
+            "server-panel-sections-menu",
+            self.is_sections_menu_open,
+            trigger,
+        )
+        .items(items)
+        .on_dismiss(cx.listener(|this, _, _, cx| {
+            this.is_sections_menu_open = false;
+            this.sections_menu_dismissed_at = Some(Instant::now());
+            cx.notify();
+        }))
+    }
+
     fn render_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
         let hover_color = cx.theme().muted_foreground;
+        let visible_tab = self.visible_tab(cx);
         let option = |id: &'static str, tab: Tab, label: &'static str| {
-            let is_active = self.tab == tab;
+            let is_active = visible_tab == tab;
             div()
                 .id(id)
                 .flex_1()
-                .h(px(24.))
+                .h(rems_from_px(24.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.))
-                .text_size(px(11.5))
+                .rounded(rems_from_px(5.))
+                .text_size(rems_from_px(11.5))
                 .cursor_pointer()
                 .text_color(if is_active {
                     cx.theme().foreground
@@ -266,9 +346,10 @@ impl ServerPanel {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
         };
         h_flex()
-            .p(px(2.))
-            .gap(px(2.))
-            .rounded(px(7.))
+            .flex_1()
+            .p(rems_from_px(2.))
+            .gap(rems_from_px(2.))
+            .rounded(rems_from_px(7.))
             .bg(theme::field())
             .child(option("server-panel-overview", Tab::Overview, "Overview"))
             .child(option("server-panel-snippets", Tab::Snippets, "Snippets"))
@@ -287,12 +368,12 @@ impl Render for ServerPanel {
             self.come_back_on_screen();
         }
         self.last_rendered = Some(Instant::now());
-        let content = match self.tab {
+        let content = match self.visible_tab(cx) {
             Tab::Overview => self.render_overview(cx),
             Tab::Snippets => self.render_snippets(cx),
         };
         v_flex()
-            .w(px(PANEL_WIDTH))
+            .w_full()
             .flex_none()
             .h_full()
             .border_l_1()
@@ -300,10 +381,10 @@ impl Render for ServerPanel {
             .child(
                 div()
                     .flex_none()
-                    .px(px(12.))
-                    .pt(px(10.))
-                    .pb(px(6.))
-                    .child(self.render_tabs(cx)),
+                    .px(rems_from_px(12.))
+                    .pt(rems_from_px(10.))
+                    .pb(rems_from_px(6.))
+                    .child(self.render_header(cx)),
             )
             .child(
                 v_flex()
@@ -311,10 +392,10 @@ impl Render for ServerPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(12.))
-                    .pt(px(6.))
-                    .pb(px(12.))
-                    .gap(px(10.))
+                    .px(rems_from_px(12.))
+                    .pt(rems_from_px(6.))
+                    .pb(rems_from_px(12.))
+                    .gap(rems_from_px(10.))
                     .children(content),
             )
     }
@@ -356,8 +437,8 @@ async fn read_host(poll: &Poll, executor: &BackgroundExecutor) -> (Option<String
 
 fn section_title(text: &'static str) -> Div {
     div()
-        .pt(px(6.))
-        .text_size(px(11.5))
+        .pt(rems_from_px(6.))
+        .text_size(rems_from_px(11.5))
         .font_medium()
         .text_color(theme::text_dim())
         .child(text)
@@ -365,8 +446,8 @@ fn section_title(text: &'static str) -> Div {
 
 fn note(text: &'static str) -> Div {
     div()
-        .py(px(8.))
-        .text_size(px(12.))
+        .py(rems_from_px(8.))
+        .text_size(rems_from_px(12.))
         .text_color(theme::text_dim())
         .child(text)
 }
@@ -381,18 +462,18 @@ fn info_row(
     let copied = value.clone();
     h_flex()
         .id(("server-info", ix))
-        .gap(px(12.))
-        .px(px(6.))
-        .mx(px(-6.))
-        .py(px(3.))
-        .rounded(px(5.))
+        .gap(rems_from_px(12.))
+        .px(rems_from_px(6.))
+        .mx(rems_from_px(-6.))
+        .py(rems_from_px(3.))
+        .rounded(rems_from_px(5.))
         .cursor_pointer()
         .hover(|s| s.bg(theme::field()))
         .active(|s| s.bg(theme::element_active()))
         .child(
             div()
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(rems_from_px(11.5))
                 .text_color(cx.theme().muted_foreground)
                 .child(key),
         )
@@ -402,7 +483,7 @@ fn info_row(
                 .min_w_0()
                 .truncate()
                 .text_right()
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(cx.theme().foreground)
                 .child(value),
         )
@@ -431,6 +512,19 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+/// The live readings feed only these sections; with all of them hidden the
+/// server is not asked every two seconds.
+fn is_any_metric_shown(cx: &gpui::App) -> bool {
+    [
+        PanelSection::Cpu,
+        PanelSection::Memory,
+        PanelSection::Network,
+        PanelSection::Disks,
+    ]
+    .into_iter()
+    .any(|section| Preferences::is_panel_section_shown(section, cx))
 }
 
 #[cfg(test)]

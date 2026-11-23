@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, ClipboardItem, Context, Div, Entity, SharedString, Window};
+use gpui::{div, AnyElement, App, ClipboardItem, Context, Div, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -15,6 +15,7 @@ use secrecy::SecretString;
 use uuid::Uuid;
 
 use crate::account::team::Roster;
+use crate::ui::rems_from_px;
 use crate::ui::sync_service::{SyncService, TeamAction};
 use crate::ui::VaultState;
 
@@ -126,14 +127,14 @@ fn trash_icon() -> Icon {
 
 fn caption_text(cx: &App, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(11.5))
+        .text_size(rems_from_px(11.5))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
 
 fn line_text(cx: &App, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(rems_from_px(12.5))
         .text_color(cx.theme().foreground)
         .child(text.into())
 }
@@ -141,10 +142,10 @@ fn line_text(cx: &App, text: impl Into<SharedString>) -> Div {
 fn checkbox(is_ticked: bool, cx: &App) -> Div {
     let accent = cx.theme().primary;
     div()
-        .w(px(13.))
-        .h(px(13.))
+        .w(rems_from_px(13.))
+        .h(rems_from_px(13.))
         .flex_none()
-        .rounded(px(3.))
+        .rounded(rems_from_px(3.))
         .border_1()
         .border_color(if is_ticked {
             accent
@@ -160,7 +161,7 @@ fn checkbox(is_ticked: bool, cx: &App) -> Div {
         .items_center()
         .justify_center()
         .when(is_ticked, |el| {
-            el.child(Icon::new(IconName::Check).size(px(9.)))
+            el.child(Icon::new(IconName::Check).size(rems_from_px(9.)))
         })
 }
 
@@ -552,7 +553,10 @@ impl TeamsPane {
         let shared: Vec<&HostRow> = vault.hosts.iter().filter(|row| row.is_shared).collect();
         let is_choosing = self.open == Some(Open::Hosts(vault_id));
 
-        let mut row = h_flex().h(px(24.)).gap(px(8.)).items_center();
+        let mut row = h_flex()
+            .h(rems_from_px(24.))
+            .gap(rems_from_px(8.))
+            .items_center();
         row = if team.is_plain {
             row.child(line_text(cx, shared_summary(&shared)).min_w_0().truncate())
         } else {
@@ -675,17 +679,17 @@ impl TeamsPane {
 
         let mut list = v_flex()
             .id(SharedString::from(format!("hosts-{vault_id}")))
-            .max_h(px(220.))
+            .max_h(rems_from_px(220.))
             .overflow_y_scroll()
-            .rounded(px(4.))
+            .rounded(rems_from_px(4.))
             .border_1()
             .border_color(border)
-            .py(px(2.));
+            .py(rems_from_px(2.));
         if rows.is_empty() {
             list = list.child(
                 div()
-                    .px(px(8.))
-                    .py(px(6.))
+                    .px(rems_from_px(8.))
+                    .py(rems_from_px(6.))
                     .child(caption_text(cx, "No hosts match.")),
             );
         }
@@ -695,9 +699,9 @@ impl TeamsPane {
             list = list.child(
                 h_flex()
                     .id(SharedString::from(format!("host-{vault_id}-{host_id}")))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .gap(px(8.))
+                    .h(rems_from_px(24.))
+                    .px(rems_from_px(8.))
+                    .gap(rems_from_px(8.))
                     .items_center()
                     .cursor_pointer()
                     .hover(|style| style.bg(list_hover))
@@ -708,9 +712,9 @@ impl TeamsPane {
                     .child(
                         div()
                             .flex_none()
-                            .max_w(px(220.))
+                            .max_w(rems_from_px(220.))
                             .truncate()
-                            .text_size(px(12.5))
+                            .text_size(rems_from_px(12.5))
                             .text_color(fg)
                             .child(row.label.clone()),
                     )
@@ -719,15 +723,15 @@ impl TeamsPane {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(rems_from_px(11.5))
                             .text_color(muted_fg)
                             .child(row.address.clone()),
                     ),
             );
         }
         v_flex()
-            .w(px(460.))
-            .gap(px(6.))
+            .w(rems_from_px(460.))
+            .gap(rems_from_px(6.))
             .child(Input::new(&self.host_filter).small())
             .child(list)
             .child(caption_text(
@@ -743,19 +747,19 @@ impl TeamsPane {
         let theme = cx.theme();
         let (border, list_hover) = (theme.title_bar_border, theme.list_hover);
         let mut list = v_flex()
-            .rounded(px(4.))
+            .rounded(rems_from_px(4.))
             .border_1()
             .border_color(border)
-            .py(px(2.));
+            .py(rems_from_px(2.));
         for (user_id, login, role) in &team.members {
             let user_id = *user_id;
             let is_always = role != "member";
             let is_ticked = is_always || self.access_draft.contains(&user_id);
             let mut row = h_flex()
                 .id(SharedString::from(format!("access-{}-{user_id}", team.id)))
-                .h(px(24.))
-                .px(px(8.))
-                .gap(px(8.))
+                .h(rems_from_px(24.))
+                .px(rems_from_px(8.))
+                .gap(rems_from_px(8.))
                 .items_center()
                 .child(checkbox(is_ticked, cx).when(is_always, |el| el.opacity(0.5)))
                 .child(line_text(cx, login.clone()));
@@ -777,8 +781,8 @@ impl TeamsPane {
 
         let save_id = SharedString::from(format!("access-save-{}", team.id));
         v_flex()
-            .w(px(340.))
-            .gap(px(6.))
+            .w(rems_from_px(340.))
+            .gap(rems_from_px(6.))
             .child(list)
             .child(caption_text(
                 cx,
@@ -787,7 +791,7 @@ impl TeamsPane {
             ))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .child(
                         Button::new(save_id)
                             .small()
@@ -811,8 +815,8 @@ impl TeamsPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .w(px(340.))
-            .gap(px(8.))
+            .w(rems_from_px(340.))
+            .gap(rems_from_px(8.))
             .child(Input::new(&self.vault_name).small())
             .child(
                 Button::new(save_id)
@@ -837,18 +841,23 @@ impl TeamsPane {
             .filter(|_| self.failed_delete == Some(vault_id));
         let danger = cx.theme().danger;
         v_flex()
-            .w(px(340.))
-            .gap(px(6.))
+            .w(rems_from_px(340.))
+            .gap(rems_from_px(6.))
             .child(caption_text(
                 cx,
                 "Deleting the vault removes it for everyone. Its hosts stay with everyone who \
                  could see them, as personal copies. Enter your master password to confirm.",
             ))
             .child(Input::new(&self.confirm_password).small().mask_toggle())
-            .children(error.map(|text| div().text_size(px(12.)).text_color(danger).child(text)))
+            .children(error.map(|text| {
+                div()
+                    .text_size(rems_from_px(12.))
+                    .text_color(danger)
+                    .child(text)
+            }))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .child(
                         Button::new(delete_id.clone())
                             .small()
@@ -934,24 +943,33 @@ impl Render for TeamsPane {
 
         let heading = move |text: String| {
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
         };
-        let caption =
-            move |text: String| div().text_size(px(11.5)).text_color(muted_fg).child(text);
-        let note = move |text: String| caption(text).max_w(px(520.));
-        let line = move |text: String| div().text_size(px(12.5)).text_color(fg).child(text);
+        let caption = move |text: String| {
+            div()
+                .text_size(rems_from_px(11.5))
+                .text_color(muted_fg)
+                .child(text)
+        };
+        let note = move |text: String| caption(text).max_w(rems_from_px(520.));
+        let line = move |text: String| {
+            div()
+                .text_size(rems_from_px(12.5))
+                .text_color(fg)
+                .child(text)
+        };
 
         let pane = v_flex()
             .id("teams-scroll")
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.));
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.));
 
         let Some(teams) = self.teams(cx) else {
             // The page title above already says "Teams".
@@ -995,22 +1013,26 @@ impl Render for TeamsPane {
             (None, _, Some(at)) => caption(format!("Synced {}.", ago(at))),
             (None, _, None) => caption("Not synced yet.".into()),
         };
-        let refresh_row = h_flex().gap(px(10.)).items_center().child(status).child(
-            Button::new("teams-refresh")
-                .ghost()
-                .xsmall()
-                .icon(Icon::empty().path("icons/rotate-cw.svg"))
-                .loading_icon(Icon::empty().path("icons/rotate-cw.svg"))
-                .loading(is_refreshing)
-                .disabled(is_refreshing || is_busy)
-                .child("Refresh")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.service
-                        .update(cx, |service, cx| service.refresh_all(cx));
-                    this.is_refreshing = this.service.read(cx).is_syncing;
-                    cx.notify();
-                })),
-        );
+        let refresh_row = h_flex()
+            .gap(rems_from_px(10.))
+            .items_center()
+            .child(status)
+            .child(
+                Button::new("teams-refresh")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path("icons/rotate-cw.svg"))
+                    .loading_icon(Icon::empty().path("icons/rotate-cw.svg"))
+                    .loading(is_refreshing)
+                    .disabled(is_refreshing || is_busy)
+                    .child("Refresh")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.service
+                            .update(cx, |service, cx| service.refresh_all(cx));
+                        this.is_refreshing = this.service.read(cx).is_syncing;
+                        cx.notify();
+                    })),
+            );
 
         let mut pane = pane
             .child(refresh_row)
@@ -1024,8 +1046,18 @@ impl Render for TeamsPane {
                  teams; members never pay."
                     .into(),
             ))
-            .children(error.map(|text| div().text_size(px(12.)).text_color(danger).child(text)))
-            .children(notice.map(|text| div().text_size(px(12.)).text_color(success).child(text)));
+            .children(error.map(|text| {
+                div()
+                    .text_size(rems_from_px(12.))
+                    .text_color(danger)
+                    .child(text)
+            }))
+            .children(notice.map(|text| {
+                div()
+                    .text_size(rems_from_px(12.))
+                    .text_color(success)
+                    .child(text)
+            }));
         if waiting > 0 {
             pane = pane.child(caption(
                 "You asked to join a team. You are in once the person who sent the link opens \
@@ -1042,9 +1074,9 @@ impl Render for TeamsPane {
                 (false, true) => "admin",
                 (false, false) => "member",
             };
-            let mut card = v_flex().gap(px(6.)).mt(px(6.)).child(
+            let mut card = v_flex().gap(rems_from_px(6.)).mt(rems_from_px(6.)).child(
                 h_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .items_center()
                     .child(heading(team.name.clone()))
                     .child(caption(role.into())),
@@ -1054,10 +1086,14 @@ impl Render for TeamsPane {
                 let is_me = user_id == team.me;
                 let is_owner_row = member_role == "owner";
                 let mut row = h_flex()
-                    .h(px(24.))
-                    .gap(px(8.))
+                    .h(rems_from_px(24.))
+                    .gap(rems_from_px(8.))
                     .items_center()
-                    .child(Icon::new(IconName::User).size(px(12.)).text_color(muted_fg))
+                    .child(
+                        Icon::new(IconName::User)
+                            .size(rems_from_px(12.))
+                            .text_color(muted_fg),
+                    )
                     .child(line(login))
                     .child(caption(member_role.clone()));
                 if is_me {
@@ -1171,9 +1207,13 @@ impl Render for TeamsPane {
                 let id = SharedString::from(format!("accept-{team_id}-{}", request.user_id));
                 card = card.child(
                     h_flex()
-                        .gap(px(8.))
+                        .gap(rems_from_px(8.))
                         .items_center()
-                        .child(Icon::new(IconName::User).size(px(12.)).text_color(accent))
+                        .child(
+                            Icon::new(IconName::User)
+                                .size(rems_from_px(12.))
+                                .text_color(accent),
+                        )
                         .child(line(format!("@{login} asks to join")))
                         .child(
                             Button::new(id.clone())
@@ -1199,15 +1239,15 @@ impl Render for TeamsPane {
                 let id = SharedString::from(format!("revoke-{invite_id}"));
                 card = card.child(
                     h_flex()
-                        .h(px(24.))
-                        .gap(px(8.))
+                        .h(rems_from_px(24.))
+                        .gap(rems_from_px(8.))
                         .items_center()
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(rems_from_px(12.))
                                 .text_color(muted_fg)
                                 .font_family(mono)
                                 .child(link.clone()),
@@ -1261,13 +1301,13 @@ impl Render for TeamsPane {
                 };
                 card = card.child(
                     v_flex()
-                        .w(px(340.))
-                        .gap(px(6.))
+                        .w(rems_from_px(340.))
+                        .gap(rems_from_px(6.))
                         .child(caption(warning.into()))
                         .child(Input::new(&self.confirm_password).small().mask_toggle())
                         .child(
                             h_flex()
-                                .gap(px(8.))
+                                .gap(rems_from_px(8.))
                                 .child(
                                     Button::new(leave_id.clone())
                                         .small()
@@ -1293,7 +1333,7 @@ impl Render for TeamsPane {
                         ),
                 );
             } else {
-                let mut actions = h_flex().gap(px(8.));
+                let mut actions = h_flex().gap(rems_from_px(8.));
                 if team.is_manager {
                     let id = SharedString::from(format!("invite-{team_id}"));
                     actions = actions.child(
@@ -1343,7 +1383,10 @@ impl Render for TeamsPane {
 
         let create_id = SharedString::from("team-create");
         let join_id = SharedString::from("team-join");
-        let mut forms = v_flex().gap(px(8.)).mt(px(6.)).w(px(340.));
+        let mut forms = v_flex()
+            .gap(rems_from_px(8.))
+            .mt(rems_from_px(6.))
+            .w(rems_from_px(340.));
         if needs_first_password {
             forms = forms
                 .child(caption(
@@ -1357,7 +1400,7 @@ impl Render for TeamsPane {
             forms
                 .child(
                     h_flex()
-                        .gap(px(8.))
+                        .gap(rems_from_px(8.))
                         .child(Input::new(&self.team_name).small())
                         .child(
                             Button::new(create_id.clone())
@@ -1374,7 +1417,7 @@ impl Render for TeamsPane {
                 )
                 .child(
                     h_flex()
-                        .gap(px(8.))
+                        .gap(rems_from_px(8.))
                         .child(Input::new(&self.invite_link).small())
                         .child(
                             Button::new(join_id.clone())

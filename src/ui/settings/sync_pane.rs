@@ -2,7 +2,7 @@
 //! is in step with the account, sign out.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, SharedString, Window};
+use gpui::{div, Context, Entity, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::account::api::DeviceSession;
 use crate::account::{self, AccountError, Api};
 use crate::preferences::Preferences;
+use crate::ui::rems_from_px;
 use crate::ui::sync_service::{SignIn, SyncService};
 use crate::ui::VaultState;
 use crate::vault::VaultError;
@@ -242,9 +243,9 @@ impl SyncPane {
     fn render_devices(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (fg, muted_fg, danger) = (theme.foreground, theme.muted_foreground, theme.danger);
-        let mut section = v_flex().gap(px(6.)).mt(px(6.)).child(
+        let mut section = v_flex().gap(rems_from_px(6.)).mt(rems_from_px(6.)).child(
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child("Devices"),
@@ -254,13 +255,18 @@ impl SyncPane {
             let Some(error) = self.device_error.clone() else {
                 return section.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(muted_fg)
                         .child("Loading…"),
                 );
             };
             return section
-                .child(div().text_size(px(12.)).text_color(danger).child(error))
+                .child(
+                    div()
+                        .text_size(rems_from_px(12.))
+                        .text_color(danger)
+                        .child(error),
+                )
                 .child(
                     h_flex().child(
                         Button::new("devices-retry")
@@ -275,24 +281,24 @@ impl SyncPane {
             // "2026-10-11T08:15:00Z": the day is enough here.
             let day: String = device.last_seen_at.chars().take(10).collect();
             let mut row = h_flex()
-                .h(px(24.))
-                .gap(px(8.))
+                .h(rems_from_px(24.))
+                .gap(rems_from_px(8.))
                 .items_center()
                 .child(
                     Icon::new(IconName::HardDrive)
-                        .size(px(12.))
+                        .size(rems_from_px(12.))
                         .text_color(muted_fg),
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(rems_from_px(12.5))
                         .text_color(fg)
                         .child(format!("{} · {}", device.device_name, device.platform)),
                 )
                 .when(!device.is_current, |row| {
                     row.child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(rems_from_px(11.5))
                             .text_color(muted_fg)
                             .child(format!("last seen {day}")),
                     )
@@ -301,7 +307,7 @@ impl SyncPane {
             row = if device.is_current {
                 row.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(rems_from_px(11.5))
                         .text_color(muted_fg)
                         .child("this device"),
                 )
@@ -320,17 +326,18 @@ impl SyncPane {
             };
             section = section.child(row);
         }
-        section.children(
-            self.device_error
-                .clone()
-                .map(|e| div().text_size(px(12.)).text_color(danger).child(e)),
-        )
+        section.children(self.device_error.clone().map(|e| {
+            div()
+                .text_size(rems_from_px(12.))
+                .text_color(danger)
+                .child(e)
+        }))
     }
 
     fn render_delete(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted_fg, danger) = (theme.muted_foreground, theme.danger);
-        let section = v_flex().gap(px(6.)).mt(px(6.));
+        let section = v_flex().gap(rems_from_px(6.)).mt(rems_from_px(6.));
         let trash = || Icon::empty().path("icons/trash.svg");
 
         if !self.is_confirming_delete {
@@ -351,8 +358,8 @@ impl SyncPane {
             );
         }
         section
-            .w(px(340.))
-            .child(div().text_size(px(11.5)).text_color(muted_fg).child(
+            .w(rems_from_px(340.))
+            .child(div().text_size(rems_from_px(11.5)).text_color(muted_fg).child(
                 "This removes the account and everything stored for it on the server, and signs \
                  out every device. The records in this vault stay. Enter your master password \
                  to confirm.",
@@ -361,11 +368,11 @@ impl SyncPane {
             .children(
                 self.delete_error
                     .clone()
-                    .map(|e| div().text_size(px(12.)).text_color(danger).child(e)),
+                    .map(|e| div().text_size(rems_from_px(12.)).text_color(danger).child(e)),
             )
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .child(
                         Button::new("account-delete-confirm")
                             .small()
@@ -404,13 +411,23 @@ impl Render for SyncPane {
 
         let heading = |text: String| {
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
         };
-        let caption = |text: String| div().text_size(px(11.5)).text_color(muted_fg).child(text);
-        let problem = |text: String| div().text_size(px(12.)).text_color(danger).child(text);
+        let caption = |text: String| {
+            div()
+                .text_size(rems_from_px(11.5))
+                .text_color(muted_fg)
+                .child(text)
+        };
+        let problem = |text: String| {
+            div()
+                .text_size(rems_from_px(12.))
+                .text_color(danger)
+                .child(text)
+        };
 
         let account = self.vault_state.read(cx).manager().and_then(|vault| {
             let state = vault.sync_state()?;
@@ -447,7 +464,7 @@ impl Render for SyncPane {
         };
 
         let sign_in_error = service.sign_in_error.clone().map(problem);
-        let body = v_flex().gap(px(8.));
+        let body = v_flex().gap(rems_from_px(8.));
 
         let body = match (&service.sign_in, account) {
             (SignIn::Browser, _) => body
@@ -482,13 +499,13 @@ impl Render for SyncPane {
                     .child(caption(text.into()))
                     .child(
                         div()
-                            .w(px(300.))
+                            .w(rems_from_px(300.))
                             .child(Input::new(&self.password).small().mask_toggle()),
                     )
                     .children(sign_in_error)
                     .child(
                         h_flex()
-                            .gap(px(8.))
+                            .gap(rems_from_px(8.))
                             .child(
                                 Button::new("sync-submit-password")
                                     .primary()
@@ -526,7 +543,7 @@ impl Render for SyncPane {
                 .children(sign_in_error)
                 .child(
                     h_flex()
-                        .gap(px(8.))
+                        .gap(rems_from_px(8.))
                         .child(sign_in_button("Sign in again", cx))
                         .child(sign_out_button("Forget account", cx)),
                 ),
@@ -547,7 +564,7 @@ impl Render for SyncPane {
                     .child(status)
                     .child(
                         h_flex()
-                            .gap(px(8.))
+                            .gap(rems_from_px(8.))
                             .child(
                                 Button::new("sync-now")
                                     .small()
@@ -570,8 +587,8 @@ impl Render for SyncPane {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
             .child(body)
     }
 }

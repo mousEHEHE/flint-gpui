@@ -1,8 +1,9 @@
-//! The Vault section of Settings: lock the vault now, Touch ID, change the
+//! The Vault section of Settings: lock the vault now, Touch ID or Windows
+//! Hello, remembered unlock, change the
 //! master password or the recovery phrase, and delete the vault.
 
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, EventEmitter, Window};
+use gpui::{div, App, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -13,10 +14,20 @@ use gpui_component::{
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::account::{self, AccountError, Api};
-use crate::preferences::Preferences;
-use crate::ui::app_view::LOCK_SHORTCUT;
+use crate::preferences::{Preferences, RememberUnlock};
+use crate::touch_id::METHOD_NAME;
+use crate::ui::keymap;
+use crate::ui::rems_from_px;
 use crate::ui::VaultState;
+
+use super::view::radio_row;
 use crate::vault::{NewPasswordSlot, VaultError, VaultManager};
+
+#[cfg(target_os = "macos")]
+const TOUCH_ID_CAPTION: &str =
+    "Unlock with your finger. Add a new finger later and you'll need the password once.";
+#[cfg(not(target_os = "macos"))]
+const TOUCH_ID_CAPTION: &str = "Unlock with your face, fingerprint or PIN.";
 
 pub enum VaultPaneEvent {
     LockRequested,
@@ -260,43 +271,25 @@ impl VaultPane {
         .detach();
     }
 
-    /// Replace the recovery phrase. The new one takes over the window until
-    /// the user confirms they saved it, as after a recovery.
     fn set_touch_id(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
         self.touch_id_error = None;
         if !is_enabled {
             crate::touch_id::delete_key();
             Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
-            tracing::info!("Touch ID unlock turned off");
+            tracing::info!("{METHOD_NAME} unlock turned off");
             cx.notify();
             return;
         }
-        let Some(key) = self
-            .vault_state
-            .read(cx)
-            .manager()
-            .map(|vm| vm.device_key())
-        else {
-            return;
-        };
         self.is_saving_touch_id = true;
         cx.notify();
-        let saving = cx
-            .background_executor()
-            .spawn(async move { crate::touch_id::save_key(&key) });
+        let enabling = crate::touch_id::enable(&self.vault_state, cx);
         cx.spawn(async move |this, cx| {
-            let result = saving.await;
+            let result = enabling.await;
             this.update(cx, |this, cx| {
                 this.is_saving_touch_id = false;
-                match result {
-                    Ok(()) => {
-                        Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = true);
-                        tracing::info!("Touch ID unlock turned on");
-                    }
-                    Err(e) => {
-                        tracing::error!(?e, "failed to turn on Touch ID unlock");
-                        this.touch_id_error = Some(format!("Touch ID was not turned on: {e}"));
-                    }
+                if let Err(e) = result {
+                    tracing::error!(?e, "failed to turn on {METHOD_NAME} unlock");
+                    this.touch_id_error = Some(format!("{METHOD_NAME} was not turned on: {e}"));
                 }
                 cx.notify();
             })
@@ -305,26 +298,58 @@ impl VaultPane {
         .detach();
     }
 
+    fn set_remember_unlock(&mut self, choice: RememberUnlock, cx: &mut Context<Self>) {
+        Preferences::update(cx, |prefs| prefs.remember_unlock = choice);
+        // Only an unlock that asked for the password starts a new period.
+        crate::touch_id::forget_remembered();
+        tracing::info!(?choice, "remember unlock changed");
+        cx.notify();
+    }
+
+    fn render_remember_unlock(&self, cx: &Context<Self>) -> impl IntoElement {
+        let current = Preferences::remember_unlock(cx);
+        v_flex()
+            .gap(rems_from_px(4.))
+            .children(
+                RememberUnlock::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, choice)| {
+                        radio_row(
+                            ("vault-remember-unlock", ix),
+                            choice.label(),
+                            choice == current,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_remember_unlock(choice, cx);
+                        }))
+                    }),
+            )
+    }
+
     fn render_touch_id(&self, cx: &Context<Self>) -> impl IntoElement {
         v_flex()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .child(
                 Checkbox::new("vault-touch-id")
                     .checked(Preferences::is_touch_id_enabled(cx))
                     .disabled(self.is_saving_touch_id)
-                    .label("Unlock with Touch ID")
+                    .label(format!("Unlock with {METHOD_NAME}"))
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.set_touch_id(*checked, cx);
                     })),
             )
             .children(self.touch_id_error.clone().map(|message| {
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(cx.theme().danger)
                     .child(message)
             }))
     }
 
+    /// Replace the recovery phrase. The new one takes over the window until
+    /// the user confirms they saved it, as after a recovery.
     fn make_new_phrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_making_phrase {
             return;
@@ -375,7 +400,11 @@ impl VaultPane {
             this.update(cx, |this, cx| {
                 this.is_making_phrase = false;
                 this.phrase_error = match installed {
-                    Some(Ok(())) => None,
+                    // A new phrase is often made after a leak: start needs the password again.
+                    Some(Ok(())) => {
+                        crate::touch_id::forget_remembered();
+                        None
+                    }
                     Some(Err(AccountError::Vault(VaultError::InvalidPassword))) => {
                         Some("Wrong master password.".to_string())
                     }
@@ -461,7 +490,7 @@ impl VaultPane {
 
     fn render_delete(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let section = v_flex().gap(px(8.));
+        let section = v_flex().gap(rems_from_px(8.));
         let trash = || Icon::empty().path("icons/trash.svg");
 
         if !self.is_confirming_delete {
@@ -482,23 +511,23 @@ impl VaultPane {
             );
         }
         section
-            .w(px(300.))
+            .w(rems_from_px(300.))
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rems_from_px(11.5))
                     .text_color(theme.muted_foreground)
                     .child("Enter your master password to confirm."),
             )
             .child(Input::new(&self.delete_password).small().mask_toggle())
             .children(self.delete_error.clone().map(|message| {
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.danger)
                     .child(message)
             }))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .child(
                         Button::new("vault-delete-confirm")
                             .small()
@@ -540,6 +569,7 @@ impl VaultPane {
         let is_out_of_step = |e: &AccountError| matches!(e, AccountError::Api(api) if api.code() == Some("wrong_password"));
         match outcome {
             Some(Ok(())) => {
+                crate::touch_id::forget_remembered();
                 for input in [
                     &self.current_password,
                     &self.new_password,
@@ -648,21 +678,21 @@ impl Render for VaultPane {
 
         let heading = |text: &'static str| {
             div()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .font_semibold()
                 .text_color(fg)
                 .child(text)
         };
         let caption = |text: &'static str| {
             div()
-                .max_w(px(520.))
-                .text_size(px(11.5))
+                .max_w(rems_from_px(520.))
+                .text_size(rems_from_px(11.5))
                 .text_color(muted_fg)
                 .child(text)
         };
         let labeled = |label: &'static str, input: &Entity<InputState>| {
             v_flex()
-                .gap(px(4.))
+                .gap(rems_from_px(4.))
                 .child(caption(label))
                 .child(Input::new(input).small().mask_toggle())
         };
@@ -671,13 +701,13 @@ impl Render for VaultPane {
             ChangeStatus::Idle | ChangeStatus::Working => None,
             ChangeStatus::Changed => Some(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.success)
                     .child("Master password changed. Use it the next time you unlock."),
             ),
             ChangeStatus::Failed(message) => Some(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.danger)
                     .child(message.clone()),
             ),
@@ -688,16 +718,16 @@ impl Render for VaultPane {
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px(px(20.))
-            .pb(px(20.))
-            .gap(px(12.))
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(20.))
+            .gap(rems_from_px(12.))
             .child(heading("Lock"))
             .child(caption(
                 "Locks flint right away. Open sessions keep running.",
             ))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .items_center()
                     .child(
                         Button::new("vault-lock-now")
@@ -707,28 +737,39 @@ impl Render for VaultPane {
                                 cx.emit(VaultPaneEvent::LockRequested);
                             })),
                     )
-                    .child(caption(LOCK_SHORTCUT)),
+                    .when_some(keymap::label("app.lock", cx), |el, lock| {
+                        el.child(
+                            div()
+                                .text_size(rems_from_px(11.5))
+                                .text_color(muted_fg)
+                                .child(lock),
+                        )
+                    }),
             )
             .when(
                 self.is_touch_id_available || Preferences::is_touch_id_enabled(cx),
                 |el| {
-                    el.child(heading("Touch ID").mt(px(6.)))
-                        .child(caption(
-                            "Unlock with your finger. Add a new finger later and \
-                             you'll need the password once.",
-                        ))
+                    el.child(heading(METHOD_NAME).mt(rems_from_px(6.)))
+                        .child(caption(TOUCH_ID_CAPTION))
                         .child(self.render_touch_id(cx))
                 },
             )
-            .child(heading("Master password").mt(px(6.)))
+            .child(heading("Remember unlock").mt(rems_from_px(6.)))
+            .child(caption(
+                "From your next unlock, flint starts without asking for the password until \
+                 the time runs out. Until then, anyone who can use your account on this \
+                 computer can open your hosts and keys. Locking the vault ends it.",
+            ))
+            .child(self.render_remember_unlock(cx))
+            .child(heading("Master password").mt(rems_from_px(6.)))
             .child(caption(
                 "Your recovery phrase keeps working. Other synced devices will ask you to \
                  sign in again.",
             ))
             .child(
                 v_flex()
-                    .w(px(300.))
-                    .gap(px(8.))
+                    .w(rems_from_px(300.))
+                    .gap(rems_from_px(8.))
                     .child(labeled("Current password", &self.current_password))
                     .child(labeled("New password", &self.new_password))
                     .child(labeled("Confirm new password", &self.confirm_password))
@@ -751,18 +792,18 @@ impl Render for VaultPane {
                         ),
                     ),
             )
-            .child(heading("Recovery phrase").mt(px(6.)))
+            .child(heading("Recovery phrase").mt(rems_from_px(6.)))
             .child(caption(
                 "Makes a new 24-word phrase. The old one stops working everywhere.",
             ))
             .child(
                 v_flex()
-                    .w(px(300.))
-                    .gap(px(8.))
+                    .w(rems_from_px(300.))
+                    .gap(rems_from_px(8.))
                     .child(Input::new(&self.phrase_password).small().mask_toggle())
                     .children(self.phrase_error.clone().map(|message| {
                         div()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .text_color(theme.danger)
                             .child(message)
                     }))
@@ -779,7 +820,7 @@ impl Render for VaultPane {
                         ),
                     ),
             )
-            .child(heading("Delete vault").mt(px(6.)))
+            .child(heading("Delete vault").mt(rems_from_px(6.)))
             .child(caption(
                 "Deletes every host, key and snippet on this device and closes all sessions. A \
                  synced account keeps its copy. Without sync this cannot be undone.",

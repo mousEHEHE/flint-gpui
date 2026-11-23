@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Div, ElementId, Hsla, Pixels, SharedString, Window};
+use gpui::{div, AnyElement, App, Div, ElementId, Hsla, Rems, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -7,10 +7,11 @@ use gpui_component::{
     v_flex, ActiveTheme as _, Icon, Sizable as _,
 };
 
+use crate::ui::rems_from_px;
 use crate::ui::window_chrome::{self, TITLE_BAR_HEIGHT};
 
-const COLUMN_WIDTH: Pixels = px(300.);
-const NOTE_TEXT_SIZE: Pixels = px(11.);
+const COLUMN_WIDTH: Rems = rems_from_px(300.);
+const NOTE_TEXT_SIZE: Rems = rems_from_px(11.);
 
 /// The whole window while the vault is locked: a bare title bar, and the
 /// content centred below it.
@@ -33,16 +34,16 @@ pub fn screen(content: impl IntoElement, window: &Window, cx: &App) -> Div {
 
 /// The column the lock-screen forms are laid out in.
 pub fn column() -> Div {
-    v_flex().w(COLUMN_WIDTH).gap(px(8.))
+    v_flex().w(COLUMN_WIDTH).gap(rems_from_px(8.))
 }
 
 pub fn header(title: impl Into<SharedString>, subtitle: Option<&'static str>, cx: &App) -> Div {
     v_flex()
-        .gap(px(4.))
-        .pb(px(4.))
+        .gap(rems_from_px(4.))
+        .pb(rems_from_px(4.))
         .child(
             div()
-                .text_size(px(16.))
+                .text_size(rems_from_px(16.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(title.into()),
         )
@@ -64,22 +65,22 @@ pub fn sync_promise(cx: &App) -> Div {
     let theme = cx.theme();
     h_flex()
         .w_full()
-        .gap(px(8.))
-        .px(px(10.))
-        .py(px(8.))
-        .rounded(px(6.))
+        .gap(rems_from_px(8.))
+        .px(rems_from_px(10.))
+        .py(rems_from_px(8.))
+        .rounded(rems_from_px(6.))
         .bg(crate::theme::element())
         .child(
             Icon::empty()
                 .path("icons/shield-check.svg")
-                .size(px(16.))
+                .size(rems_from_px(16.))
                 .text_color(theme.primary),
         )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(theme.foreground)
                 .child("Free. Encrypted on your device, so even our server can't read it."),
         )
@@ -91,7 +92,10 @@ pub fn error(text: &str, cx: &App) -> Div {
 
 /// The secondary actions under the main button, one per line, centred.
 pub fn links() -> Div {
-    v_flex().items_center().gap(px(2.)).pt(px(4.))
+    v_flex()
+        .items_center()
+        .gap(rems_from_px(2.))
+        .pt(rems_from_px(4.))
 }
 
 pub fn link(id: impl Into<ElementId>, label: &'static str) -> Button {
@@ -99,9 +103,9 @@ pub fn link(id: impl Into<ElementId>, label: &'static str) -> Button {
 }
 
 /// What shows while the vault is being created or opened.
-pub fn working(label: &'static str, cx: &App) -> AnyElement {
+pub fn working(label: impl Into<SharedString>, cx: &App) -> AnyElement {
     v_flex()
-        .gap(px(8.))
+        .gap(rems_from_px(8.))
         .items_center()
         .child(Spinner::new())
         .child(note(label, cx.theme().muted_foreground))

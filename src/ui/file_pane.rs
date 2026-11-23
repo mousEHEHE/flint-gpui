@@ -1,4 +1,5 @@
 use crate::ui::context_menu::{ContextMenu, ContextMenuItem};
+use crate::ui::rems_from_px;
 use gpui::prelude::*;
 use gpui::{
     canvas, div, px, uniform_list, App, Bounds, ClickEvent, ClipboardItem, Context, Entity,
@@ -23,11 +24,12 @@ use crate::preferences::Preferences;
 use crate::shell;
 use crate::ssh::{EntryKind, FileEntry};
 use crate::ui::file_pane_keys::{
-    self, hint, pane_command, type_ahead_match, typed_text, PaneCommand, RowMove, SwitchPane,
+    self, command_for, hint, type_ahead_match, typed_text, PaneCommand, RowMove, SwitchPane,
     TypeAhead,
 };
 use crate::ui::file_preview::{preview_plan, FilePreview, PreviewContent, PreviewPlan};
 use crate::ui::file_selection::{ClickKind, FileSelection};
+use crate::ui::keymap;
 
 #[derive(Clone, Debug)]
 pub enum SyncIndicator {
@@ -375,14 +377,14 @@ fn visible_entry_indices(entries: &[FileEntry], filter: &str, show_hidden: bool)
         .collect()
 }
 
-struct DragPreview(SharedString);
+pub(crate) struct DragPreview(pub(crate) SharedString);
 
 impl Render for DragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
-            .py(px(2.))
-            .rounded(px(4.))
+            .py(rems_from_px(2.))
+            .rounded(rems_from_px(4.))
             .bg(cx.theme().list_active)
             .border_1()
             .border_color(cx.theme().border)
@@ -395,7 +397,7 @@ impl Render for DragPreview {
 
 const SPIN_CYCLE: Duration = Duration::from_millis(800);
 
-const ROW_HEIGHT: Pixels = px(26.);
+const ROW_HEIGHT: f32 = 26.;
 /// Space between the pane edge and the rounded rows.
 const LIST_INSET: f32 = 6.;
 /// Space inside a row before its icon and after its last column.
@@ -443,8 +445,9 @@ pub struct FilePane {
     /// may have had the keys, so the next render gives them back.
     is_refocus_pending: bool,
     dialog: Option<PaneDialog>,
-    /// Last measured pane width, used to decide which columns fit. Updated by a
-    /// canvas probe at prepaint. Starts wide so the first frame shows everything.
+    /// Last measured pane width in 100% units, used to decide which columns
+    /// fit. Updated by a canvas probe at prepaint. Starts wide so the first
+    /// frame shows everything.
     list_width: Pixels,
     /// Quick-filter substring. Empty means no filter. Set via the filter field.
     filter: String,
@@ -653,7 +656,7 @@ impl FilePane {
     /// With nothing selected, a step lands on the first or the last visible
     /// row. `is_extending` keeps the rows passed over.
     fn move_selection(&mut self, to: RowMove, is_extending: bool, cx: &mut Context<Self>) {
-        let page = self.rows_per_page();
+        let page = self.rows_per_page(cx);
         let moved = self.change_selection(|selection, visible| match to {
             RowMove::Up => selection.move_lead(visible, -1, is_extending),
             RowMove::Down => selection.move_lead(visible, 1, is_extending),
@@ -668,7 +671,7 @@ impl FilePane {
     }
 
     /// Rows that fit in the list, less one so a page step keeps a row in view.
-    fn rows_per_page(&self) -> i32 {
+    fn rows_per_page(&self, cx: &App) -> i32 {
         let height = self
             .scroll_handle
             .0
@@ -677,7 +680,8 @@ impl FilePane {
             .bounds()
             .size
             .height;
-        ((height / ROW_HEIGHT) as i32 - 1).max(1)
+        let row_height = px(ROW_HEIGHT) * crate::theme::ui_scale(cx);
+        ((height / row_height) as i32 - 1).max(1)
     }
 
     /// Scroll the visible row at `position` into view.
@@ -775,7 +779,7 @@ impl FilePane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let command = pane_command(&event.keystroke.key, &event.keystroke.modifiers);
+        let command = command_for(&event.keystroke, cx);
         // A held key repeats. Only a move through the rows may: a repeated F5
         // would queue the same transfer again, and an Enter held a moment too
         // long after a rename would open the row behind the dialog.
@@ -1600,7 +1604,7 @@ impl FilePane {
                         }),
                     )
                     .icon("icons/pen-line.svg")
-                    .shortcut(hint::RENAME),
+                    .bound_shortcut(keymap::label("files.rename", cx)),
                 );
             }
             // Open, Rename and Copy Path are about one entry.
@@ -1659,7 +1663,7 @@ impl FilePane {
                 }),
             )
             .icon("icons/trash.svg")
-            .shortcut(hint::DELETE)
+            .bound_shortcut(keymap::label("files.delete", cx))
             .danger(),
         );
         items
@@ -1773,7 +1777,7 @@ impl FilePane {
             (_, Some(_)) => "icons/copy.svg",
             (_, None) => "icons/download.svg",
         })
-        .shortcut(hint::TRANSFER)
+        .bound_shortcut(keymap::label("files.transfer", cx))
     }
 
     /// Empty-space menu: operations on the folder the pane shows.
@@ -1788,7 +1792,7 @@ impl FilePane {
                 }),
             )
             .icon("icons/folder-plus.svg")
-            .shortcut(hint::NEW_FOLDER),
+            .bound_shortcut(keymap::label("files.new_folder", cx)),
             ContextMenuItem::new(
                 "ctx-refresh",
                 "Refresh",
@@ -1798,7 +1802,7 @@ impl FilePane {
                 }),
             )
             .icon("icons/rotate-cw.svg")
-            .shortcut(hint::REFRESH),
+            .bound_shortcut(keymap::label("files.refresh", cx)),
             ContextMenuItem::new(
                 "ctx-copy-path",
                 "Copy Path",
@@ -1829,16 +1833,20 @@ impl FilePane {
                 .bg(cx.theme().background)
                 .child(preview)
                 .child(
-                    div().absolute().top(px(7.)).right(px(6.)).child(
-                        Button::new("close-preview")
-                            .ghost()
-                            .icon(Icon::empty().path("icons/x.svg"))
-                            .xsmall()
-                            .tooltip("Close preview (Space)")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.close_preview(window, cx)),
-                            ),
-                    ),
+                    div()
+                        .absolute()
+                        .top(rems_from_px(7.))
+                        .right(rems_from_px(6.))
+                        .child(
+                            Button::new("close-preview")
+                                .ghost()
+                                .icon(Icon::empty().path("icons/x.svg"))
+                                .xsmall()
+                                .tooltip("Close preview (Space)")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_preview(window, cx)
+                                })),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -1966,18 +1974,18 @@ impl FilePane {
                 .child(
                     v_flex()
                         .occlude()
-                        .w(px(300.))
-                        .p(px(12.))
-                        .gap(px(8.))
+                        .w(rems_from_px(300.))
+                        .p(rems_from_px(12.))
+                        .gap(rems_from_px(8.))
                         .bg(crate::theme::pop_surface())
-                        .rounded(px(6.))
+                        .rounded(rems_from_px(6.))
                         .border_1()
                         .border_color(crate::theme::border_focused())
                         .shadow_md()
                         .on_mouse_down(MouseButton::Left, |_, _, _| {})
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(rems_from_px(12.5))
                                 .font_semibold()
                                 .text_color(theme.foreground)
                                 .child(title),
@@ -2017,7 +2025,7 @@ impl FilePane {
         id: &'static str,
         label: &'static str,
         key: SortKey,
-        width: Option<Pixels>,
+        width: Option<f32>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let muted = crate::theme::text_dim();
@@ -2041,7 +2049,7 @@ impl FilePane {
             .hover(move |s| s.text_color(fg))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(key, cx)));
         el = match width {
-            Some(w) => el.w(w).flex_shrink_0().justify_end(),
+            Some(w) => el.w(rems_from_px(w)).flex_shrink_0().justify_end(),
             None => el.flex_1().min_w_0(),
         };
         el.child(format!("{label}{arrow}")).into_any_element()
@@ -2113,11 +2121,11 @@ impl Render for FilePane {
                 .id("path-display")
                 .flex_1()
                 .min_w_0()
-                .px(px(5.))
-                .py(px(2.))
-                .rounded(px(5.))
+                .px(rems_from_px(5.))
+                .py(rems_from_px(2.))
+                .rounded(rems_from_px(5.))
                 .font_family(crate::theme::MONO_FONT)
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(muted_fg)
                 .truncate()
                 .cursor_pointer()
@@ -2136,7 +2144,7 @@ impl Render for FilePane {
             .filter(|_| self.is_filtering)
             .map(|input| {
                 div()
-                    .w(px(150.))
+                    .w(rems_from_px(150.))
                     .flex_shrink_0()
                     .child(Input::new(input).xsmall())
             });
@@ -2147,7 +2155,8 @@ impl Render for FilePane {
             let view = cx.entity();
             canvas(
                 move |bounds: Bounds<Pixels>, _, app| {
-                    let w = bounds.size.width;
+                    // Column breakpoints are in 100% units.
+                    let w = bounds.size.width / crate::theme::ui_scale(app);
                     view.update(app, |this, cx| {
                         let was = visible_columns(this.list_width, is_remote);
                         this.list_width = w;
@@ -2178,11 +2187,11 @@ impl Render for FilePane {
             .child(width_probe)
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(rems_from_px(38.))
                     .flex_none()
-                    .pl(px(6.))
-                    .pr(px(6.))
-                    .gap(px(4.))
+                    .pl(rems_from_px(6.))
+                    .pr(rems_from_px(6.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .child(pill)
                     .child(path_area)
@@ -2212,6 +2221,16 @@ impl Render for FilePane {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
                     )
                     .child(
+                        Button::new("new-folder")
+                            .ghost()
+                            .icon(Icon::empty().path("icons/folder-plus.svg"))
+                            .xsmall()
+                            .tooltip("New folder")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_new_folder_dialog(window, cx)
+                            })),
+                    )
+                    .child(
                         Button::new("go-up")
                             .ghost()
                             .icon(Icon::empty().path("icons/arrow-up.svg"))
@@ -2232,46 +2251,34 @@ impl Render for FilePane {
             )
             .child(
                 h_flex()
-                    .h(px(22.))
+                    .h(rems_from_px(22.))
                     .flex_none()
-                    .px(px(LIST_INSET + ROW_PADDING))
-                    .gap(px(8.))
+                    .px(rems_from_px(LIST_INSET + ROW_PADDING))
+                    .gap(rems_from_px(8.))
                     .items_center()
-                    .text_size(px(11.5))
+                    .text_size(rems_from_px(11.5))
                     .child(self.sort_header("hdr-name", "Name", SortKey::Name, None, cx))
                     .when(cols.type_col, |el| {
-                        el.child(self.sort_header(
-                            "hdr-type",
-                            "Type",
-                            SortKey::Type,
-                            Some(px(56.)),
-                            cx,
-                        ))
+                        el.child(self.sort_header("hdr-type", "Type", SortKey::Type, Some(56.), cx))
                     })
                     .when(cols.perms, |el| {
                         el.child(self.sort_header(
                             "hdr-perms",
                             "Perms",
                             SortKey::Perms,
-                            Some(px(72.)),
+                            Some(72.),
                             cx,
                         ))
                     })
                     .when(cols.size, |el| {
-                        el.child(self.sort_header(
-                            "hdr-size",
-                            "Size",
-                            SortKey::Size,
-                            Some(px(76.)),
-                            cx,
-                        ))
+                        el.child(self.sort_header("hdr-size", "Size", SortKey::Size, Some(76.), cx))
                     })
                     .when(cols.modified, |el| {
                         el.child(self.sort_header(
                             "hdr-modified",
                             "Modified",
                             SortKey::Modified,
-                            Some(px(92.)),
+                            Some(92.),
                             cx,
                         ))
                     }),
@@ -2281,13 +2288,13 @@ impl Render for FilePane {
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .gap(px(6.))
-                    .px(px(16.))
+                    .gap(rems_from_px(6.))
+                    .px(rems_from_px(16.))
                     .overflow_hidden()
                     .child(
                         div()
                             .max_w_full()
-                            .text_size(px(12.5))
+                            .text_size(rems_from_px(12.5))
                             .text_color(fg)
                             .child(error.message.clone()),
                     )
@@ -2378,8 +2385,8 @@ impl Render for FilePane {
                 })
                 .track_scroll(&self.scroll_handle)
                 .flex_1()
-                .px(px(LIST_INSET))
-                .pb(px(LIST_INSET))
+                .px(rems_from_px(LIST_INSET))
+                .pb(rems_from_px(LIST_INSET))
                 .when(self.is_loading, |s| s.opacity(0.5))
                 .on_drop(cx.listener(|_this, entry: &DraggedEntry, _window, cx| {
                     if entry.source != cx.entity_id() {
@@ -2451,20 +2458,20 @@ pub fn source_pill(
 
     h_flex()
         .id("source-pill")
-        .h(px(26.))
-        .max_w(px(180.))
+        .h(rems_from_px(26.))
+        .max_w(rems_from_px(180.))
         .flex_shrink_0()
-        .gap(px(6.))
+        .gap(rems_from_px(6.))
         .items_center()
-        .px(px(6.))
-        .rounded(px(6.))
-        .text_size(px(13.))
+        .px(rems_from_px(6.))
+        .rounded(rems_from_px(6.))
+        .text_size(rems_from_px(13.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(fg)
         .child(
             Icon::empty()
                 .path(icon)
-                .size(px(14.))
+                .size(rems_from_px(14.))
                 .flex_shrink_0()
                 .text_color(icon_color),
         )
@@ -2475,7 +2482,7 @@ pub fn source_pill(
                 .active(|s| s.bg(crate::theme::element_active()))
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(12.))
+                        .size(rems_from_px(12.))
                         .flex_shrink_0()
                         .text_color(muted_fg),
                 )
@@ -2507,11 +2514,11 @@ fn render_parent_row(
     h_flex()
         .id("entry-parent")
         .w_full()
-        .h(ROW_HEIGHT)
-        .px(px(ROW_PADDING))
-        .gap(px(8.))
+        .h(rems_from_px(ROW_HEIGHT))
+        .px(rems_from_px(ROW_PADDING))
+        .gap(rems_from_px(8.))
         .items_center()
-        .rounded(px(6.))
+        .rounded(rems_from_px(6.))
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::field()))
         .active(|s| s.bg(crate::theme::element_active()))
@@ -2521,7 +2528,7 @@ fn render_parent_row(
         .child(
             Icon::empty()
                 .path("icons/corner-left-up.svg")
-                .size(px(15.))
+                .size(rems_from_px(15.))
                 .flex_shrink_0()
                 .text_color(muted_fg),
         )
@@ -2529,17 +2536,21 @@ fn render_parent_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .text_color(muted_fg)
                 .child(".."),
         )
         .when(cols.type_col, |el| {
-            el.child(div().w(px(56.)).flex_shrink_0())
+            el.child(div().w(rems_from_px(56.)).flex_shrink_0())
         })
-        .when(cols.perms, |el| el.child(div().w(px(72.)).flex_shrink_0()))
-        .when(cols.size, |el| el.child(div().w(px(76.)).flex_shrink_0()))
+        .when(cols.perms, |el| {
+            el.child(div().w(rems_from_px(72.)).flex_shrink_0())
+        })
+        .when(cols.size, |el| {
+            el.child(div().w(rems_from_px(76.)).flex_shrink_0())
+        })
         .when(cols.modified, |el| {
-            el.child(div().w(px(92.)).flex_shrink_0())
+            el.child(div().w(rems_from_px(92.)).flex_shrink_0())
         })
         .into_any_element()
 }
@@ -2708,11 +2719,11 @@ fn render_entry(
     let mut el = h_flex()
         .id(("entry", ix))
         .w_full()
-        .h(ROW_HEIGHT)
-        .px(px(ROW_PADDING))
-        .gap(px(8.))
+        .h(rems_from_px(ROW_HEIGHT))
+        .px(rems_from_px(ROW_PADDING))
+        .gap(rems_from_px(8.))
         .items_center()
-        .rounded(px(6.))
+        .rounded(rems_from_px(6.))
         .cursor_pointer()
         .when_some(selected_bg, |s, bg| s.bg(bg))
         .when(selected_bg.is_none(), |s| {
@@ -2755,7 +2766,7 @@ fn render_entry(
         })
         .child(
             Icon::new(icon)
-                .size(px(15.))
+                .size(rems_from_px(15.))
                 .flex_shrink_0()
                 .text_color(icon_color),
         )
@@ -2763,7 +2774,7 @@ fn render_entry(
             None => div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 .text_color(name_color)
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -2775,9 +2786,9 @@ fn render_entry(
             Some(target) => h_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(px(5.))
+                .gap(rems_from_px(5.))
                 .overflow_hidden()
-                .text_size(px(13.))
+                .text_size(rems_from_px(13.))
                 // The name keeps its width; only the target gives way, so a
                 // long target never squeezes the name down to an ellipsis.
                 .child(
@@ -2801,11 +2812,11 @@ fn render_entry(
         .when(cols.type_col, |el| {
             el.child(
                 div()
-                    .w(px(56.))
+                    .w(rems_from_px(56.))
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(dim_fg)
                     .child(kind_label(entry.kind)),
             )
@@ -2818,12 +2829,12 @@ fn render_entry(
                 .into();
             el.child(
                 div()
-                    .w(px(72.))
+                    .w(rems_from_px(72.))
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
                     .font_family(crate::theme::MONO_FONT)
-                    .text_size(px(11.))
+                    .text_size(rems_from_px(11.))
                     .text_color(dim_fg)
                     .child(perms_str),
             )
@@ -2831,11 +2842,11 @@ fn render_entry(
         .when(cols.size, |el| {
             el.child(
                 div()
-                    .w(px(76.))
+                    .w(rems_from_px(76.))
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(dim_fg)
                     .child(size_str),
             )
@@ -2843,11 +2854,11 @@ fn render_entry(
         .when(cols.modified, |el| {
             el.child(
                 div()
-                    .w(px(92.))
+                    .w(rems_from_px(92.))
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(dim_fg)
                     .child(modified_str),
             )

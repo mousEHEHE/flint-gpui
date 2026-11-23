@@ -26,6 +26,7 @@ pub fn delete_vault(vault_state: &Entity<VaultState>, cx: &mut App) -> Result<()
     crate::vault::delete_vault_files(&path)
         .inspect_err(|e| tracing::error!(?e, "failed to delete the vault"))?;
     crate::touch_id::delete_key();
+    crate::touch_id::forget_remembered();
     crate::preferences::Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
     let was_open = vault_state.update(cx, |vault_state, cx| {
         let was_open = !matches!(vault_state, VaultState::Locked);
@@ -64,6 +65,11 @@ impl Focusable for RootView {
 
 impl RootView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Follows the window to a display of another size.
+        cx.observe_window_bounds(window, |_, window, cx| {
+            crate::theme::sync_ui_scale(window, cx)
+        })
+        .detach();
         let vault_state = cx.new(|_| VaultState::Locked);
         SyncService::install(vault_state.clone(), cx);
         UpdateService::install(cx);
@@ -84,7 +90,7 @@ impl RootView {
         if has_vault {
             unlock_view.update(cx, |view, cx| {
                 view.focus_password(window, cx);
-                view.offer_touch_id(window, cx);
+                view.unlock_on_start(window, cx);
             });
         } else if is_onboarding {
             onboarding_view.update(cx, |view, cx| view.focus(window, cx));
@@ -179,6 +185,7 @@ impl RootView {
     fn start_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.has_vault = false;
         crate::touch_id::delete_key();
+        crate::touch_id::forget_remembered();
         crate::preferences::Preferences::update(cx, |prefs| prefs.is_touch_id_enabled = false);
         self.app_view
             .update(cx, |view, cx| view.close_everything(window, cx));

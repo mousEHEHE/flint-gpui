@@ -13,6 +13,7 @@ pub mod host_icon;
 pub mod host_sharing;
 pub mod import_view;
 pub mod keyboard_layout;
+pub mod keymap;
 pub mod lock_screen;
 pub mod mouse_report;
 pub mod onboarding_view;
@@ -60,13 +61,99 @@ pub fn dialog_chrome(dialog: gpui_component::dialog::Dialog) -> gpui_component::
     dialog
         .bg(crate::theme::pop_surface())
         .border_color(crate::theme::float_border())
-        .rounded(gpui::px(12.))
+        .rounded(rems_from_px(12.))
         .shadow(modal_shadow())
 }
 
 /// Corner radius of the working area, the card that holds the host list or
 /// a session.
 pub const PANEL_RADIUS: f32 = 10.;
+
+/// A size that follows the interface scale; equals `px(value)` at 100%.
+pub const fn rems_from_px(value: f32) -> gpui::Rems {
+    gpui::rems(value / crate::theme::UI_REM_BASE)
+}
+
+/// For APIs that take only `Pixels`, such as a dialog's width.
+pub fn scaled_px(value: gpui::Pixels, cx: &gpui::App) -> gpui::Pixels {
+    value * crate::theme::ui_scale(cx)
+}
+
+/// Which side panel a drag resizes. Also the (empty) drag preview.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Sidebar,
+    ServerPanel,
+}
+
+impl ResizeEdge {
+    /// `width` is in real pixels; it is stored in 100% units.
+    pub fn set_width(self, width: f32, cx: &mut gpui::App) {
+        self.set_unscaled_width(width / crate::theme::ui_scale(cx), cx);
+    }
+
+    fn set_unscaled_width(self, width: f32, cx: &mut gpui::App) {
+        match self {
+            Self::Sidebar => crate::preferences::Preferences::set_sidebar_width(width, cx),
+            Self::ServerPanel => crate::preferences::Preferences::set_server_panel_width(width, cx),
+        }
+    }
+
+    fn reset_width(self, cx: &mut gpui::App) {
+        let width = match self {
+            Self::Sidebar => crate::preferences::DEFAULT_SIDEBAR_WIDTH,
+            Self::ServerPanel => crate::preferences::DEFAULT_SERVER_PANEL_WIDTH,
+        };
+        self.set_unscaled_width(width, cx);
+    }
+}
+
+impl gpui::Render for ResizeEdge {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::Empty
+    }
+}
+
+/// A strip on the panel's inner edge. The parent row's `on_drag_move` does the
+/// resizing; a double click puts the default width back.
+pub fn resize_edge(edge: ResizeEdge) -> gpui::Stateful<gpui::Div> {
+    use gpui::{div, prelude::*};
+
+    let group = match edge {
+        ResizeEdge::Sidebar => "sidebar-resize",
+        ResizeEdge::ServerPanel => "server-panel-resize",
+    };
+    let line = div()
+        .absolute()
+        .top_0()
+        .h_full()
+        .w(rems_from_px(2.))
+        .group_hover(group, |s| s.bg(crate::theme::accent()));
+    let (strip, line) = match edge {
+        ResizeEdge::Sidebar => (div().right_0(), line.right_0()),
+        ResizeEdge::ServerPanel => (div().left_0(), line.left_0()),
+    };
+    strip
+        .id(group)
+        .group(group)
+        .absolute()
+        .top_0()
+        .h_full()
+        .w(rems_from_px(6.))
+        .cursor_col_resize()
+        .child(line)
+        .on_drag(edge, |edge, _, _, cx| cx.new(|_| *edge))
+        .on_click(move |event, window, cx| {
+            if event.click_count() == 2 {
+                edge.reset_width(cx);
+                window.refresh();
+            }
+        })
+}
 
 pub const DIALOG_NARROW: gpui::Pixels = gpui::px(400.);
 pub const DIALOG_WIDE: gpui::Pixels = gpui::px(480.);

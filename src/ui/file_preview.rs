@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, Context, Entity, Image, ImageFormat, ObjectFit, RenderImage, SharedString,
+    div, img, Context, Entity, Image, ImageFormat, ObjectFit, RenderImage, SharedString,
     Subscription, Task, Window,
 };
 use gpui_component::{
@@ -16,6 +16,7 @@ use gpui_component::{
 
 use crate::ssh::{EntryKind, FileEntry, FileHead};
 use crate::ui::file_pane::{fmt_mtime, fmt_size};
+use crate::ui::rems_from_px;
 
 /// How much of a text file is read. Enough for any config file; a log shows
 /// its start.
@@ -253,8 +254,8 @@ impl FilePreview {
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(16.))
-                .text_size(px(12.5))
+                .px(rems_from_px(16.))
+                .text_size(rems_from_px(12.5))
                 .text_color(muted_fg)
                 .child(text)
                 .into_any_element()
@@ -270,7 +271,7 @@ impl FilePreview {
                             .bordered(false)
                             .h_full()
                             // The size of the file list behind it.
-                            .text_size(px(12.)),
+                            .text_size(rems_from_px(12.)),
                     )
                     .into_any_element(),
                 None => message("Loading\u{2026}".into()),
@@ -282,7 +283,7 @@ impl FilePreview {
                 .top_0()
                 .left_0()
                 .size_full()
-                .p(px(12.))
+                .p(rems_from_px(12.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -298,14 +299,14 @@ impl FilePreview {
                         .object_fit(ObjectFit::Contain)
                         .with_loading(move || {
                             div()
-                                .text_size(px(12.5))
+                                .text_size(rems_from_px(12.5))
                                 .text_color(muted_fg)
                                 .child("Loading\u{2026}")
                                 .into_any_element()
                         })
                         .with_fallback(move || {
                             div()
-                                .text_size(px(12.5))
+                                .text_size(rems_from_px(12.5))
                                 .text_color(muted_fg)
                                 .child("Couldn't decode the image")
                                 .into_any_element()
@@ -378,13 +379,13 @@ impl Render for FilePreview {
             .min_w_0()
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(rems_from_px(38.))
                     .flex_none()
                     // The pane draws its close button over the right end of
                     // this row.
-                    .pl(px(12.))
-                    .pr(px(32.))
-                    .gap(px(8.))
+                    .pl(rems_from_px(12.))
+                    .pr(rems_from_px(32.))
+                    .gap(rems_from_px(8.))
                     .items_center()
                     .border_b_1()
                     .border_color(crate::theme::border())
@@ -392,14 +393,14 @@ impl Render for FilePreview {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(rems_from_px(13.))
                             .text_color(fg)
                             .child(self.entry.name.clone()),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .text_color(muted_fg)
                             .child(details),
                     ),

@@ -2,7 +2,7 @@
 //! download and install of it. It only shows what `UpdateService` knows.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, EventEmitter, Window};
+use gpui::{div, Context, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogHeader, DialogTitle},
@@ -10,6 +10,7 @@ use gpui_component::{
 };
 
 use crate::ui::file_pane::fmt_size;
+use crate::ui::rems_from_px;
 use crate::ui::update_service::{Download, UpdateService};
 use crate::update::Release;
 use crate::version;
@@ -54,7 +55,7 @@ impl UpdateView {
     }
 
     fn render_buttons(download: &Download, cx: &mut Context<Self>) -> impl IntoElement {
-        let buttons = h_flex().gap(px(8.)).justify_end();
+        let buttons = h_flex().gap(rems_from_px(8.)).justify_end();
         match download {
             Download::Idle | Download::Failed(_) => buttons
                 .child(Self::close_button("Later", cx))
@@ -126,8 +127,8 @@ impl Render for UpdateView {
             theme.border,
         );
         let body = v_flex()
-            .p(px(12.))
-            .gap(px(8.))
+            .p(rems_from_px(12.))
+            .gap(rems_from_px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child("Update")));
 
         let service = UpdateService::global(cx);
@@ -140,7 +141,7 @@ impl Render for UpdateView {
             return body
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(muted_fg)
                         .child("No update available."),
                 )
@@ -158,7 +159,7 @@ impl Render for UpdateView {
 
         body.child(
             div()
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(fg)
                 .child(headline(&release)),
         )
@@ -166,26 +167,31 @@ impl Render for UpdateView {
             body.child(
                 div()
                     .id("update-notes")
-                    .max_h(px(180.))
+                    .max_h(rems_from_px(180.))
                     .overflow_y_scroll()
-                    .rounded(px(4.))
+                    .rounded(rems_from_px(4.))
                     .border_1()
                     .border_color(border)
-                    .p(px(8.))
-                    .text_size(px(12.))
+                    .p(rems_from_px(8.))
+                    .text_size(rems_from_px(12.))
                     .text_color(fg)
                     // Plain text: a string child is never read as markup.
                     .child(notes),
             )
         })
-        .child(div().text_size(px(11.)).text_color(muted_fg).child(format!(
-            "{}, {}",
-            release.filename,
-            fmt_size(release.size_bytes)
-        )))
+        .child(
+            div()
+                .text_size(rems_from_px(11.))
+                .text_color(muted_fg)
+                .child(format!(
+                    "{}, {}",
+                    release.filename,
+                    fmt_size(release.size_bytes)
+                )),
+        )
         .children(progress.map(|line| {
             div()
-                .text_size(px(11.5))
+                .text_size(rems_from_px(11.5))
                 .text_color(if is_failed { danger } else { muted_fg })
                 .child(line)
         }))

@@ -23,6 +23,7 @@ use crate::ui::file_pane::fmt_size;
 use crate::ui::server_session::{ServerSession, TransferTask};
 use crate::ui::sftp_browser::TransferKind;
 use crate::ui::terminal_tabs::{header_button, SESSION_HEADER_HEIGHT};
+use crate::ui::{rems_from_px, scaled_px};
 
 const POPOVER_W: f32 = 340.0;
 /// A big selection queues thousands of transfers; past this many queued rows
@@ -89,7 +90,7 @@ impl ServerSession {
 
         Some(
             h_flex()
-                .gap(px(6.))
+                .gap(rems_from_px(6.))
                 .items_center()
                 .children(pills)
                 .into_any_element(),
@@ -101,30 +102,30 @@ impl ServerSession {
         let accent = theme::status_online();
         let id = t.id as usize;
         let indicator: AnyElement = if t.is_queued {
-            queued_mark(px(11.))
+            queued_mark(rems_from_px(11.))
         } else if determinate {
             ProgressCircle::new(("tr-pill-ring", id))
                 .value(t.pct() as f32)
                 .color(accent)
-                .size(px(12.))
+                .size(rems_from_px(12.))
                 .into_any_element()
         } else {
             Spinner::new()
-                .with_size(px(11.))
+                .with_size(scaled_px(px(11.), cx))
                 .color(accent)
                 .into_any_element()
         };
         let value = transfer_value_text(t);
 
         header_button(("tr-pill", id), cx)
-            .gap(px(5.))
+            .gap(rems_from_px(5.))
             .text_color(cx.theme().foreground)
             .on_click(cx.listener(|this, _, _, cx| this.toggle_tasks(cx)))
             .child(indicator)
             .child(direction_icon(t.kind))
             .child(
                 div()
-                    .max_w(px(96.))
+                    .max_w(rems_from_px(96.))
                     .truncate()
                     .text_ellipsis_middle()
                     .child(t.name.clone()),
@@ -166,9 +167,9 @@ impl ServerSession {
         if queued_seen > QUEUED_ROWS_SHOWN {
             body.push(
                 div()
-                    .px(px(7.))
-                    .py(px(4.))
-                    .text_size(px(11.))
+                    .px(rems_from_px(7.))
+                    .py(rems_from_px(4.))
+                    .text_size(rems_from_px(11.))
                     .text_color(theme::text_dim())
                     .child(format!("+{} queued", queued_seen - QUEUED_ROWS_SHOWN))
                     .into_any_element(),
@@ -184,22 +185,22 @@ impl ServerSession {
         let popover = v_flex()
             .occlude()
             .absolute()
-            .right(px(8.))
-            .top(px(SESSION_HEADER_HEIGHT + 4.))
-            .w(px(POPOVER_W))
+            .right(rems_from_px(8.))
+            .top(rems_from_px(SESSION_HEADER_HEIGHT + 4.))
+            .w(rems_from_px(POPOVER_W))
             .bg(theme::pop_surface())
             .border_1()
             .border_color(theme::border_focused())
-            .rounded(px(6.))
+            .rounded(rems_from_px(6.))
             .shadow_lg()
             .overflow_hidden()
             .child(self.render_popover_head(cx))
             .child(
                 div()
                     .id("tasks-pop-body")
-                    .max_h(px(360.))
+                    .max_h(rems_from_px(360.))
                     .overflow_y_scroll()
-                    .p(px(3.))
+                    .p(rems_from_px(3.))
                     .child(v_flex().gap(px(1.)).children(body)),
             );
 
@@ -210,17 +211,17 @@ impl ServerSession {
         let active = self.transfers.len();
 
         h_flex()
-            .h(px(28.))
-            .pl(px(11.))
-            .pr(px(6.))
+            .h(rems_from_px(28.))
+            .pl(rems_from_px(11.))
+            .pr(rems_from_px(6.))
             .items_center()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(theme::sunken_soft())
             .child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(rems_from_px(10.))
                     .font_semibold()
                     .text_color(theme::muted_gray())
                     .child("TASKS"),
@@ -228,7 +229,7 @@ impl ServerSession {
             .when(active > 0, |el| {
                 el.child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(rems_from_px(10.5))
                         .text_color(theme::text_dim())
                         .child(SharedString::from(active.to_string())),
                 )
@@ -252,13 +253,13 @@ impl ServerSession {
     ) -> AnyElement {
         h_flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(7.))
-            .pt(px(6.))
-            .pb(px(3.))
+            .gap(rems_from_px(8.))
+            .px(rems_from_px(7.))
+            .pt(rems_from_px(6.))
+            .pb(rems_from_px(3.))
             .child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(rems_from_px(10.))
                     .font_semibold()
                     .text_color(theme::text_dim())
                     .child(label),
@@ -269,12 +270,12 @@ impl ServerSession {
                     div()
                         .id("tasks-clear")
                         .flex_none()
-                        .h(px(18.))
-                        .px(px(6.))
+                        .h(rems_from_px(18.))
+                        .px(rems_from_px(6.))
                         .flex()
                         .items_center()
-                        .rounded(px(3.))
-                        .text_size(px(10.5))
+                        .rounded(rems_from_px(3.))
+                        .text_size(rems_from_px(10.5))
                         .text_color(theme::text_dim())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::element_hover()).text_color(theme::text()))
@@ -299,16 +300,16 @@ impl ServerSession {
         };
 
         let indicator: AnyElement = if t.is_queued {
-            queued_mark(px(13.))
+            queued_mark(rems_from_px(13.))
         } else if determinate {
             ProgressCircle::new(("tr-row-ring", id as usize))
                 .value(t.pct() as f32)
                 .color(accent)
-                .size(px(15.))
+                .size(rems_from_px(15.))
                 .into_any_element()
         } else {
             Spinner::new()
-                .with_size(px(13.))
+                .with_size(scaled_px(px(13.), cx))
                 .color(accent)
                 .into_any_element()
         };
@@ -316,11 +317,11 @@ impl ServerSession {
         let detail = t.expanded.then(|| transfer_detail_panel(t, cx));
 
         let row = h_flex()
-            .h(px(26.))
-            .px(px(7.))
-            .gap(px(8.))
+            .h(rems_from_px(26.))
+            .px(rems_from_px(7.))
+            .gap(rems_from_px(8.))
             .items_center()
-            .rounded(px(3.))
+            .rounded(rems_from_px(3.))
             .child(expand_chevron(
                 ("tr-row-chev", id as usize),
                 t.expanded,
@@ -328,7 +329,7 @@ impl ServerSession {
             ))
             .child(
                 div()
-                    .w(px(15.))
+                    .w(rems_from_px(15.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -338,7 +339,7 @@ impl ServerSession {
                 h_flex()
                     .flex_1()
                     .min_w(px(0.))
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .child(direction_icon(t.kind))
                     .child(
@@ -346,7 +347,7 @@ impl ServerSession {
                             .min_w(px(0.))
                             .truncate()
                             .text_ellipsis_middle()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .font_semibold()
                             .text_color(cx.theme().foreground)
                             .child(t.name.clone()),
@@ -358,7 +359,7 @@ impl ServerSession {
                 div()
                     .flex_none()
                     .whitespace_nowrap()
-                    .text_size(px(10.5))
+                    .text_size(rems_from_px(10.5))
                     .font_semibold()
                     .text_color(cx.theme().foreground)
                     .child(SharedString::from(value)),
@@ -367,25 +368,25 @@ impl ServerSession {
                 div()
                     .flex_none()
                     .whitespace_nowrap()
-                    .text_size(px(10.))
+                    .text_size(rems_from_px(10.))
                     .text_color(theme::text_dim())
                     .child(SharedString::from(pace)),
             )
             .child(
                 div()
                     .id(("tr-stop", id as usize))
-                    .w(px(18.))
-                    .h(px(18.))
+                    .w(rems_from_px(18.))
+                    .h(rems_from_px(18.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(3.))
+                    .rounded(rems_from_px(3.))
                     .text_color(theme::text_dim())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::element_hover()).text_color(theme::run_red()))
                     .active(|s| s.bg(theme::element_active()).text_color(theme::run_red()))
                     .on_click(cx.listener(move |this, _, _, cx| this.cancel_transfer(id, cx)))
-                    .child(Icon::new(IconName::Close).size(px(12.))),
+                    .child(Icon::new(IconName::Close).size(rems_from_px(12.))),
             );
 
         v_flex()
@@ -425,11 +426,11 @@ impl ServerSession {
 
         let row = h_flex()
             .id(("tr-hrow", id as usize))
-            .h(px(26.))
-            .px(px(7.))
-            .gap(px(8.))
+            .h(rems_from_px(26.))
+            .px(rems_from_px(7.))
+            .gap(rems_from_px(8.))
             .items_center()
-            .rounded(px(3.))
+            .rounded(rems_from_px(3.))
             .cursor_pointer()
             .hover(|s| s.bg(theme::element_hover()))
             .active(|s| s.bg(theme::element_active()))
@@ -437,18 +438,18 @@ impl ServerSession {
             .child(chevron_glyph(expanded))
             .child(
                 div()
-                    .w(px(15.))
+                    .w(rems_from_px(15.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_color(color)
-                    .children(icon.map(|icon| Icon::new(icon).size(px(12.)))),
+                    .children(icon.map(|icon| Icon::new(icon).size(rems_from_px(12.)))),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_w(px(0.))
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .child(direction_icon(t.kind))
                     .child(
@@ -456,7 +457,7 @@ impl ServerSession {
                             .min_w(px(0.))
                             .truncate()
                             .text_ellipsis_middle()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .font_semibold()
                             .text_color(cx.theme().foreground)
                             .child(t.name.clone()),
@@ -464,15 +465,15 @@ impl ServerSession {
             )
             .child(
                 div()
-                    .max_w(px(110.))
+                    .max_w(rems_from_px(110.))
                     .truncate()
-                    .text_size(px(10.5))
+                    .text_size(rems_from_px(10.5))
                     .text_color(theme::text_dim())
                     .child(SharedString::from(meta)),
             )
             .child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(rems_from_px(10.))
                     .text_color(theme::text_dim())
                     .child(SharedString::from(when)),
             );
@@ -501,8 +502,8 @@ fn expand_chevron(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .w(px(12.))
-        .h(px(16.))
+        .w(rems_from_px(12.))
+        .h(rems_from_px(16.))
         .flex()
         .items_center()
         .justify_center()
@@ -516,7 +517,7 @@ fn expand_chevron(
 /// Non-interactive chevron for rows whose whole body already toggles.
 fn chevron_glyph(expanded: bool) -> impl IntoElement {
     div()
-        .w(px(12.))
+        .w(rems_from_px(12.))
         .flex()
         .items_center()
         .justify_center()
@@ -530,7 +531,9 @@ fn direction_icon(kind: TransferKind) -> Icon {
         TransferKind::Download => IconName::ArrowDown,
         TransferKind::Copy => IconName::ArrowRight,
     };
-    Icon::new(icon).size(px(12.)).text_color(theme::text_dim())
+    Icon::new(icon)
+        .size(rems_from_px(12.))
+        .text_color(theme::text_dim())
 }
 
 fn chevron_icon(expanded: bool) -> Icon {
@@ -539,7 +542,7 @@ fn chevron_icon(expanded: bool) -> Icon {
     } else {
         IconName::ChevronRight
     };
-    Icon::new(icon).size(px(10.))
+    Icon::new(icon).size(rems_from_px(10.))
 }
 
 /// Expanded detail for a single SFTP transfer: direction, size, %, speed, time.
@@ -590,10 +593,16 @@ fn transfer_detail_panel(t: &TransferTask, cx: &Context<ServerSession>) -> impl 
 
     let kv = |label: &'static str, value: String| {
         h_flex()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .items_baseline()
-            .text_size(px(10.5))
-            .child(div().w(px(58.)).flex_none().text_color(dim).child(label))
+            .text_size(rems_from_px(10.5))
+            .child(
+                div()
+                    .w(rems_from_px(58.))
+                    .flex_none()
+                    .text_color(dim)
+                    .child(label),
+            )
             .child(
                 div()
                     .flex_1()
@@ -607,14 +616,14 @@ fn transfer_detail_panel(t: &TransferTask, cx: &Context<ServerSession>) -> impl 
 
     div()
         .id(("tr-detail", t.id as usize))
-        .mx(px(2.))
-        .mb(px(3.))
-        .p(px(7.))
-        .rounded(px(3.))
+        .mx(rems_from_px(2.))
+        .mb(rems_from_px(3.))
+        .p(rems_from_px(7.))
+        .rounded(rems_from_px(3.))
         .bg(theme::sunken())
         .child(
             v_flex()
-                .gap(px(3.))
+                .gap(rems_from_px(3.))
                 .child(kv("Direction", direction))
                 .child(kv("Transferred", size))
                 .children(speed.map(|speed| kv("Speed", speed)))
@@ -628,12 +637,12 @@ fn transfer_detail_panel(t: &TransferTask, cx: &Context<ServerSession>) -> impl 
 /// the end of the message is often the part that explains it.
 fn error_row(error: String, label_color: Hsla) -> impl IntoElement {
     h_flex()
-        .gap(px(8.))
+        .gap(rems_from_px(8.))
         .items_start()
-        .text_size(px(10.5))
+        .text_size(rems_from_px(10.5))
         .child(
             div()
-                .w(px(58.))
+                .w(rems_from_px(58.))
                 .flex_none()
                 .text_color(label_color)
                 .child("Error"),
@@ -698,7 +707,7 @@ fn transfer_value_text(t: &TransferTask) -> String {
 
 /// Stands where the spinner is for a transfer that has not started: a spinner
 /// would say it is busy.
-fn queued_mark(size: gpui::Pixels) -> AnyElement {
+fn queued_mark(size: gpui::Rems) -> AnyElement {
     div()
         .text_size(size)
         .text_color(theme::text_dim())

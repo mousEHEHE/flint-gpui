@@ -1,3 +1,4 @@
+mod shortcuts_pane;
 mod sync_pane;
 mod teams_pane;
 mod vault_pane;
@@ -30,6 +31,7 @@ pub enum SettingsSection {
     Teams,
     Appearance,
     Terminal,
+    Shortcuts,
     Keys,
     Snippets,
     Network,
@@ -44,6 +46,7 @@ impl SettingsSection {
             SettingsSection::Teams => "Teams",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Terminal => "Terminal",
+            SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Keys => "SSH keys",
             SettingsSection::Snippets => "Snippets",
             SettingsSection::Network => "Proxy",
@@ -58,6 +61,7 @@ impl SettingsSection {
             SettingsSection::Teams => IconName::User,
             SettingsSection::Appearance => IconName::Palette,
             SettingsSection::Terminal => IconName::PanelBottom,
+            SettingsSection::Shortcuts => return Icon::empty().path("icons/keyboard.svg"),
             SettingsSection::Keys => return Icon::empty().path("icons/key-round.svg"),
             SettingsSection::Snippets => IconName::SquareTerminal,
             SettingsSection::Network => IconName::Network,
@@ -73,6 +77,7 @@ impl SettingsSection {
             SettingsSection::Teams,
             SettingsSection::Appearance,
             SettingsSection::Terminal,
+            SettingsSection::Shortcuts,
             SettingsSection::Keys,
             SettingsSection::Snippets,
             SettingsSection::Network,

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{div, px, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, Task, Window};
+use gpui::{div, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, Task, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex, ActiveTheme as _,
@@ -11,6 +11,7 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 use crate::ui::phrase_panel::{phrase_file_text, phrase_panel};
+use crate::ui::rems_from_px;
 use crate::ui::{lock_screen, VaultState};
 
 const COPIED_LABEL_DURATION: Duration = Duration::from_secs(2);
@@ -213,7 +214,7 @@ impl Render for PhraseView {
 
         lock_screen::screen(
             v_flex()
-                .w(px(480.))
+                .w(rems_from_px(480.))
                 .gap_3()
                 .child(phrase_panel(
                     &words,

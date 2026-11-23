@@ -1,10 +1,11 @@
-//! Sharing a host with a team, as the host menus of the main list and the
-//! sidebar offer it.
+//! Sharing a host with a team, and exporting a key to a host, as the host
+//! menus of the main list and the sidebar offer them.
 
-use gpui::{App, Entity};
+use gpui::{App, ClickEvent, Entity, Window};
 use gpui_component::WindowExt as _;
 use uuid::Uuid;
 
+use crate::ui::context_menu::ContextMenuItem;
 use crate::ui::sync_service::SyncService;
 use crate::ui::VaultState;
 use crate::vault::{AuthMethod, VaultManager};
@@ -64,6 +65,53 @@ pub fn set_shared(
     }
 }
 
+type ExportHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// The "export key" entry of a host's menu: the key itself when there is one,
+/// else a submenu with every key. `on_pick` builds the click handler for a key.
+/// The caller gives the entry its icon, if its menu has icons.
+pub fn export_key_item(
+    id: &'static str,
+    vault_state: &Entity<VaultState>,
+    cx: &App,
+    on_pick: impl FnMut(Uuid) -> ExportHandler,
+) -> Option<ContextMenuItem> {
+    let keys = vault_state
+        .read(cx)
+        .manager()
+        .and_then(|vault| vault.list_keys().ok())
+        .unwrap_or_default();
+    export_key_menu(
+        id,
+        keys.into_iter().map(|key| (key.name, key.id)).collect(),
+        on_pick,
+    )
+}
+
+fn export_key_menu(
+    id: &'static str,
+    keys: Vec<(String, Uuid)>,
+    mut on_pick: impl FnMut(Uuid) -> ExportHandler,
+) -> Option<ContextMenuItem> {
+    const ICON: &str = "icons/key-round.svg";
+    if let [(_, key)] = keys.as_slice() {
+        return Some(ContextMenuItem::new(
+            id,
+            "Export SSH key to host",
+            on_pick(*key),
+        ));
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    let items = keys
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (name, key))| ContextMenuItem::new((id, ix), name, on_pick(key)).icon(ICON))
+        .collect();
+    Some(ContextMenuItem::new(id, "Export key to host", |_, _, _| {}).submenu(items))
+}
+
 /// The name of the login key that sharing a host into `vault_id` gives the team as well.
 fn key_taken_along(vault: &VaultManager, id: Uuid, vault_id: Uuid) -> Option<String> {
     let key_id = login_key(vault, id)?;
@@ -113,6 +161,20 @@ fn sharing_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_key_gets_a_plain_export_entry_and_several_go_in_a_submenu() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let no_op = |_| -> ExportHandler { Box::new(|_, _, _| {}) };
+        assert!(export_key_menu("export", Vec::new(), no_op).is_none());
+        let single = export_key_menu("export", vec![("work".to_string(), a)], no_op).unwrap();
+        assert_eq!(single.label.as_ref(), "Export SSH key to host");
+        assert!(single.submenu.is_empty());
+        let keys = vec![("work".to_string(), a), ("home".to_string(), b)];
+        let several = export_key_menu("export", keys, no_op).unwrap();
+        assert_eq!(several.label.as_ref(), "Export key to host");
+        assert_eq!(several.submenu[1].label.as_ref(), "home");
+    }
 
     #[test]
     fn a_personal_host_can_go_into_any_vault_and_a_shared_one_back_or_to_a_sibling() {

@@ -2,9 +2,10 @@
 //! that system's colour, with a dot on its corner while a session is open.
 
 use gpui::prelude::*;
-use gpui::{div, px, svg, AnyElement, Hsla};
+use gpui::{div, svg, AnyElement, Hsla};
 
 use crate::theme;
+use crate::ui::rems_from_px;
 
 /// The tile in the host list. Denser lists, like the palette, pass less.
 pub const TILE_SIZE: f32 = 28.;
@@ -86,25 +87,25 @@ pub fn host_icon(os: Option<&str>, is_connected: bool, ring: Hsla, tile_size: f3
     div()
         .relative()
         .flex_none()
-        .size(px(tile_size))
+        .size(rems_from_px(tile_size))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px((tile_size / 4.).round()))
+        .rounded(rems_from_px((tile_size / 4.).round()))
         .bg(tile)
         .child(
             svg()
                 .path(icon)
-                .size(px((tile_size * 0.54).round()))
+                .size(rems_from_px((tile_size * 0.54).round()))
                 .text_color(glyph),
         )
         .when(is_connected, |tile| {
             tile.child(
                 div()
                     .absolute()
-                    .right(px(-2.))
-                    .bottom(px(-2.))
-                    .size(px(10.))
+                    .right(rems_from_px(-2.))
+                    .bottom(rems_from_px(-2.))
+                    .size(rems_from_px(10.))
                     .rounded_full()
                     .border_2()
                     .border_color(ring)

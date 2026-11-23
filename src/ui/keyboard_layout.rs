@@ -27,6 +27,33 @@ const RUSSIAN_KEYS: &[(char, char, char)] = &[
     ('.', 'ю', 'Ю'),
 ];
 
+/// US-layout symbol typed with Shift, then the key it is on. gpui reports
+/// Shift+] as "}" with Shift off, so chords are spelled that way.
+#[rustfmt::skip]
+const US_SHIFTED: &[(char, char)] = &[
+    ('~', '`'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'),
+    ('^', '6'), ('&', '7'), ('*', '8'), ('(', '9'), (')', '0'), ('_', '-'),
+    ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'), (':', ';'), ('"', '\''),
+    ('<', ','), ('>', '.'), ('?', '/'),
+];
+
+/// The key Shift is held on to type `symbol` on a US layout.
+pub fn unshifted_us_key(symbol: char) -> Option<char> {
+    US_SHIFTED
+        .iter()
+        .find(|(shifted, _)| *shifted == symbol)
+        .map(|(_, key)| *key)
+}
+
+/// What a US layout types on `key` with Shift, if `key` is a symbol key.
+#[cfg(test)]
+pub fn shifted_us_key(key: char) -> Option<char> {
+    US_SHIFTED
+        .iter()
+        .find(|(_, base)| *base == key)
+        .map(|(shifted, _)| *shifted)
+}
+
 /// The character a US layout puts on the same physical key as `key`, or `None`
 /// when `key` is not a single Russian character.
 pub fn us_layout_key(key: &str) -> Option<char> {
@@ -54,7 +81,7 @@ pub fn bind_chord(cx: &mut App, chord: &str, action: impl Action + Clone, contex
     }
 }
 
-fn chord_variants(chord: &str) -> Vec<String> {
+pub(crate) fn chord_variants(chord: &str) -> Vec<String> {
     let mut variants = vec![chord.to_string()];
 
     // Everything before the last '-' is the modifier list. A chord whose key is
@@ -63,19 +90,27 @@ fn chord_variants(chord: &str) -> Vec<String> {
         return variants;
     };
     let mut chars = key.chars();
-    let Some(us) = chars.next() else {
+    let Some(typed) = chars.next() else {
         return variants;
     };
     if chars.next().is_some() {
         return variants;
     }
 
+    let shifted_from = unshifted_us_key(typed);
+    let us = shifted_from.unwrap_or(typed);
     let Some((_, lower, upper)) = RUSSIAN_KEYS
         .iter()
         .find(|(candidate, _, _)| *candidate == us)
     else {
         return variants;
     };
+    // Shift+Б arrives as the capital with Shift off. The plain key needs the
+    // capital too, as Windows reports it that way; there the two can't be told apart.
+    if shifted_from.is_some() {
+        variants.push(format!("{modifiers}-{upper}"));
+        return variants;
+    }
     variants.push(format!("{modifiers}-{lower}"));
     variants.push(format!("{modifiers}-{upper}"));
     variants
@@ -111,6 +146,9 @@ mod tests {
             ["ctrl-shift-c", "ctrl-shift-с", "ctrl-shift-С"]
         );
         assert_eq!(chord_variants("cmd-,"), ["cmd-,", "cmd-б", "cmd-Б"]);
+        // Shift+. arrives as ">" on a US layout and "Ю" on the Russian one.
+        assert_eq!(chord_variants("ctrl->"), ["ctrl->", "ctrl-Ю"]);
+        assert_eq!(chord_variants("cmd-}"), ["cmd-}", "cmd-Ъ"]);
     }
 
     // `KeyBinding::new` panics on a chord it cannot parse, and the Windows and
@@ -121,7 +159,8 @@ mod tests {
         for chord in [
             "cmd-c",
             "ctrl-shift-c",
-            "cmd-shift-]",
+            "cmd-}",
+            "ctrl->",
             "ctrl-,",
             "ctrl-shift-tab",
         ] {

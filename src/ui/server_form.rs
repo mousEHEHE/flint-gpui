@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::ui::context_menu::AnchoredToTrigger;
 use crate::ui::dialog_max_height;
+use crate::ui::rems_from_px;
 
 use crate::connection::{is_loopback_bind, ForwardKind};
 use crate::ssh_target::{find_saved_jump_host, parse_host_field};
@@ -40,6 +41,11 @@ pub enum FormMode {
 pub enum FormEvent {
     Saved(ServerEntry),
     Cancelled,
+    /// Add the key to the host's authorized_keys, signing in with the saved login.
+    ExportKeyToHost {
+        host: Uuid,
+        key: Uuid,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -978,7 +984,7 @@ impl Render for ServerFormView {
         let muted_fg = theme.muted_foreground;
         let danger = theme.danger;
         let list_hover = crate::theme::field();
-        let inner_radius = px(6.);
+        let inner_radius = rems_from_px(6.);
 
         let is_edit = matches!(self.mode, FormMode::Edit { .. });
         let is_valid = self.is_valid(cx);
@@ -999,6 +1005,13 @@ impl Render for ServerFormView {
             .selected_key_id
             .map(|id| !keys.iter().any(|k| k.id == id))
             .unwrap_or(false);
+        let export_target = match self.mode {
+            FormMode::Edit { id, .. } => self
+                .selected_key_id
+                .filter(|_| !is_missing)
+                .map(|key| (id, key)),
+            FormMode::Add => None,
+        };
 
         // Where the key dropdown lands: a probe over the trigger writes the
         // field's bottom-left corner here at prepaint, and the panel, which
@@ -1053,15 +1066,15 @@ impl Render for ServerFormView {
         let group_highlight = self.group_highlight;
 
         let group_field = v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .capture_key_down(cx.listener(Self::on_group_key))
             .child(field_label("Group", cx))
             .child(Input::new(&self.group_input))
             .when(group_focused && !group_suggestions.is_empty(), |el| {
                 el.child(
                     v_flex()
-                        .p(px(4.))
-                        .rounded(px(9.))
+                        .p(rems_from_px(4.))
+                        .rounded(rems_from_px(9.))
                         .border_1()
                         .border_color(crate::theme::float_border())
                         .bg(crate::theme::pop_surface())
@@ -1069,12 +1082,12 @@ impl Render for ServerFormView {
                             let value = path.clone();
                             h_flex()
                                 .id(("group-suggestion", ix))
-                                .h(px(30.))
-                                .px(px(8.))
-                                .gap(px(8.))
+                                .h(rems_from_px(30.))
+                                .px(rems_from_px(8.))
+                                .gap(rems_from_px(8.))
                                 .items_center()
                                 .rounded(inner_radius)
-                                .text_size(px(13.))
+                                .text_size(rems_from_px(13.))
                                 .text_color(fg)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(list_hover))
@@ -1090,7 +1103,7 @@ impl Render for ServerFormView {
                                 .child(
                                     svg()
                                         .path("icons/folder.svg")
-                                        .size(px(14.))
+                                        .size(rems_from_px(14.))
                                         .text_color(muted_fg),
                                 )
                                 .child(path)
@@ -1108,45 +1121,43 @@ impl Render for ServerFormView {
             .chain(self.tag_names.iter())
             .any(|t| t.eq_ignore_ascii_case(&tag_text));
 
-        let chips =
-            h_flex()
-                .flex_wrap()
-                .gap(px(5.))
-                .children(self.tag_names.iter().enumerate().map(|(ix, name)| {
-                    h_flex()
-                        .h(px(26.))
-                        .pl(px(9.))
-                        .pr(px(4.))
-                        .gap(px(4.))
-                        .items_center()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(crate::theme::border())
-                        .bg(crate::theme::field())
-                        .text_size(px(12.5))
-                        .text_color(fg)
-                        .child(format!("#{name}"))
-                        .child(
-                            div()
-                                .id(("tag-remove", ix))
-                                .size(px(18.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.))
-                                .text_color(muted_fg)
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(list_hover).text_color(fg))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.tag_names.remove(ix);
-                                    cx.notify();
-                                }))
-                                .child(Icon::new(IconName::Close).size(px(12.))),
-                        )
-                }));
+        let chips = h_flex().flex_wrap().gap(rems_from_px(5.)).children(
+            self.tag_names.iter().enumerate().map(|(ix, name)| {
+                h_flex()
+                    .h(rems_from_px(26.))
+                    .pl(rems_from_px(9.))
+                    .pr(rems_from_px(4.))
+                    .gap(rems_from_px(4.))
+                    .items_center()
+                    .rounded(rems_from_px(6.))
+                    .border_1()
+                    .border_color(crate::theme::border())
+                    .bg(crate::theme::field())
+                    .text_size(rems_from_px(12.5))
+                    .text_color(fg)
+                    .child(format!("#{name}"))
+                    .child(
+                        div()
+                            .id(("tag-remove", ix))
+                            .size(rems_from_px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(rems_from_px(4.))
+                            .text_color(muted_fg)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(list_hover).text_color(fg))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.tag_names.remove(ix);
+                                cx.notify();
+                            }))
+                            .child(Icon::new(IconName::Close).size(rems_from_px(12.))),
+                    )
+            }),
+        );
 
         let tags_field = v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .capture_key_down(cx.listener(Self::on_tag_key))
             .child(field_label("Tags", cx))
             .when(!self.tag_names.is_empty(), |el| el.child(chips))
@@ -1157,8 +1168,8 @@ impl Render for ServerFormView {
                 |el| {
                     el.child(
                         v_flex()
-                            .p(px(4.))
-                            .rounded(px(9.))
+                            .p(rems_from_px(4.))
+                            .rounded(rems_from_px(9.))
                             .border_1()
                             .border_color(crate::theme::float_border())
                             .bg(crate::theme::pop_surface())
@@ -1167,11 +1178,11 @@ impl Render for ServerFormView {
                                 el.child(
                                     h_flex()
                                         .id("tag-create")
-                                        .h(px(30.))
-                                        .px(px(8.))
+                                        .h(rems_from_px(30.))
+                                        .px(rems_from_px(8.))
                                         .items_center()
                                         .rounded(inner_radius)
-                                        .text_size(px(13.))
+                                        .text_size(rems_from_px(13.))
                                         .text_color(fg)
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(list_hover))
@@ -1188,11 +1199,11 @@ impl Render for ServerFormView {
                                 let value = name.clone();
                                 h_flex()
                                     .id(("tag-suggestion", ix))
-                                    .h(px(30.))
-                                    .px(px(8.))
+                                    .h(rems_from_px(30.))
+                                    .px(rems_from_px(8.))
                                     .items_center()
                                     .rounded(inner_radius)
-                                    .text_size(px(13.))
+                                    .text_size(rems_from_px(13.))
                                     .text_color(fg)
                                     .cursor_pointer()
                                     .hover(move |s| s.bg(list_hover))
@@ -1233,7 +1244,7 @@ impl Render for ServerFormView {
                 };
 
                 v_flex()
-                    .gap(px(6.))
+                    .gap(rems_from_px(6.))
                     .child(field_label("SSH key", cx))
                     .child(dropdown_trigger(
                         "key-dropdown-btn",
@@ -1259,24 +1270,28 @@ impl Render for ServerFormView {
                         )
                     })
                     .child(
-                        h_flex().child(
-                            Button::new("add-new-key-link")
-                                .ghost()
-                                .small()
-                                .icon(IconName::Plus)
-                                .child("New key")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.form_state = FormState::AddingKey;
-                                    this.addkey_error = None;
-                                    cx.notify();
-                                })),
-                        ),
+                        h_flex()
+                            .child(
+                                Button::new("add-new-key-link")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Plus)
+                                    .child("New key")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.form_state = FormState::AddingKey;
+                                        this.addkey_error = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when_some(export_target, |row, (host, key)| {
+                                row.child(export_key_button(host, key, cx))
+                            }),
                     )
                     .into_any_element()
             }
 
             AuthMode::Agent => div()
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(muted_fg)
                 .child(if cfg!(windows) {
                     "Keys are provided by the system SSH agent. The \
@@ -1308,23 +1323,23 @@ impl Render for ServerFormView {
         // User @ host : port, the order ssh writes it in. A pasted
         // `user@host:port` in the host field is split across the three.
         let address_row = h_flex()
-            .gap(px(8.))
+            .gap(rems_from_px(8.))
             .items_end()
             .child(
                 labeled("User", cx, Input::new(&self.user_input))
-                    .w(px(150.))
+                    .w(rems_from_px(150.))
                     .flex_shrink(1.),
             )
             .child(address_separator("@"))
             .child(
                 labeled("Host", cx, Input::new(&self.host_input))
                     .flex_1()
-                    .min_w(px(120.)),
+                    .min_w(rems_from_px(120.)),
             )
             .child(address_separator(":"))
             .child(
                 labeled("Port", cx, Input::new(&self.port_input))
-                    .w(px(76.))
+                    .w(rems_from_px(76.))
                     .flex_none(),
             );
 
@@ -1333,8 +1348,8 @@ impl Render for ServerFormView {
         let advanced_toggle = h_flex()
             .id("advanced-toggle")
             .w_full()
-            .h(px(32.))
-            .gap(px(8.))
+            .h(rems_from_px(32.))
+            .gap(rems_from_px(8.))
             .items_center()
             .cursor_pointer()
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1348,16 +1363,19 @@ impl Render for ServerFormView {
                 } else {
                     IconName::ChevronRight
                 })
-                .size(px(14.))
+                .size(rems_from_px(14.))
                 .text_color(muted_fg),
             )
-            .child(section_title("Advanced", cx))
+            .child(div().flex_none().child(section_title(
+                "Advanced: jump host, port forwarding, startup",
+                cx,
+            )))
             .when(!is_advanced_open, |el| {
                 el.child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(crate::theme::text_dim())
                         .child(advanced_summary),
                 )
@@ -1371,20 +1389,20 @@ impl Render for ServerFormView {
             // An open panel stays where its field was and is not clipped by
             // the dialog, so it closes rather than float over the header.
             .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_dropdowns(cx)))
-            .px(px(16.))
-            .pt(px(4.))
-            .pb(px(16.))
-            .gap(px(20.))
+            .px(rems_from_px(16.))
+            .pt(rems_from_px(4.))
+            .pb(rems_from_px(16.))
+            .gap(rems_from_px(20.))
             .child(
                 v_flex()
-                    .gap(px(12.))
+                    .gap(rems_from_px(12.))
                     .child(section_title("Connection", cx))
                     .child(address_row)
                     .child(labeled("Name", cx, Input::new(&self.name_input))),
             )
             .child(
                 v_flex()
-                    .gap(px(12.))
+                    .gap(rems_from_px(12.))
                     .child(
                         h_flex()
                             .justify_between()
@@ -1396,36 +1414,34 @@ impl Render for ServerFormView {
             )
             .child(
                 v_flex()
-                    .gap(px(12.))
+                    .gap(rems_from_px(12.))
                     .child(section_title("Organize", cx))
                     .child(
                         h_flex()
-                            .gap(px(12.))
+                            .gap(rems_from_px(12.))
                             .items_start()
                             .child(group_field.flex_1().min_w_0())
                             .child(tags_field.flex_1().min_w_0()),
                     ),
             )
-            .child(
-                v_flex()
-                    .gap(px(12.))
-                    .child(advanced_toggle)
-                    .when(is_advanced_open, |el| {
-                        el.child(
-                            h_flex()
-                                .gap(px(12.))
-                                .items_start()
-                                .child(div().flex_1().min_w_0().child(jump_field))
-                                .child(div().flex_1().min_w_0().child(startup_field)),
-                        )
-                        .when(self.startup == Startup::Command, |el| {
-                            el.child(self.render_startup_command(cx))
-                        })
-                        .child(self.render_proxy_command(cx))
-                        .child(self.render_agent_forwarding(cx))
-                        .child(self.render_forwards_section(cx))
-                    }),
-            );
+            .child(v_flex().gap(rems_from_px(12.)).child(advanced_toggle).when(
+                is_advanced_open,
+                |el| {
+                    el.child(
+                        h_flex()
+                            .gap(rems_from_px(12.))
+                            .items_start()
+                            .child(div().flex_1().min_w_0().child(jump_field))
+                            .child(div().flex_1().min_w_0().child(startup_field)),
+                    )
+                    .when(self.startup == Startup::Command, |el| {
+                        el.child(self.render_startup_command(cx))
+                    })
+                    .child(self.render_proxy_command(cx))
+                    .child(self.render_agent_forwarding(cx))
+                    .child(self.render_forwards_section(cx))
+                },
+            ));
 
         let footer_note = footer_message.or_else(|| {
             self.missing_hint(cx)
@@ -1435,40 +1451,45 @@ impl Render for ServerFormView {
         v_flex()
             .max_h(dialog_max_height(window))
             .child(
-                div().flex_none().px(px(16.)).pt(px(14.)).pb(px(12.)).child(
-                    DialogHeader::new().child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(fg)
-                            .child(if is_edit { "Edit host" } else { "New host" }),
+                div()
+                    .flex_none()
+                    .px(rems_from_px(16.))
+                    .pt(rems_from_px(14.))
+                    .pb(rems_from_px(12.))
+                    .child(
+                        DialogHeader::new().child(
+                            div()
+                                .text_size(rems_from_px(15.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(fg)
+                                .child(if is_edit { "Edit host" } else { "New host" }),
+                        ),
                     ),
-                ),
             )
             .child(fields)
             .child(
                 // TODO security: input widget internals not zeroizable, see SECURITY.md
                 h_flex()
                     .flex_none()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .justify_between()
                     .items_center()
-                    .px(px(16.))
-                    .py(px(12.))
+                    .px(rems_from_px(16.))
+                    .py(rems_from_px(12.))
                     .border_t_1()
                     .border_color(crate::theme::border())
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .when_some(footer_note, |el, (msg, color)| {
                                 el.text_color(color).child(msg)
                             }),
                     )
                     .child(
                         h_flex()
-                            .gap(px(8.))
+                            .gap(rems_from_px(8.))
                             .child(Button::new("form-cancel").ghost().child("Cancel").on_click(
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(FormEvent::Cancelled);
@@ -1701,7 +1722,7 @@ impl ServerFormView {
                 .into_any_element()
         } else {
             Textarea::new(&self.addkey_paste)
-                .h(px(120.))
+                .h(rems_from_px(120.))
                 .into_any_element()
         };
 
@@ -1709,8 +1730,8 @@ impl ServerFormView {
             .id("addkey-form")
             .max_h(dialog_max_height(window))
             .overflow_y_scroll()
-            .p(px(16.))
-            .gap(px(8.))
+            .p(rems_from_px(16.))
+            .gap(rems_from_px(8.))
             .child(
                 h_flex()
                     .items_center()
@@ -1977,7 +1998,7 @@ impl ServerFormView {
         let jump_trigger: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
         let jump_field = v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .child(field_label("Jump host", cx))
             .child(dropdown_trigger(
                 "jump-dropdown-btn",
@@ -2091,7 +2112,7 @@ impl ServerFormView {
         let trigger: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
         let field = v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .child(field_label("Run on connect", cx))
             .child(dropdown_trigger(
                 "startup-dropdown-btn",
@@ -2183,8 +2204,8 @@ impl ServerFormView {
     /// The command box under the run-on-connect field.
     fn render_startup_command(&self, cx: &Context<Self>) -> impl IntoElement {
         v_flex()
-            .gap(px(6.))
-            .child(Textarea::new(&self.startup_command).h(px(76.)))
+            .gap(rems_from_px(6.))
+            .child(Textarea::new(&self.startup_command).h(rems_from_px(76.)))
             .child(
                 div()
                     .text_xs()
@@ -2202,7 +2223,7 @@ impl ServerFormView {
         let fg = theme.foreground;
         let muted_fg = theme.muted_foreground;
         let count = self.forwards.len();
-        let inner_radius = px(8.);
+        let inner_radius = rems_from_px(8.);
 
         let rows = self.forwards.iter().enumerate().map(|(index, forward)| {
             let route = forward.spec().route_label();
@@ -2211,10 +2232,10 @@ impl ServerFormView {
             h_flex()
                 .id(("forward-row", index))
                 .relative()
-                .h(px(48.))
+                .h(rems_from_px(48.))
                 .items_center()
-                .gap(px(10.))
-                .px(px(12.))
+                .gap(rems_from_px(10.))
+                .px(rems_from_px(12.))
                 .when(is_first, |row| row.rounded_t(inner_radius))
                 .when(is_last, |row| row.rounded_b(inner_radius))
                 .hover(|s| s.bg(crate::theme::field()))
@@ -2223,7 +2244,7 @@ impl ServerFormView {
                         div()
                             .absolute()
                             .top_0()
-                            .left(px(12.))
+                            .left(rems_from_px(12.))
                             .right_0()
                             .h(px(1.))
                             .bg(crate::theme::border()),
@@ -2234,14 +2255,14 @@ impl ServerFormView {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(2.))
+                        .gap(rems_from_px(2.))
                         .child(
                             h_flex()
-                                .gap(px(6.))
+                                .gap(rems_from_px(6.))
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_size(px(13.))
+                                        .text_size(rems_from_px(13.))
                                         .text_color(fg)
                                         .truncate()
                                         .child(SharedString::from(forward.name.clone())),
@@ -2249,7 +2270,7 @@ impl ServerFormView {
                                 .when(!is_loopback_bind(&forward.bind_address), |el| {
                                     el.child(
                                         div()
-                                            .text_size(px(11.5))
+                                            .text_size(rems_from_px(11.5))
                                             .text_color(crate::theme::warning())
                                             .child("public"),
                                     )
@@ -2257,7 +2278,7 @@ impl ServerFormView {
                                 .when(forward.auto_start, |el| {
                                     el.child(
                                         div()
-                                            .text_size(px(11.5))
+                                            .text_size(rems_from_px(11.5))
                                             .text_color(muted_fg)
                                             .child("auto"),
                                     )
@@ -2266,7 +2287,7 @@ impl ServerFormView {
                         .child(
                             div()
                                 .font_family(crate::theme::MONO_FONT)
-                                .text_size(px(11.5))
+                                .text_size(rems_from_px(11.5))
                                 .text_color(crate::theme::text_dim())
                                 .truncate()
                                 .child(SharedString::from(route)),
@@ -2293,7 +2314,7 @@ impl ServerFormView {
         });
 
         v_flex()
-            .gap(px(6.))
+            .gap(rems_from_px(6.))
             .child(
                 h_flex()
                     .justify_between()
@@ -2313,7 +2334,7 @@ impl ServerFormView {
             .when(count > 0, |el| {
                 el.child(
                     v_flex()
-                        .rounded(px(9.))
+                        .rounded(rems_from_px(9.))
                         .border_1()
                         .border_color(crate::theme::border())
                         .bg(crate::theme::card())
@@ -2323,7 +2344,7 @@ impl ServerFormView {
             .when(count == 0, |el| {
                 el.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(crate::theme::text_dim())
                         .child("None. A forward opens a port here or on the host through this connection."),
                 )
@@ -2395,8 +2416,8 @@ impl ServerFormView {
             .id("forward-form")
             .max_h(dialog_max_height(window))
             .overflow_y_scroll()
-            .p(px(16.))
-            .gap(px(8.))
+            .p(rems_from_px(16.))
+            .gap(rems_from_px(8.))
             .child(
                 h_flex()
                     .items_center()
@@ -2447,7 +2468,7 @@ impl ServerFormView {
             )
             .child(
                 v_flex()
-                    .w(px(80.))
+                    .w(rems_from_px(80.))
                     .gap_1()
                     .child(field_label("Port", cx))
                     .child(Input::new(&self.forward_bind_port)),
@@ -2472,7 +2493,7 @@ impl ServerFormView {
                         )
                         .child(
                             v_flex()
-                                .w(px(80.))
+                                .w(rems_from_px(80.))
                                 .gap_1()
                                 .child(field_label("Port", cx))
                                 .child(Input::new(&self.forward_target_port)),
@@ -2597,15 +2618,15 @@ fn forward_kind_pill(kind: ForwardKind, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .flex_none()
-        .h(px(16.))
-        .px(px(5.))
+        .h(rems_from_px(16.))
+        .px(rems_from_px(5.))
         .flex()
         .items_center()
-        .rounded(px(3.))
+        .rounded(rems_from_px(3.))
         .bg(theme.input)
         .border_1()
         .border_color(theme.title_bar_border)
-        .text_size(px(10.))
+        .text_size(rems_from_px(10.))
         .text_color(theme.foreground)
         .child(kind.display_label())
 }
@@ -2631,7 +2652,7 @@ fn strip_whitespace(s: &str) -> String {
 
 fn field_label(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_size(px(12.))
+        .text_size(rems_from_px(12.))
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }
@@ -2641,7 +2662,7 @@ const COMMAND_OPTION: &str = "Command for this host";
 /// A field with its label above it.
 fn labeled(label: &'static str, cx: &App, field: impl IntoElement) -> gpui::Div {
     v_flex()
-        .gap(px(6.))
+        .gap(rems_from_px(6.))
         .child(field_label(label, cx))
         .child(field)
 }
@@ -2649,16 +2670,29 @@ fn labeled(label: &'static str, cx: &App, field: impl IntoElement) -> gpui::Div 
 /// Title of a view that takes the form's place, after its Back button.
 fn sub_view_title(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_size(px(15.))
+        .text_size(rems_from_px(15.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(cx.theme().foreground)
         .child(text)
 }
 
+/// Kept beside the form: until it is saved, the host still signs in the old way.
+fn export_key_button(host: Uuid, key: Uuid, cx: &mut Context<ServerFormView>) -> Button {
+    Button::new("export-key-to-host")
+        .ghost()
+        .small()
+        .icon(Icon::empty().path("icons/key-round.svg"))
+        .child("Export to this host")
+        .tooltip("Sign in with the host's saved login and add this key to ~/.ssh/authorized_keys")
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.emit(FormEvent::ExportKeyToHost { host, key });
+        }))
+}
+
 /// Heading of one part of the form.
 fn section_title(text: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(cx.theme().foreground)
         .child(text)
@@ -2668,10 +2702,10 @@ fn section_title(text: &'static str, cx: &App) -> impl IntoElement {
 fn address_separator(text: &'static str) -> impl IntoElement {
     div()
         .flex_none()
-        .h(px(32.))
+        .h(rems_from_px(32.))
         .flex()
         .items_center()
-        .text_size(px(14.))
+        .text_size(rems_from_px(14.))
         .text_color(crate::theme::text_dim())
         .child(text)
 }
@@ -2687,9 +2721,9 @@ fn segmented<T: Copy + PartialEq + 'static>(
     let fg = cx.theme().foreground;
     h_flex()
         .flex_none()
-        .p(px(2.))
-        .gap(px(2.))
-        .rounded(px(7.))
+        .p(rems_from_px(2.))
+        .gap(rems_from_px(2.))
+        .rounded(rems_from_px(7.))
         .bg(crate::theme::field())
         .children(options.iter().enumerate().map(|(ix, &(value, label))| {
             let is_selected = value == selected;
@@ -2699,15 +2733,15 @@ fn segmented<T: Copy + PartialEq + 'static>(
                 // A tab stop: Enter or Space on it picks it, like a radio.
                 .focusable()
                 .tab_stop(true)
-                .h(px(26.))
-                .px(px(12.))
+                .h(rems_from_px(26.))
+                .px(rems_from_px(12.))
                 .flex()
                 .items_center()
-                .rounded(px(5.))
+                .rounded(rems_from_px(5.))
                 .border_1()
                 .border_color(gpui::transparent_black())
                 .focus_visible(|s| s.border_color(crate::theme::accent()))
-                .text_size(px(12.5))
+                .text_size(rems_from_px(12.5))
                 .cursor_pointer()
                 .when(is_selected, |el| {
                     el.bg(crate::theme::element()).text_color(fg)
@@ -2777,14 +2811,14 @@ fn dropdown_trigger(
         .h_8()
         .flex()
         .items_center()
-        .px(px(10.))
-        .rounded(px(7.))
+        .px(rems_from_px(10.))
+        .rounded(rems_from_px(7.))
         .border_1()
         .border_color(crate::theme::border())
         .bg(crate::theme::field())
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::element_hover()))
-        .text_size(px(13.))
+        .text_size(rems_from_px(13.))
         .text_color(label_color)
         .on_mouse_down(
             MouseButton::Left,
@@ -2799,7 +2833,7 @@ fn dropdown_trigger(
                 .child(div().min_w_0().truncate().child(label))
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                        .size(rems_from_px(14.))
                         .text_color(muted_fg),
                 ),
         )
@@ -2816,12 +2850,12 @@ fn dropdown_option(
 ) -> AnyElement {
     div()
         .id(id)
-        .h(px(30.))
+        .h(rems_from_px(30.))
         .flex()
         .items_center()
-        .px(px(8.))
-        .rounded(px(6.))
-        .text_size(px(13.))
+        .px(rems_from_px(8.))
+        .rounded(rems_from_px(6.))
+        .text_size(rems_from_px(13.))
         .truncate()
         .text_color(color)
         .cursor_pointer()
@@ -2854,6 +2888,7 @@ fn dropdown_panel(
         anchor: Anchor::TopLeft,
         anchor_point: anchor.clone(),
         margin: px(8.),
+        flip_x: None,
         child: div()
             .id(id)
             .occlude()
@@ -2869,12 +2904,12 @@ fn dropdown_panel(
             .bg(crate::theme::pop_surface())
             .border_1()
             .border_color(crate::theme::float_border())
-            .rounded(px(9.))
+            .rounded(rems_from_px(9.))
             .shadow(crate::ui::modal_shadow())
-            .p(px(4.))
-            .min_w(px(220.))
-            .max_w(px(360.))
-            .max_h(px(260.))
+            .p(rems_from_px(4.))
+            .min_w(rems_from_px(220.))
+            .max_w(rems_from_px(360.))
+            .max_h(rems_from_px(260.))
             .overflow_y_scroll()
             .children(items)
             .into_any_element(),

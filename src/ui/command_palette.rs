@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    actions, div, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, KeyBinding, MouseButton, ScrollHandle, SharedString, Window,
 };
 use gpui_component::{
@@ -15,9 +15,8 @@ use crate::ssh_target::{find_saved_host, find_saved_host_by_name, parse_ssh_targ
 use crate::theme as flint_theme;
 use crate::ui::file_pane::{self, PaneKind};
 use crate::ui::host_icon::host_icon;
-use crate::ui::terminal_tabs::{
-    NEW_TERMINAL_SHORTCUT, SERVER_PANEL_SHORTCUT, TOGGLE_FILES_SHORTCUT,
-};
+use crate::ui::keymap;
+use crate::ui::rems_from_px;
 use crate::ui::VaultState;
 use crate::vault::{ServerEntrySummary, Snippet};
 
@@ -75,6 +74,7 @@ pub enum PaletteCommand {
     OpenLocalTerminal,
     ToggleSplit,
     LocalTerminalBeside,
+    SwapPanes,
 }
 
 struct CommandSpec {
@@ -83,27 +83,19 @@ struct CommandSpec {
     /// Extra words the search matches; never shown.
     keywords: &'static str,
     note: &'static str,
+    /// The `keymap` command whose chord the row shows.
     shortcut: Option<&'static str>,
     /// Only listed while a session tab is active.
     needs_session: bool,
 }
 
-const fn chord(mac: &'static str, other: &'static str) -> &'static str {
-    if cfg!(target_os = "macos") {
-        mac
-    } else {
-        other
-    }
-}
-
-/// Shortcuts here must track the bindings in `app_view::init`.
-const COMMANDS: [CommandSpec; 18] = [
+const COMMANDS: [CommandSpec; 19] = [
     CommandSpec {
         command: PaletteCommand::OpenLocalTerminal,
         label: "Local terminal",
         keywords: "this computer shell zsh bash mac laptop new tab",
         note: "",
-        shortcut: Some(crate::ui::app_view::LOCAL_TERMINAL_SHORTCUT),
+        shortcut: Some("tabs.local_terminal"),
         needs_session: false,
     },
     CommandSpec {
@@ -111,7 +103,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "New host",
         keywords: "add server connection",
         note: "",
-        shortcut: Some(chord("\u{2318}T", "Ctrl+Shift+T")),
+        shortcut: Some("app.new_host"),
         needs_session: false,
     },
     CommandSpec {
@@ -127,7 +119,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Settings",
         keywords: "preferences options",
         note: "",
-        shortcut: Some(chord("\u{2318},", "Ctrl+,")),
+        shortcut: Some("app.settings"),
         needs_session: false,
     },
     CommandSpec {
@@ -135,7 +127,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Lock vault",
         keywords: "hide secure",
         note: "sessions stay connected",
-        shortcut: Some(crate::ui::app_view::LOCK_SHORTCUT),
+        shortcut: Some("app.lock"),
         needs_session: false,
     },
     CommandSpec {
@@ -167,7 +159,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Show or hide sidebar",
         keywords: "toggle hosts list panel collapse",
         note: "",
-        shortcut: Some(crate::ui::app_view::SIDEBAR_SHORTCUT),
+        shortcut: Some("app.toggle_sidebar"),
         needs_session: false,
     },
     CommandSpec {
@@ -175,7 +167,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "New terminal",
         keywords: "shell tab another second",
         note: "same connection, no new login",
-        shortcut: Some(NEW_TERMINAL_SHORTCUT),
+        shortcut: Some("tabs.new_terminal"),
         needs_session: true,
     },
     CommandSpec {
@@ -183,7 +175,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Split or join terminals",
         keywords: "pane side by side two shells",
         note: "",
-        shortcut: Some(crate::ui::terminal_tabs::SPLIT_SHORTCUT),
+        shortcut: Some("tabs.split"),
         needs_session: true,
     },
     CommandSpec {
@@ -191,7 +183,16 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Local terminal beside",
         keywords: "this computer shell mac laptop split pane side by side",
         note: "next to the server's, in the same tab",
-        shortcut: Some(crate::ui::app_view::LOCAL_BESIDE_SHORTCUT),
+        shortcut: Some("tabs.local_beside"),
+        needs_session: true,
+    },
+    // Only listed while the terminals are split; see `matching_commands`.
+    CommandSpec {
+        command: PaletteCommand::SwapPanes,
+        label: "Swap panes",
+        keywords: "split left right side switch move local",
+        note: "left and right terminals change places",
+        shortcut: None,
         needs_session: true,
     },
     CommandSpec {
@@ -199,7 +200,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Show or hide files",
         keywords: "toggle sftp panes browser full height terminal",
         note: "",
-        shortcut: Some(TOGGLE_FILES_SHORTCUT),
+        shortcut: Some("tabs.toggle_files"),
         needs_session: true,
     },
     CommandSpec {
@@ -207,7 +208,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Show or hide server panel",
         keywords: "inspector metrics cpu memory disk monitor stats",
         note: "",
-        shortcut: Some(SERVER_PANEL_SHORTCUT),
+        shortcut: Some("tabs.server_panel"),
         needs_session: true,
     },
     CommandSpec {
@@ -215,7 +216,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Focus files",
         keywords: "sftp panes browser keyboard",
         note: "the same key goes back to the terminal",
-        shortcut: Some(chord("\u{21E7}\u{2318}E", "Ctrl+Shift+E")),
+        shortcut: Some("tabs.focus_files"),
         needs_session: true,
     },
     CommandSpec {
@@ -231,7 +232,7 @@ const COMMANDS: [CommandSpec; 18] = [
         label: "Close session",
         keywords: "tab disconnect",
         note: "",
-        shortcut: Some(chord("\u{2318}W", "Ctrl+Shift+W")),
+        shortcut: Some("tabs.close"),
         needs_session: true,
     },
     CommandSpec {
@@ -256,7 +257,7 @@ enum Mode {
     /// "Choose what the left file pane shows": this computer, then the hosts
     /// other than the session's own.
     PickLeftSource { session_server_id: Uuid },
-    /// "Choose a host to add `key_name` to": only hosts listed.
+    /// "Choose a host to export `key_name` to": only hosts listed.
     PickHostForKey { key_name: String },
 }
 
@@ -304,6 +305,7 @@ pub struct CommandPalette {
     scroll_handle: ScrollHandle,
     mode: Mode,
     has_active_server: bool,
+    is_split: bool,
     /// The server whose tab is active, if any. Snippets recently run on it are
     /// surfaced first in the list.
     active_server_id: Option<Uuid>,
@@ -319,12 +321,13 @@ impl CommandPalette {
     pub fn new(
         vault_state: Entity<VaultState>,
         has_active_server: bool,
+        is_split: bool,
         active_server_id: Option<Uuid>,
         connected_server_ids: std::collections::HashSet<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_mode(
+        let palette = Self::with_mode(
             vault_state,
             Mode::Main,
             "Search hosts, snippets, commands, or type user@host\u{2026}",
@@ -333,7 +336,11 @@ impl CommandPalette {
             connected_server_ids,
             window,
             cx,
-        )
+        );
+        Self {
+            is_split,
+            ..palette
+        }
     }
 
     /// A palette that only picks what the left file pane of the session on
@@ -410,6 +417,7 @@ impl CommandPalette {
             scroll_handle: ScrollHandle::new(),
             mode,
             has_active_server,
+            is_split: false,
             active_server_id,
             connected_server_ids,
             shown_count: 0,
@@ -587,7 +595,11 @@ impl CommandPalette {
                     sections.push((SharedString::from("Snippets"), items.len()));
                     items.extend(others.into_iter().map(snippet_to_item));
                 }
-                let commands = matching_commands(&self.query(cx), self.active_server_id.is_some());
+                let commands = matching_commands(
+                    &self.query(cx),
+                    self.active_server_id.is_some(),
+                    self.is_split,
+                );
                 if !commands.is_empty() {
                     sections.push((SharedString::from("Commands"), items.len()));
                     items.extend(commands.into_iter().map(PaletteItem::Command));
@@ -768,7 +780,7 @@ impl Render for CommandPalette {
                 Some(("Choose what the left file pane shows".to_string(), None))
             }
             Mode::PickHostForKey { key_name } => Some((
-                format!("Choose a host to add \u{201C}{key_name}\u{201D} to"),
+                format!("Choose a host to export \u{201C}{key_name}\u{201D} to"),
                 None,
             )),
             Mode::Main => None,
@@ -776,12 +788,12 @@ impl Render for CommandPalette {
         let banner: Option<AnyElement> = banner_text.map(|(text, escape_hint)| {
             h_flex()
                 .items_center()
-                .gap(px(6.))
-                .h(px(32.))
-                .px(px(14.))
+                .gap(rems_from_px(6.))
+                .h(rems_from_px(32.))
+                .px(rems_from_px(14.))
                 .border_b_1()
                 .border_color(border)
-                .text_size(px(12.))
+                .text_size(rems_from_px(12.))
                 .text_color(text_muted)
                 .child(div().child(text))
                 .child(div().flex_1())
@@ -798,12 +810,12 @@ impl Render for CommandPalette {
                 let label = sections[next_section].0.clone();
                 body_rows.push(
                     div()
-                        .h(px(28.))
+                        .h(rems_from_px(28.))
                         .flex()
                         .items_end()
-                        .pb(px(5.))
-                        .px(px(8.))
-                        .text_size(px(11.5))
+                        .pb(rems_from_px(5.))
+                        .px(rems_from_px(8.))
+                        .text_size(rems_from_px(11.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(flint_theme::text_dim())
                         .child(label)
@@ -819,11 +831,11 @@ impl Render for CommandPalette {
         let body: AnyElement = if empty {
             let q = self.search.read(cx).value().to_string();
             div()
-                .h(px(44.))
+                .h(rems_from_px(44.))
                 .flex()
                 .items_center()
-                .px(px(16.))
-                .text_size(px(13.))
+                .px(rems_from_px(16.))
+                .text_size(rems_from_px(13.))
                 .text_color(flint_theme::text_dim())
                 .child(if q.is_empty() {
                     "No saved hosts".to_string()
@@ -836,9 +848,9 @@ impl Render for CommandPalette {
                 .id("palette-list")
                 .track_scroll(&self.scroll_handle)
                 .overflow_y_scroll()
-                .max_h(px(380.))
-                .pb(px(6.))
-                .px(px(6.))
+                .max_h(rems_from_px(380.))
+                .pb(rems_from_px(6.))
+                .px(rems_from_px(6.))
                 .children(body_rows)
                 .into_any_element()
         };
@@ -859,19 +871,19 @@ impl Render for CommandPalette {
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(64.))
+            .pt(rems_from_px(64.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(CommandPaletteEvent::Close)),
             )
             .child(
                 v_flex()
-                    .w(px(600.))
-                    .max_w(px(600.))
+                    .w(rems_from_px(600.))
+                    .max_w(rems_from_px(600.))
                     .bg(bg_float)
                     .border_1()
                     .border_color(border_focused)
-                    .rounded(px(12.))
+                    .rounded(rems_from_px(12.))
                     .shadow(crate::ui::modal_shadow())
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -879,14 +891,14 @@ impl Render for CommandPalette {
                     .child(
                         h_flex()
                             .items_center()
-                            .h(px(48.))
-                            .gap(px(10.))
-                            .px(px(16.))
+                            .h(rems_from_px(48.))
+                            .gap(rems_from_px(10.))
+                            .px(rems_from_px(16.))
                             .border_b_1()
                             .border_color(border)
                             .child(
                                 Icon::new(IconName::Search)
-                                    .size(px(16.))
+                                    .size(rems_from_px(16.))
                                     .text_color(text_muted),
                             )
                             .child(
@@ -983,10 +995,15 @@ pub(crate) fn host_matches(entry: &ServerEntrySummary, query: &str) -> bool {
 
 /// Commands whose label or keywords contain every word of the lowercased
 /// query. Word by word, so "theme dark" finds "Theme: Dark" despite the colon.
-fn matching_commands(query: &str, has_session_tab: bool) -> Vec<&'static CommandSpec> {
+fn matching_commands(
+    query: &str,
+    has_session_tab: bool,
+    is_split: bool,
+) -> Vec<&'static CommandSpec> {
     COMMANDS
         .iter()
         .filter(|spec| has_session_tab || !spec.needs_session)
+        .filter(|spec| is_split || spec.command != PaletteCommand::SwapPanes)
         .filter(|spec| {
             let hay = format!("{} {}", spec.label.to_lowercase(), spec.keywords);
             query.split_whitespace().all(|word| hay.contains(word))
@@ -1045,7 +1062,9 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::NewTerminal
         | PaletteCommand::OpenLocalTerminal
         | PaletteCommand::LocalTerminalBeside => IconName::SquareTerminal,
-        PaletteCommand::ToggleSplit => return Icon::empty().path("icons/panel-right.svg"),
+        PaletteCommand::ToggleSplit | PaletteCommand::SwapPanes => {
+            return Icon::empty().path("icons/panel-right.svg")
+        }
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
         | PaletteCommand::ChooseLeftSource => IconName::FolderOpen,
@@ -1090,11 +1109,11 @@ fn render_palette_row(
 ) -> AnyElement {
     let row = h_flex()
         .id(("palette-row", ix))
-        .h(px(36.))
+        .h(rems_from_px(36.))
         .items_center()
-        .gap(px(10.))
-        .px(px(8.))
-        .rounded(px(7.))
+        .gap(rems_from_px(10.))
+        .px(rems_from_px(8.))
+        .rounded(rems_from_px(7.))
         .cursor_pointer()
         .when(is_selected, |el| el.bg(flint_theme::accent_soft()))
         .when(!is_selected, |el| el.hover(|s| s.bg(flint_theme::field())))
@@ -1113,7 +1132,7 @@ fn render_palette_row(
         SharedString,
         SharedString,
         bool,
-        Option<&'static str>,
+        Option<SharedString>,
     ) = match item {
         PaletteItem::Connect(connect) => (
             lead_icon(Icon::new(IconName::ArrowRight), flint_theme::accent()),
@@ -1164,7 +1183,7 @@ fn render_palette_row(
                 spec.label.into(),
                 note.into(),
                 false,
-                spec.shortcut,
+                spec.shortcut.and_then(|id| keymap::label(id, cx)),
             )
         }
     };
@@ -1175,12 +1194,12 @@ fn render_palette_row(
                 .flex_1()
                 .min_w_0()
                 .items_baseline()
-                .gap(px(10.))
+                .gap(rems_from_px(10.))
                 .child(
                     div()
                         .flex_shrink_0()
-                        .max_w(px(320.))
-                        .text_size(px(13.))
+                        .max_w(rems_from_px(320.))
+                        .text_size(rems_from_px(13.))
                         .text_color(cx.theme().foreground)
                         .truncate()
                         .child(title),
@@ -1189,7 +1208,7 @@ fn render_palette_row(
                     el.child(
                         div()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(rems_from_px(12.))
                             .text_color(flint_theme::text_dim())
                             .when(is_note_mono, |el| el.font_family(flint_theme::MONO_FONT))
                             .truncate()
@@ -1197,11 +1216,11 @@ fn render_palette_row(
                     )
                 }),
         )
-        .when_some(shortcut, |el, shortcut| el.child(key_cap(shortcut)))
         // What Enter does is shown on the row it would act on.
         .when(is_selected && shortcut.is_none(), |el| {
             el.child(key_cap("\u{21B5}"))
         })
+        .when_some(shortcut, |el, shortcut| el.child(key_cap(shortcut)))
         .into_any_element()
 }
 
@@ -1209,27 +1228,27 @@ fn render_palette_row(
 fn lead_icon(icon: Icon, color: gpui::Hsla) -> AnyElement {
     div()
         .flex_none()
-        .size(px(LEAD_SIZE))
+        .size(rems_from_px(LEAD_SIZE))
         .flex()
         .items_center()
         .justify_center()
-        .child(icon.size(px(15.)).text_color(color))
+        .child(icon.size(rems_from_px(15.)).text_color(color))
         .into_any_element()
 }
 
 /// A key or a chord, drawn as a small key cap.
-fn key_cap(keys: &'static str) -> impl IntoElement {
+fn key_cap(keys: impl Into<SharedString>) -> impl IntoElement {
     div()
         .flex_none()
-        .h(px(20.))
-        .px(px(6.))
+        .h(rems_from_px(20.))
+        .px(rems_from_px(6.))
         .flex()
         .items_center()
-        .rounded(px(5.))
+        .rounded(rems_from_px(5.))
         .bg(flint_theme::field())
-        .text_size(px(11.))
+        .text_size(rems_from_px(11.))
         .text_color(flint_theme::text_dim())
-        .child(keys)
+        .child(keys.into())
 }
 
 #[cfg(test)]
@@ -1296,8 +1315,17 @@ mod tests {
         assert!(connect_row_for(target, &[], None).is_none());
     }
 
+    #[test]
+    fn every_shortcut_is_a_keymap_command() {
+        for spec in &COMMANDS {
+            if let Some(id) = spec.shortcut {
+                assert!(keymap::command(id).is_some(), "{id}");
+            }
+        }
+    }
+
     fn command_labels(query: &str, has_session_tab: bool) -> Vec<&'static str> {
-        matching_commands(query, has_session_tab)
+        matching_commands(query, has_session_tab, false)
             .iter()
             .map(|spec| spec.label)
             .collect()
@@ -1355,7 +1383,19 @@ mod tests {
             ["Show or hide files", "Focus files"]
         );
         assert_eq!(command_labels("", false).len(), 9);
-        assert_eq!(command_labels("", true).len(), COMMANDS.len());
+        assert_eq!(command_labels("", true).len(), COMMANDS.len() - 1);
+    }
+
+    #[test]
+    fn swap_panes_is_listed_only_while_split() {
+        let labels = |is_split| -> Vec<&str> {
+            matching_commands("swap", true, is_split)
+                .iter()
+                .map(|spec| spec.label)
+                .collect()
+        };
+        assert!(labels(false).is_empty());
+        assert_eq!(labels(true), ["Swap panes"]);
     }
 
     fn host_row(label: &str) -> HostRow {

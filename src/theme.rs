@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 use gpui::{px, App, Hsla, Window, WindowAppearance};
 use gpui_component::theme::{Theme, ThemeMode, ThemeTokens};
 
-use crate::preferences::ThemePreference;
+use crate::preferences::{Preferences, ThemePreference};
 
 /// One complete set of app colours. `DARK` and `LIGHT` are the only instances.
 struct Palette {
@@ -274,6 +274,73 @@ static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
 
 static IS_LIGHT: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
+/// The auto interface scale of the display the window is on, as `f32` bits.
+static AUTO_UI_SCALE: AtomicU32 = AtomicU32::new(0x3F80_0000);
+
+/// The rem at 100%. Every `rems_from_px` value is relative to it.
+pub const UI_REM_BASE: f32 = 14.;
+
+/// No platform gives the panel size in mm, so this goes by logical width: a 27"
+/// at 1440p is as dense as a laptop but sits farther away.
+pub fn auto_ui_scale(display_width: f32) -> f32 {
+    if display_width >= 2400. {
+        1.2
+    } else {
+        1.0
+    }
+}
+
+pub fn ui_scale(cx: &App) -> f32 {
+    Preferences::ui_scale(cx).unwrap_or_else(auto_ui_scale_now)
+}
+
+pub fn auto_ui_scale_now() -> f32 {
+    f32::from_bits(AUTO_UI_SCALE.load(Ordering::Relaxed))
+}
+
+/// Re-reads the window's display. Runs on open and on every move or resize.
+pub fn sync_ui_scale(window: &Window, cx: &mut App) {
+    let Some(display) = window.display(cx) else {
+        return;
+    };
+    let auto = auto_ui_scale(display.bounds().size.width.into());
+    if AUTO_UI_SCALE.swap(auto.to_bits(), Ordering::Relaxed) == auto.to_bits() {
+        return;
+    }
+    apply_ui_scale(cx);
+}
+
+/// The fixed sizes the settings chips and the zoom shortcuts step through.
+pub const UI_SCALE_STEPS: [f32; 5] = [0.9, 1.0, 1.1, 1.25, 1.5];
+
+/// The next step up or down from `current`, which may sit between steps (auto).
+fn next_ui_scale_step(current: f32, is_up: bool) -> f32 {
+    let next = if is_up {
+        UI_SCALE_STEPS.iter().find(|step| **step > current + 0.001)
+    } else {
+        UI_SCALE_STEPS
+            .iter()
+            .rev()
+            .find(|step| **step < current - 0.001)
+    };
+    next.copied().unwrap_or(current)
+}
+
+pub fn step_ui_scale(is_up: bool, cx: &mut App) {
+    let next = next_ui_scale_step(ui_scale(cx), is_up);
+    set_ui_scale(Some(next), cx);
+}
+
+pub fn set_ui_scale(scale: Option<f32>, cx: &mut App) {
+    Preferences::update(cx, |prefs| prefs.ui_scale = scale);
+    apply_ui_scale(cx);
+}
+
+pub fn apply_ui_scale(cx: &mut App) {
+    let scale = ui_scale(cx);
+    Theme::global_mut(cx).font_size = px(UI_REM_BASE * scale);
+    cx.refresh_windows();
+}
 
 /// A relaxed atomic load costs nothing on the render path, and unlike a
 /// `thread_local!` it hands a background thread a complete palette rather than
@@ -538,6 +605,7 @@ pub fn apply_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
 #[rustfmt::skip]
 fn apply_theme(cx: &mut App) {
     let p = active();
+    let scale = ui_scale(cx);
     let t = Theme::global_mut(cx);
 
     t.font_family = UI_FONT.into();
@@ -546,7 +614,7 @@ fn apply_theme(cx: &mut App) {
     // with it. 16px puts a plain Input at 32px and `text_sm` at 14px, both a
     // size up from the rest of the chrome; 14px lands them on the 22/28px
     // ladder the hand-built rows use.
-    t.font_size = px(14.);
+    t.font_size = px(UI_REM_BASE * scale);
 
     t.background       = p.background;
     t.foreground       = p.text;
@@ -711,6 +779,22 @@ fn apply_theme(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_ui_scale_grows_only_on_wide_displays() {
+        assert_eq!(auto_ui_scale(1470.), 1.0);
+        assert_eq!(auto_ui_scale(1920.), 1.0);
+        assert_eq!(auto_ui_scale(2560.), 1.2);
+    }
+
+    #[test]
+    fn ui_scale_steps_stop_at_the_ends() {
+        assert_eq!(next_ui_scale_step(1.0, true), 1.1);
+        assert_eq!(next_ui_scale_step(1.2, true), 1.25);
+        assert_eq!(next_ui_scale_step(1.2, false), 1.1);
+        assert_eq!(next_ui_scale_step(1.5, true), 1.5);
+        assert_eq!(next_ui_scale_step(0.9, false), 0.9);
+    }
 
     /// WCAG 2.1 relative luminance.
     fn luminance(color: Hsla) -> f32 {

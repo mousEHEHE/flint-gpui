@@ -17,6 +17,7 @@ use crate::theme as flint_theme;
 use crate::ui::context_menu::{ContextMenu, ContextMenuItem};
 use crate::ui::keyboard_layout::bind_chord;
 use crate::ui::mouse_report::{encode_mouse_event, MouseButton as ReportButton, MouseEventKind};
+use crate::ui::rems_from_px;
 use crate::ui::terminal_element::{
     clamp_to_grid, pixel_to_grid, CachedGrid, ShapedLines, TerminalElement, LINE_HEIGHT_FACTOR,
 };
@@ -63,36 +64,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-end", ScrollToBottom, Some("Terminal")),
     ]);
 
-    // macOS uses Cmd for clipboard. Windows/Linux terminals use Ctrl+Shift,
-    // since plain Ctrl+C/V/A are reserved for SIGINT / literal-next / start-of-line.
+    // The rebindable chords live in `keymap`. Cmd/Ctrl+Shift+= (the "+" key)
+    // zooms too, as a fixed second chord. gpui reports it as "+" with Shift off.
     #[cfg(target_os = "macos")]
     {
-        bind_chord(cx, "cmd-v", Paste, Some("Terminal"));
-        bind_chord(cx, "cmd-c", CopySelection, Some("Terminal"));
-        bind_chord(cx, "cmd-a", SelectAll, Some("Terminal"));
-        bind_chord(cx, "cmd-=", IncreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "cmd-shift-=", IncreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "cmd--", DecreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "cmd-0", ResetFontSize, Some("Terminal"));
-        bind_chord(cx, "cmd-k", ClearScreen, Some("Terminal"));
+        bind_chord(cx, "cmd-+", IncreaseFontSize, Some("Terminal"));
         cx.bind_keys([
             KeyBinding::new("cmd-home", ScrollToTop, Some("Terminal")),
             KeyBinding::new("cmd-end", ScrollToBottom, Some("Terminal")),
         ]);
     }
-
-    // Ctrl+K is readline's kill-line, so clear takes Ctrl+Shift+K here.
     #[cfg(not(target_os = "macos"))]
-    {
-        bind_chord(cx, "ctrl-shift-v", Paste, Some("Terminal"));
-        bind_chord(cx, "ctrl-shift-c", CopySelection, Some("Terminal"));
-        bind_chord(cx, "ctrl-shift-a", SelectAll, Some("Terminal"));
-        bind_chord(cx, "ctrl-=", IncreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "ctrl-shift-=", IncreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "ctrl--", DecreaseFontSize, Some("Terminal"));
-        bind_chord(cx, "ctrl-0", ResetFontSize, Some("Terminal"));
-        bind_chord(cx, "ctrl-shift-k", ClearScreen, Some("Terminal"));
-    }
+    bind_chord(cx, "ctrl-+", IncreaseFontSize, Some("Terminal"));
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +108,8 @@ pub struct TerminalView {
     pub(crate) shell: ShellHandle,
     /// The remote file this tab was opened to edit. Its name goes on the tab.
     pub(crate) edited_file: Option<String>,
+    /// A name the user gave the tab; it wins over every default label.
+    pub(crate) title: Option<String>,
     /// A shell on this computer, also when it sits in a server's tab.
     pub(crate) is_local: bool,
     pub last_snapshot: Option<TermSnapshot>,
@@ -248,6 +233,7 @@ impl TerminalView {
             _event_task: event_task,
             shell,
             edited_file: None,
+            title: None,
             is_local: false,
             last_snapshot: None,
             snapshot_version: 0,
@@ -393,16 +379,16 @@ impl TerminalView {
         Some(
             div()
                 .absolute()
-                .bottom(px(8.))
+                .bottom(rems_from_px(8.))
                 // Clear of the scrollbar, like the search bar.
                 .right(px(20. + SIDE_PADDING))
-                .px(px(8.))
-                .py(px(3.))
+                .px(rems_from_px(8.))
+                .py(rems_from_px(3.))
                 .bg(flint_theme::pop_surface())
                 .border_1()
                 .border_color(flint_theme::element_active())
-                .rounded(px(4.))
-                .text_size(px(11.))
+                .rounded(rems_from_px(4.))
+                .text_size(rems_from_px(11.))
                 .text_color(flint_theme::muted_gray())
                 .child(copied_hint_text(line_count)),
         )
@@ -441,6 +427,14 @@ impl TerminalView {
             cx.listener(|this, _, window, cx| {
                 this.context_menu = None;
                 this.on_select_all(&SelectAll, window, cx);
+            }),
+        ));
+        items.push(ContextMenuItem::new(
+            "term-find",
+            "Find\u{2026}",
+            cx.listener(|this, _, window, cx| {
+                this.context_menu = None;
+                this.on_toggle_search(&terminal_search::ToggleSearch, window, cx);
             }),
         ));
         items.push(ContextMenuItem::new(
@@ -625,6 +619,7 @@ impl TerminalView {
             ShellEvent::Error(e) => {
                 tracing::warn!(%e, "terminal error");
             }
+            ShellEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
         }
     }
 

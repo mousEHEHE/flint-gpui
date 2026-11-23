@@ -24,6 +24,7 @@ use crate::import::{
 };
 use crate::theme as flint_theme;
 use crate::ui::{dialog_max_height, VaultState};
+use crate::ui::{rems_from_px, scaled_px};
 use crate::vault::{AuthMethod, ServerEntry, ServerEntrySummary, SnippetBody, VaultManager};
 
 pub enum ImportViewEvent {
@@ -759,7 +760,7 @@ impl Render for ImportView {
             .child(DialogHeader::new().child(DialogTitle::new().child("Import")))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.muted_foreground)
                     .child(if total == 0 && self.is_scanning {
                         "Looking for hosts in ~/.ssh/config and PuTTY sessions…".to_string()
@@ -783,14 +784,14 @@ impl Render for ImportView {
 
         let mut card = v_flex()
             .max_h(dialog_max_height(window))
-            .p(px(12.))
-            .gap(px(8.))
+            .p(rems_from_px(12.))
+            .gap(rems_from_px(8.))
             .child(header);
 
         if let Some(error) = &self.file_error {
             card = card.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.danger)
                     .child(error.clone()),
             );
@@ -799,7 +800,7 @@ impl Render for ImportView {
         for warning in &self.file_warnings {
             card = card.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.warning)
                     .child(warning.clone()),
             );
@@ -808,13 +809,16 @@ impl Render for ImportView {
         if let Some(summary) = skipped_summary(&self.file_skipped) {
             card = card.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme.warning)
                     .child(summary),
             );
         }
 
-        let mut toolbar = h_flex().px(px(6.)).items_center().justify_between();
+        let mut toolbar = h_flex()
+            .px(rems_from_px(6.))
+            .items_center()
+            .justify_between();
         toolbar = if total > 0 {
             toolbar.child(
                 Checkbox::new("import-all")
@@ -827,7 +831,7 @@ impl Render for ImportView {
         } else {
             toolbar.child(div())
         };
-        let mut actions = h_flex().gap(px(6.));
+        let mut actions = h_flex().gap(rems_from_px(6.));
         // Reading an installed Termius only works on Windows: see
         // `crate::termius_local`. Elsewhere, only the file import is offered.
         #[cfg(windows)]
@@ -900,11 +904,11 @@ impl Render for ImportView {
                 let row = h_flex()
                     .id(("import-row", ix))
                     .w_full()
-                    .h(px(24.))
-                    .px(px(6.))
-                    .gap(px(8.))
+                    .h(rems_from_px(24.))
+                    .px(rems_from_px(6.))
+                    .gap(rems_from_px(8.))
                     .items_center()
-                    .rounded(px(4.))
+                    .rounded(rems_from_px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.list_hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(ix, cx)))
@@ -912,8 +916,8 @@ impl Render for ImportView {
                     .child(
                         div()
                             .flex_none()
-                            .max_w(px(160.))
-                            .text_size(px(12.5))
+                            .max_w(rems_from_px(160.))
+                            .text_size(rems_from_px(12.5))
                             .text_color(theme.foreground)
                             .truncate()
                             .child(name),
@@ -922,7 +926,7 @@ impl Render for ImportView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.))
+                            .text_size(rems_from_px(11.))
                             .text_color(theme.muted_foreground)
                             .truncate()
                             .child(addr),
@@ -971,14 +975,14 @@ impl Render for ImportView {
                         .filter(|_| c.is_selected)
                         .map(|input| {
                             h_flex()
-                                .pl(px(30.))
+                                .pl(rems_from_px(30.))
                                 .pr_2()
                                 .pb_1()
                                 .gap_2()
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(rems_from_px(11.))
                                         .text_color(theme.muted_foreground)
                                         .child("Passphrase"),
                                 )
@@ -1002,11 +1006,11 @@ impl Render for ImportView {
                 let row = h_flex()
                     .id(("import-snippet-row", ix))
                     .w_full()
-                    .h(px(24.))
-                    .px(px(6.))
-                    .gap(px(8.))
+                    .h(rems_from_px(24.))
+                    .px(rems_from_px(6.))
+                    .gap(rems_from_px(8.))
                     .items_center()
-                    .rounded(px(4.))
+                    .rounded(rems_from_px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.list_hover))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_snippet(ix, cx)))
@@ -1014,8 +1018,8 @@ impl Render for ImportView {
                     .child(
                         div()
                             .flex_none()
-                            .max_w(px(160.))
-                            .text_size(px(12.5))
+                            .max_w(rems_from_px(160.))
+                            .text_size(rems_from_px(12.5))
                             .text_color(theme.foreground)
                             .truncate()
                             .child(c.snippet.name.clone()),
@@ -1024,7 +1028,7 @@ impl Render for ImportView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.))
+                            .text_size(rems_from_px(11.))
                             .text_color(theme.muted_foreground)
                             .truncate()
                             .child(preview.to_string()),
@@ -1039,7 +1043,7 @@ impl Render for ImportView {
                     // What the dialog can spare once the heading, the toolbar,
                     // the footer buttons and the card's own padding have taken
                     // their share. A fixed cap overflows a short window.
-                    .max_h((dialog_max_height(window) - px(140.)).max(px(120.)))
+                    .max_h((dialog_max_height(window) - scaled_px(px(140.), cx)).max(px(120.)))
                     .overflow_y_scroll()
                     .gap_0p5()
                     .children(list_items),
@@ -1074,7 +1078,7 @@ impl Render for ImportView {
 fn badge(text: &str, color: gpui::Hsla) -> gpui::AnyElement {
     div()
         .flex_none()
-        .text_size(px(10.5))
+        .text_size(rems_from_px(10.5))
         .text_color(color)
         .child(text.to_string())
         .into_any_element()
@@ -1085,14 +1089,14 @@ fn exists_marker(cx: &Context<ImportView>) -> gpui::AnyElement {
     let warning = cx.theme().warning;
     div()
         .flex_none()
-        .h(px(16.))
-        .px(px(5.))
+        .h(rems_from_px(16.))
+        .px(rems_from_px(5.))
         .flex()
         .items_center()
-        .rounded(px(3.))
+        .rounded(rems_from_px(3.))
         .border_1()
         .border_color(warning)
-        .text_size(px(10.5))
+        .text_size(rems_from_px(10.5))
         .text_color(warning)
         .child("exists")
         .into_any_element()
@@ -1100,11 +1104,11 @@ fn exists_marker(cx: &Context<ImportView>) -> gpui::AnyElement {
 
 fn section_head(label: &str) -> gpui::AnyElement {
     div()
-        .h(px(22.))
-        .px(px(6.))
+        .h(rems_from_px(22.))
+        .px(rems_from_px(6.))
         .flex()
         .items_center()
-        .text_size(px(10.))
+        .text_size(rems_from_px(10.))
         .text_color(flint_theme::text_dim())
         .child(label.to_uppercase())
         .into_any_element()

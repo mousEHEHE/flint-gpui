@@ -7,19 +7,23 @@
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window,
+    div, px, AnyElement, App, ClickEvent, Context, Entity, Focusable as _, MouseButton,
+    SharedString, Window,
 };
 use gpui_component::{
     h_flex,
+    input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
     tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Icon, IconName, StyledExt as _, WindowExt as _,
+    v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
 };
 
 use crate::connection::Connection;
 use crate::preferences::{Preferences, TerminalPosition};
 use crate::shell::ShellHandle;
 use crate::theme;
+use crate::ui::keymap;
+use crate::ui::rems_from_px;
 use crate::ui::server_session::{ServerSession, ServerSessionEvent};
 use crate::ui::shortcut_hints;
 use crate::ui::terminal_view::{TerminalEvent, TerminalView};
@@ -30,29 +34,6 @@ pub(crate) const SESSION_HEADER_HEIGHT: f32 = 46.;
 /// Tabs past this would not fit the header. It is also close to what a server
 /// allows: OpenSSH's default `MaxSessions` is 10 and SFTP takes two of them.
 const MAX_TERMINALS: usize = 8;
-
-/// Shown in the tooltips and the command palette. Must track the bindings in
-/// `app_view::init`.
-pub const NEW_TERMINAL_SHORTCUT: &str = if cfg!(target_os = "macos") {
-    "\u{21E7}\u{2318}T"
-} else {
-    "Ctrl+Shift+N"
-};
-pub const SPLIT_SHORTCUT: &str = if cfg!(target_os = "macos") {
-    "\u{2318}D"
-} else {
-    "Ctrl+Shift+D"
-};
-pub const TOGGLE_FILES_SHORTCUT: &str = if cfg!(target_os = "macos") {
-    "\u{2318}B"
-} else {
-    "Ctrl+Shift+B"
-};
-pub const SERVER_PANEL_SHORTCUT: &str = if cfg!(target_os = "macos") {
-    "\u{2318}I"
-} else {
-    "Ctrl+Shift+I"
-};
 
 /// Why a file cannot open in a new tab: every tab is taken, or the session is
 /// not connected.
@@ -123,6 +104,26 @@ fn split_after_activate(split: SplitPanes, active: usize, target: usize) -> Spli
     } else {
         Some((target, right))
     }
+}
+
+/// A terminal tab being dragged onto a pane. `session` keeps the drop to the
+/// strip it came from. The terminal, not its index: a shell that exits
+/// mid-drag shifts the tabs after it.
+#[derive(Clone)]
+pub(crate) struct DraggedTerminalTab {
+    session: gpui::EntityId,
+    terminal: gpui::EntityId,
+}
+
+/// The panes after tab `dragged` is dropped on the left (`on_left`) or right
+/// pane. A tab dropped on the other pane swaps sides; any other takes the pane.
+fn split_after_drop(split: SplitPanes, dragged: usize, on_left: bool) -> SplitPanes {
+    let (left, right) = split?;
+    Some(match (on_left, dragged == left, dragged == right) {
+        (true, _, true) | (false, true, _) => (right, left),
+        (true, _, _) => (dragged, right),
+        (false, _, _) => (left, dragged),
+    })
 }
 
 impl ServerSession {
@@ -209,7 +210,11 @@ impl ServerSession {
             if terminal.read(cx).is_local {
                 self.terminals.push(terminal);
             } else if let Some(shell) = shells.next() {
+                let title = terminal.read(cx).title.clone();
                 self.add_terminal(shell, false, cx);
+                if let Some(new) = self.terminals.last() {
+                    new.update(cx, |view, _| view.title = title);
+                }
             }
         }
         // The first connect, or a tab with only local terminals left.
@@ -375,10 +380,10 @@ impl ServerSession {
             .overflow_hidden()
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(rems_from_px(38.))
                     .flex_none()
                     .min_w_0()
-                    .px(px(8.))
+                    .px(rems_from_px(8.))
                     .items_center()
                     .child(self.render_terminal_tabs(cx)),
             )
@@ -429,6 +434,36 @@ impl ServerSession {
         self.open_terminal(None, cx);
     }
 
+    pub fn swap_panes(&mut self, cx: &mut Context<Self>) {
+        if let Some((left, right)) = self.split {
+            self.split = Some((right, left));
+            cx.notify();
+        }
+    }
+
+    fn drop_tab_on_pane(
+        &mut self,
+        tab: &DraggedTerminalTab,
+        on_left: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if tab.session != cx.entity_id() {
+            return;
+        }
+        // Gone if its shell exited mid-drag.
+        let Some(ix) = self
+            .terminals
+            .iter()
+            .position(|terminal| terminal.entity_id() == tab.terminal)
+        else {
+            return;
+        };
+        self.split = split_after_drop(self.split, ix, on_left);
+        self.active_terminal = ix;
+        self.is_terminal_focus_pending = true;
+        cx.notify();
+    }
+
     /// The active terminal, or both panes of a split. A click in a pane gives
     /// it the keys, before the terminal itself sees the click.
     pub(crate) fn render_terminal_area(
@@ -446,9 +481,23 @@ impl ServerSession {
             return active.clone().into_any_element();
         };
         let accent = cx.theme().primary;
-        let pane = |(ix, terminal): (usize, Entity<TerminalView>)| {
+        let pane = |(ix, terminal): (usize, Entity<TerminalView>), on_left: bool| {
             let is_active = ix == self.active_terminal;
+            // An overlay, not the pane itself: the terminal paints over the pane's background.
+            let drop_target = div()
+                .absolute()
+                .inset_0()
+                .drag_over::<DraggedTerminalTab>(move |style, _, _, cx| {
+                    style
+                        .bg(cx.theme().drop_target.opacity(0.5))
+                        .border_2()
+                        .border_color(accent)
+                })
+                .on_drop(cx.listener(move |this, tab: &DraggedTerminalTab, _, cx| {
+                    this.drop_tab_on_pane(tab, on_left, cx)
+                }));
             div()
+                .relative()
                 .size_full()
                 .overflow_hidden()
                 .border_t_2()
@@ -464,11 +513,12 @@ impl ServerSession {
                     }
                 }))
                 .child(terminal)
+                .when(cx.has_active_drag(), |el| el.child(drop_target))
         };
         h_resizable("terminal-split")
             .with_state(&self.terminal_split_state)
-            .child(resizable_panel().child(pane(left)))
-            .child(resizable_panel().child(pane(right)))
+            .child(resizable_panel().child(pane(left, true)))
+            .child(resizable_panel().child(pane(right, false)))
             .into_any_element()
     }
 
@@ -627,11 +677,11 @@ impl ServerSession {
     pub(crate) fn render_session_header(&self, cx: &Context<Self>) -> AnyElement {
         let address = session_address(&self.conn_info);
         h_flex()
-            .h(px(SESSION_HEADER_HEIGHT))
+            .h(rems_from_px(SESSION_HEADER_HEIGHT))
             .flex_none()
-            .pl(px(16.))
-            .pr(px(8.))
-            .gap(px(10.))
+            .pl(rems_from_px(16.))
+            .pr(rems_from_px(8.))
+            .gap(rems_from_px(10.))
             .items_center()
             .border_b_1()
             .border_color(theme::border())
@@ -640,9 +690,9 @@ impl ServerSession {
             .child(
                 div()
                     .flex_shrink(1.)
-                    .min_w(px(48.))
+                    .min_w(rems_from_px(48.))
                     .truncate()
-                    .text_size(px(14.))
+                    .text_size(rems_from_px(14.))
                     .font_semibold()
                     .text_color(cx.theme().foreground)
                     .child(self.conn_info.display_name().to_string()),
@@ -653,7 +703,7 @@ impl ServerSession {
                     .min_w_0()
                     .truncate()
                     .font_family(theme::MONO_FONT)
-                    .text_size(px(12.))
+                    .text_size(rems_from_px(12.))
                     .text_color(theme::text_dim())
                     .child(address),
             )
@@ -663,7 +713,7 @@ impl ServerSession {
                     .flex_shrink(1.)
                     .min_w_0()
                     .overflow_hidden()
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .when_some(self.render_forward_chip(cx), |el, chip| el.child(chip))
                     .when_some(self.render_task_pills(cx), |el, pills| el.child(pills)),
@@ -671,63 +721,41 @@ impl ServerSession {
             .child(
                 h_flex()
                     .flex_none()
-                    .gap(px(4.))
+                    .gap(rems_from_px(4.))
                     .items_center()
                     .child(self.render_second_pane_toggle(cx))
                     .child(self.render_sftp_toggle(cx))
-                    .child(div().mx(px(6.)).w(px(1.)).h(px(16.)).bg(theme::border()))
+                    .child(
+                        div()
+                            .mx(rems_from_px(6.))
+                            .w(px(1.))
+                            .h(rems_from_px(16.))
+                            .bg(theme::border()),
+                    )
                     .child(self.render_layout_switch(cx))
-                    .child(div().mx(px(6.)).w(px(1.)).h(px(16.)).bg(theme::border()))
+                    .child(
+                        div()
+                            .mx(rems_from_px(6.))
+                            .w(px(1.))
+                            .h(rems_from_px(16.))
+                            .bg(theme::border()),
+                    )
                     .child(self.render_server_panel_toggle(cx)),
             )
             .into_any_element()
     }
 
-    /// One "Terminal" tab, or numbered tabs once there are several shells,
-    /// and the "+" button.
+    /// The terminal tabs and the "+" button.
     pub(crate) fn render_terminal_tabs(&self, cx: &Context<Self>) -> AnyElement {
         // Scrolls sideways when the terminal sits narrow next to the files.
         let mut strip = h_flex()
             .id("terminal-tab-strip")
             .min_w_0()
             .overflow_x_scroll()
-            .gap(px(2.))
+            .gap(rems_from_px(2.))
             .items_center();
-        if self.terminals.len() > 1 {
-            strip = strip.child(terminal_icon().ml(px(4.)).mr(px(2.)));
-            for ix in 0..self.terminals.len() {
-                strip = strip.child(self.render_terminal_tab(ix, cx));
-            }
-        } else {
-            let edited_file = self
-                .active_terminal()
-                .and_then(|terminal| terminal.read(cx).edited_file.clone());
-            let is_local_here = !self.is_local
-                && self
-                    .active_terminal()
-                    .is_some_and(|terminal| terminal.read(cx).is_local);
-            let label = match &edited_file {
-                Some(path) => file_name(path).to_string(),
-                None if is_local_here => "Local".to_string(),
-                None => "Terminal".to_string(),
-            };
-            strip = strip.child(
-                h_flex()
-                    .id("terminal-single-tab")
-                    .h(px(26.))
-                    .px(px(9.))
-                    .gap(px(6.))
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(theme::element())
-                    .text_size(px(12.5))
-                    .text_color(cx.theme().foreground)
-                    .child(terminal_icon())
-                    .child(div().max_w(px(140.)).truncate().child(label))
-                    .when_some(edited_file, |el, path| {
-                        el.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
-                    }),
-            );
+        for ix in 0..self.terminals.len() {
+            strip = strip.child(self.render_terminal_tab(ix, cx));
         }
         if self.can_open_terminal() {
             strip = strip.child(
@@ -735,14 +763,15 @@ impl ServerSession {
                     // The strip scrolls and would clip a corner badge, so
                     // the key takes the place of the "+" instead.
                     .map(|el| {
-                        if shortcut_hints::is_shown(cx) {
-                            el.child(shortcut_hints::badge(shortcut_hints::NEW_TERMINAL))
+                        let hint = shortcut_hints::key("tabs.new_terminal", cx);
+                        if let Some(hint) = hint.filter(|_| shortcut_hints::is_shown(cx)) {
+                            el.child(shortcut_hints::badge(hint))
                         } else {
-                            el.child(Icon::new(IconName::Plus).size(px(12.)))
+                            el.child(Icon::new(IconName::Plus).size(rems_from_px(12.)))
                         }
                     })
                     .tooltip(|window, cx| {
-                        Tooltip::new(format!("New terminal ({NEW_TERMINAL_SHORTCUT})"))
+                        Tooltip::new(keymap::with_label("New terminal", "tabs.new_terminal", cx))
                             .build(window, cx)
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.open_extra_terminal(cx))),
@@ -751,11 +780,19 @@ impl ServerSession {
             if !self.is_local && cfg!(unix) {
                 strip = strip.child(
                     header_button("terminal-tab-local", cx)
-                        .child(local_icon().size(px(13.)))
+                        .map(|el| {
+                            let hint = shortcut_hints::key("tabs.local_beside", cx);
+                            if let Some(hint) = hint.filter(|_| shortcut_hints::is_shown(cx)) {
+                                el.child(shortcut_hints::badge(hint))
+                            } else {
+                                el.child(local_icon().size(rems_from_px(13.)))
+                            }
+                        })
                         .tooltip(|window, cx| {
-                            Tooltip::new(format!(
-                                "Local terminal beside ({})",
-                                crate::ui::app_view::LOCAL_BESIDE_SHORTCUT
+                            Tooltip::new(keymap::with_label(
+                                "Local terminal beside",
+                                "tabs.local_beside",
+                                cx,
                             ))
                             .build(window, cx)
                         })
@@ -766,14 +803,182 @@ impl ServerSession {
         strip.into_any_element()
     }
 
+    /// The user's name for the tab, else the edited file, else what runs there.
+    fn tab_label(&self, ix: usize, cx: &App) -> String {
+        let Some(terminal) = self.terminals.get(ix).map(|terminal| terminal.read(cx)) else {
+            return String::new();
+        };
+        if let Some(title) = &terminal.title {
+            return title.clone();
+        }
+        if let Some(path) = &terminal.edited_file {
+            return file_name(path).to_string();
+        }
+        let kind = if terminal.is_local && !self.is_local {
+            "Local"
+        } else {
+            "Terminal"
+        };
+        if self.terminals.len() > 1 {
+            format!("{kind} {}", ix + 1)
+        } else {
+            kind.to_string()
+        }
+    }
+
+    fn tab_icon(&self, ix: usize, is_active: bool, cx: &App) -> Icon {
+        let Some(terminal) = self.terminals.get(ix).map(|terminal| terminal.read(cx)) else {
+            return terminal_icon();
+        };
+        let icon = if terminal.edited_file.is_some() {
+            Icon::empty().path("icons/pen-line.svg")
+        } else if terminal.is_local && !self.is_local {
+            local_icon()
+        } else {
+            terminal_icon()
+        };
+        let color = if is_active {
+            theme::status_online()
+        } else {
+            theme::text_dim()
+        };
+        icon.size(rems_from_px(13.)).text_color(color)
+    }
+
     fn render_terminal_tab(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let is_active = ix == self.active_terminal;
+        let is_closable = self.terminals.len() > 1;
+        let rename_input = self.tab_rename.as_ref().and_then(|(terminal, input)| {
+            (self.terminals.get(ix) == Some(terminal)).then(|| input.clone())
+        });
+        let label = self.tab_label(ix, cx);
+        let group: SharedString = format!("terminal-tab-{ix}").into();
+
+        let tab = h_flex()
+            .id(("terminal-tab", ix))
+            .group(group.clone())
+            .h(rems_from_px(26.))
+            .pl(rems_from_px(8.))
+            .pr(rems_from_px(if is_closable { 4. } else { 10. }))
+            .gap(rems_from_px(6.))
+            .items_center()
+            .rounded(rems_from_px(6.))
+            .text_size(rems_from_px(12.5))
+            .child(self.tab_icon(ix, is_active, cx))
+            .map(|el| {
+                if is_active {
+                    el.bg(theme::element()).text_color(cx.theme().foreground)
+                } else {
+                    el.text_color(cx.theme().muted_foreground)
+                        .hover(|s| s.bg(theme::field()))
+                }
+            });
+
+        let tab = match rename_input {
+            Some(input) => tab.child(self.render_tab_rename_field(&input, cx)),
+            None => self.with_tab_label(tab, ix, label, cx),
+        };
+        tab.when(is_closable, |el| {
+            el.child(self.render_tab_close(ix, is_active, group, cx))
+        })
+        .into_any_element()
+    }
+
+    fn with_tab_label(
+        &self,
+        tab: gpui::Stateful<gpui::Div>,
+        ix: usize,
+        label: String,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let tooltip = self
+            .terminals
+            .get(ix)
+            .and_then(|terminal| terminal.read(cx).edited_file.clone())
+            .or_else(|| {
+                self.split
+                    .map(|_| "Drag onto a pane to move it".to_string())
+            })
+            .unwrap_or_else(|| "Double-click to rename".to_string());
+        let drag_preview = TabDragPreview {
+            icon: self.tab_icon(ix, true, cx),
+            label: label.clone().into(),
+        };
+        tab.cursor_pointer()
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .when_some(
+                self.terminals.get(ix).filter(|_| self.terminals.len() > 1),
+                |el, terminal| {
+                    el.on_drag(
+                        DraggedTerminalTab {
+                            session: cx.entity_id(),
+                            terminal: terminal.entity_id(),
+                        },
+                        move |_, _, _, cx| cx.new(|_| drag_preview.clone()),
+                    )
+                },
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    this.start_tab_rename(ix, window, cx);
+                } else {
+                    this.activate_terminal(ix, cx);
+                }
+            }))
+            .child(div().max_w(rems_from_px(160.)).truncate().child(label))
+    }
+
+    /// Sits where the label was, in the same font and as wide as the text, so
+    /// the tab does not jump when editing starts.
+    fn render_tab_rename_field(
+        &self,
+        input: &Entity<InputState>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        // Cascadia Code is monospace: one character is about 0.6 of the font size.
+        // One spare character and the cursor's few pixels: a typed letter must fit
+        // before the field widens, or the field scrolls and hides the first letter.
+        let chars = input.read(cx).value().chars().count() + 1;
+        let width = (chars as f32 * 12.5 * 0.6 + 4.).clamp(30., 160.);
+        div()
+            .w(rems_from_px(width))
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.tab_rename = None;
+                    this.is_terminal_focus_pending = true;
+                    cx.notify();
+                }
+            }))
+            .child(
+                Input::new(input)
+                    .xsmall()
+                    .appearance(false)
+                    .px_0()
+                    .text_size(rems_from_px(12.5)),
+            )
+    }
+
+    /// Shown on the active tab and on hover, so the strip stays calm.
+    fn render_tab_close(
+        &self,
+        ix: usize,
+        is_active: bool,
+        group: SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let fg = cx.theme().foreground;
-        let close = div()
+        div()
             .id(("terminal-tab-close", ix))
-            .px(px(2.))
-            .rounded(px(3.))
+            .size(rems_from_px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(rems_from_px(4.))
             .text_color(theme::text_dim())
+            .when(!is_active, |el| {
+                el.invisible().group_hover(group, |s| s.visible())
+            })
             .hover(move |s| s.bg(theme::element_hover()).text_color(fg))
             // Mouse-down, not click: it must not reach the tab under it, which
             // would activate the tab being closed.
@@ -784,51 +989,67 @@ impl ServerSession {
                     this.close_terminal(ix, cx);
                 }),
             )
-            .child("\u{00D7}");
+            .child(Icon::empty().path("icons/x.svg").size(rems_from_px(11.)))
+    }
 
-        let edited_file = self
-            .terminals
-            .get(ix)
-            .and_then(|terminal| terminal.read(cx).edited_file.clone());
-        let is_local_here = !self.is_local
-            && self
-                .terminals
-                .get(ix)
-                .is_some_and(|terminal| terminal.read(cx).is_local);
-        let label = match &edited_file {
-            Some(path) => format!("{} {}", ix + 1, file_name(path)),
-            None if is_local_here => format!("{} Local", ix + 1),
-            None => (ix + 1).to_string(),
+    fn start_tab_rename(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.get(ix).cloned() else {
+            return;
         };
+        let label = self.tab_label(ix, cx);
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |state, cx| {
+            state.set_value(label, window, cx);
+            state.select_all(window, cx);
+            state.focus(window, cx);
+        });
+        cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                this.finish_tab_rename(cx);
+                this.is_terminal_focus_pending = true;
+            }
+            // A click elsewhere keeps the new name, as in Finder.
+            InputEvent::Blur => this.finish_tab_rename(cx),
+            // The field grows with the text.
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })
+        .detach();
+        self.tab_rename = Some((terminal, input));
+        cx.notify();
+    }
 
-        header_button(("terminal-tab", ix), cx)
-            .gap(px(4.))
-            .when_some(edited_file, |el, path| {
-                el.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
-            })
-            .when(is_active, |el| {
-                el.bg(theme::element())
-                    .text_color(cx.theme().foreground)
-                    .font_semibold()
-            })
-            .on_click(cx.listener(move |this, _, _, cx| this.activate_terminal(ix, cx)))
-            .when(is_local_here, |el| el.child(local_icon().size(px(12.))))
-            .child(div().max_w(px(140.)).truncate().child(label))
-            .child(close)
-            .into_any_element()
+    /// An empty name goes back to the default label.
+    fn finish_tab_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((terminal, input)) = self.tab_rename.take() else {
+            return;
+        };
+        let name = input.read(cx).value().trim().to_string();
+        terminal.update(cx, |view, _| {
+            view.title = (!name.is_empty()).then_some(name)
+        });
+        cx.notify();
     }
 
     pub(crate) fn render_sftp_toggle(&self, cx: &Context<Self>) -> AnyElement {
         toggle_button("sftp-toggle", !self.is_sftp_hidden, cx)
             .relative()
-            .child(Icon::empty().path("icons/folder-open.svg").size(px(14.)))
+            .child(
+                Icon::empty()
+                    .path("icons/folder-open.svg")
+                    .size(rems_from_px(14.)),
+            )
             .child("Files")
-            .when(shortcut_hints::is_shown(cx), |el| {
-                el.child(shortcut_hints::corner_badge(shortcut_hints::FILES))
-            })
+            .when_some(
+                shortcut_hints::key("tabs.toggle_files", cx)
+                    .filter(|_| shortcut_hints::is_shown(cx)),
+                |el, hint| el.child(shortcut_hints::corner_badge(hint)),
+            )
             .tooltip(|window, cx| {
-                Tooltip::new(format!(
-                    "Show or hide the file panes ({TOGGLE_FILES_SHORTCUT})"
+                Tooltip::new(keymap::with_label(
+                    "Show or hide the file panes",
+                    "tabs.toggle_files",
+                    cx,
                 ))
                 .build(window, cx)
             })
@@ -843,13 +1064,19 @@ impl ServerSession {
             cx,
         )
         .relative()
-        .px(px(5.))
-        .child(Icon::empty().path("icons/panel-right.svg").size(px(15.)))
-        .when(shortcut_hints::is_shown(cx), |el| {
-            el.child(shortcut_hints::corner_badge(shortcut_hints::SERVER_PANEL))
-        })
+        .px(rems_from_px(5.))
+        .child(
+            Icon::empty()
+                .path("icons/panel-right.svg")
+                .size(rems_from_px(15.)),
+        )
+        .when_some(
+            shortcut_hints::key("tabs.server_panel", cx).filter(|_| shortcut_hints::is_shown(cx)),
+            |el, hint| el.child(shortcut_hints::corner_badge(hint)),
+        )
         .tooltip(|window, cx| {
-            Tooltip::new(format!("Server panel ({SERVER_PANEL_SHORTCUT})")).build(window, cx)
+            Tooltip::new(keymap::with_label("Server panel", "tabs.server_panel", cx))
+                .build(window, cx)
         })
         .on_click(cx.listener(|this, _, _, cx| this.toggle_server_panel(cx)))
         .into_any_element()
@@ -868,8 +1095,8 @@ impl ServerSession {
             None => ("icons/monitor.svg", "Local".into()),
         };
         toggle_button("second-pane-toggle", is_shown, cx)
-            .child(Icon::empty().path(icon).size(px(14.)))
-            .child(div().max_w(px(140.)).truncate().child(label))
+            .child(Icon::empty().path(icon).size(rems_from_px(14.)))
+            .child(div().max_w(rems_from_px(140.)).truncate().child(label))
             .tooltip(|window, cx| {
                 Tooltip::new("Show or hide the second file pane").build(window, cx)
             })
@@ -884,11 +1111,11 @@ impl ServerSession {
             let is_active = position == value;
             div()
                 .id(id)
-                .size(px(24.))
+                .size(rems_from_px(24.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.))
+                .rounded(rems_from_px(5.))
                 .cursor_pointer()
                 .text_color(if is_active {
                     cx.theme().foreground
@@ -898,13 +1125,13 @@ impl ServerSession {
                 .when(is_active, |el| el.bg(theme::element()))
                 .when(!is_active, |el| el.hover(|s| s.bg(theme::field())))
                 .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-                .child(Icon::empty().path(icon).size(px(15.)))
+                .child(Icon::empty().path(icon).size(rems_from_px(15.)))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_terminal_position(value, cx)))
         };
         h_flex()
-            .p(px(2.))
-            .gap(px(2.))
-            .rounded(px(7.))
+            .p(rems_from_px(2.))
+            .gap(rems_from_px(2.))
+            .rounded(rems_from_px(7.))
             .bg(theme::field())
             .child(option(
                 "layout-terminal-below",
@@ -919,6 +1146,40 @@ impl ServerSession {
                 "Terminal beside the files",
             ))
             .into_any_element()
+    }
+}
+
+/// A dragged tab looks like the active tab, lifted off the strip.
+#[derive(Clone)]
+struct TabDragPreview {
+    icon: Icon,
+    label: SharedString,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drawn outside the app's root, so the font is not inherited.
+        h_flex()
+            .h(rems_from_px(26.))
+            .pl(rems_from_px(8.))
+            .pr(rems_from_px(10.))
+            .gap(rems_from_px(6.))
+            .items_center()
+            .rounded(rems_from_px(6.))
+            .bg(theme::element())
+            .border_1()
+            .border_color(theme::border())
+            .shadow_md()
+            .font_family(theme::UI_FONT)
+            .text_size(rems_from_px(12.5))
+            .text_color(cx.theme().foreground)
+            .child(self.icon.clone())
+            .child(
+                div()
+                    .max_w(rems_from_px(160.))
+                    .truncate()
+                    .child(self.label.clone()),
+            )
     }
 }
 
@@ -938,7 +1199,7 @@ fn local_icon() -> Icon {
 fn terminal_icon() -> Icon {
     Icon::empty()
         .path("icons/square-terminal.svg")
-        .size(px(14.))
+        .size(rems_from_px(14.))
         .text_color(theme::status_online())
 }
 
@@ -951,10 +1212,10 @@ pub(crate) fn header_button(
         .id(id)
         .flex()
         .items_center()
-        .h(px(26.))
-        .px(px(8.))
-        .rounded(px(6.))
-        .text_size(px(12.5))
+        .h(rems_from_px(26.))
+        .px(rems_from_px(8.))
+        .rounded(rems_from_px(6.))
+        .text_size(rems_from_px(12.5))
         .text_color(cx.theme().muted_foreground)
         .cursor_pointer()
         .hover(|s| s.bg(theme::field()))
@@ -967,9 +1228,11 @@ fn toggle_button(
     is_on: bool,
     cx: &Context<ServerSession>,
 ) -> gpui::Stateful<gpui::Div> {
-    header_button(id, cx).gap(px(6.)).when(is_on, |el| {
-        el.bg(theme::element()).text_color(cx.theme().foreground)
-    })
+    header_button(id, cx)
+        .gap(rems_from_px(6.))
+        .when(is_on, |el| {
+            el.bg(theme::element()).text_color(cx.theme().foreground)
+        })
 }
 
 #[cfg(test)]
@@ -1013,6 +1276,17 @@ mod tests {
         // The right pane has the keys, so tab 3 replaces its shell.
         assert_eq!(split_after_activate(Some((0, 1)), 1, 3), Some((0, 3)));
         assert_eq!(split_after_activate(Some((0, 1)), 0, 3), Some((3, 1)));
+    }
+
+    #[test]
+    fn a_tab_dropped_on_a_pane_swaps_or_takes_it() {
+        assert_eq!(split_after_drop(None, 1, true), None);
+        // The right pane's tab dropped on the left: the panes swap.
+        assert_eq!(split_after_drop(Some((0, 1)), 1, true), Some((1, 0)));
+        assert_eq!(split_after_drop(Some((0, 1)), 0, false), Some((1, 0)));
+        assert_eq!(split_after_drop(Some((0, 1)), 0, true), Some((0, 1)));
+        assert_eq!(split_after_drop(Some((0, 1)), 3, true), Some((3, 1)));
+        assert_eq!(split_after_drop(Some((0, 1)), 3, false), Some((0, 3)));
     }
 
     #[test]

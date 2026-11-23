@@ -15,7 +15,7 @@ echo @kernel; uname -sr
 echo @arch; uname -m
 echo @cpu; grep -m 1 'model name' /proc/cpuinfo 2>/dev/null
 echo @cores; getconf _NPROCESSORS_ONLN 2>/dev/null
-echo @ip; hostname -I 2>/dev/null || ip -o addr show scope global 2>/dev/null
+echo @ip; ip -o addr show scope global 2>/dev/null || hostname -I 2>/dev/null
 "#;
 
 /// Printed on every tick.
@@ -74,8 +74,8 @@ pub struct SystemInfo {
     pub arch: String,
     pub cpu_model: Option<String>,
     pub cpu_count: Option<usize>,
-    /// IPv4 first.
-    pub addresses: Vec<String>,
+    /// Label and address, IPv4 first.
+    pub addresses: Vec<(&'static str, String)>,
 }
 
 pub fn parse_info(output: &str) -> SystemInfo {
@@ -110,26 +110,78 @@ pub fn parse_info(output: &str) -> SystemInfo {
 }
 
 /// `hostname -I` prints the addresses on one line; `ip -o addr` prints one
-/// interface per line with the address after "inet" or "inet6".
-fn parse_addresses(lines: &[&str]) -> Vec<String> {
-    let mut addresses: Vec<String> = Vec::new();
+/// interface per line ("2: eth0    inet 10.0.0.5/24 ...").
+fn parse_addresses(lines: &[&str]) -> Vec<(&'static str, String)> {
+    let mut addresses: Vec<(&'static str, String)> = Vec::new();
     for line in lines {
         let words: Vec<&str> = line.split_whitespace().collect();
         let is_ip_output = words.iter().any(|word| *word == "inet" || *word == "inet6");
         if !is_ip_output {
-            addresses.extend(words.iter().map(|word| word.to_string()));
+            addresses.extend(
+                words
+                    .iter()
+                    .map(|ip| (address_label("", ip), ip.to_string())),
+            );
             continue;
         }
+        let interface = words
+            .get(1)
+            .and_then(|name| name.split('@').next())
+            .unwrap_or("");
         for pair in words.windows(2) {
             if pair[0] == "inet" || pair[0] == "inet6" {
-                let address = pair[1].split('/').next().unwrap_or(pair[1]);
-                addresses.push(address.to_string());
+                let ip = pair[1].split('/').next().unwrap_or(pair[1]);
+                addresses.push((address_label(interface, ip), ip.to_string()));
             }
         }
     }
-    addresses.sort_by_key(|address| address.contains(':'));
-    addresses.dedup();
+    addresses.sort_by_key(|(_, ip)| ip.contains(':'));
+    addresses.dedup_by(|a, b| a.1 == b.1);
     addresses
+}
+
+/// What an address is for: by interface name when `ip` gave one, else by range.
+/// Docker names its bridges `br-` and the network id's first 12 hex digits.
+/// Routers have `br-lan` too, which is not Docker.
+fn is_docker_bridge(interface: &str) -> bool {
+    interface
+        .strip_prefix("br-")
+        .is_some_and(|id| id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn address_label(interface: &str, ip: &str) -> &'static str {
+    use std::net::IpAddr;
+    const BY_INTERFACE: &[(&str, &str)] = &[
+        ("docker0", "Docker"),
+        ("tailscale", "Tailscale"),
+        ("wg", "WireGuard"),
+        ("virbr", "libvirt"),
+        ("cni", "Kubernetes"),
+        ("flannel", "Kubernetes"),
+        ("cali", "Kubernetes"),
+    ];
+    if let Some((_, label)) = BY_INTERFACE
+        .iter()
+        .find(|(prefix, _)| interface.starts_with(prefix))
+    {
+        return label;
+    }
+    if is_docker_bridge(interface) {
+        return "Docker";
+    }
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) if v4.is_loopback() => "Loopback",
+        Ok(IpAddr::V4(v4)) if v4.is_private() => "Private IPv4",
+        Ok(IpAddr::V4(v4)) if v4.is_link_local() => "Link-local",
+        // 100.64.0.0/10, also what Tailscale hands out
+        Ok(IpAddr::V4(v4)) if v4.octets()[0] == 100 && v4.octets()[1] & 0xC0 == 64 => "CGNAT",
+        Ok(IpAddr::V4(_)) => "Public IPv4",
+        Ok(IpAddr::V6(v6)) if v6.is_loopback() => "Loopback",
+        Ok(IpAddr::V6(v6)) if v6.is_unicast_link_local() => "Link-local",
+        Ok(IpAddr::V6(v6)) if v6.is_unique_local() => "Private IPv6",
+        Ok(IpAddr::V6(_)) => "Public IPv6",
+        Err(_) => "Address",
+    }
 }
 
 /// Jiffies summed over every CPU since boot.
@@ -469,7 +521,13 @@ tmpfs               804064      1764    802300       1% /run
             Some("AMD EPYC 7763 64-Core Processor")
         );
         assert_eq!(info.cpu_count, Some(4));
-        assert_eq!(info.addresses, ["10.0.0.5", "2a01:4f8::1"]);
+        assert_eq!(
+            info.addresses,
+            [
+                ("Private IPv4", "10.0.0.5".to_string()),
+                ("Public IPv6", "2a01:4f8::1".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -478,7 +536,39 @@ tmpfs               804064      1764    802300       1% /run
             "2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0",
             "2: eth0    inet6 2a01:4f8::1/64 scope global",
         ]);
-        assert_eq!(addresses, ["10.0.0.5", "2a01:4f8::1"]);
+        assert_eq!(
+            addresses,
+            [
+                ("Private IPv4", "10.0.0.5".to_string()),
+                ("Public IPv6", "2a01:4f8::1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn addresses_are_labelled_by_interface_then_by_range() {
+        let addresses = parse_addresses(&[
+            "2: eth0    inet 159.173.136.196/24 brd 159.173.136.255 scope global eth0",
+            "3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0",
+            "4: br-1a2b3c4d5e6f    inet 172.18.0.1/16 scope global br-1a2b3c4d5e6f",
+            "5: tailscale0    inet 100.101.1.2/32 scope global tailscale0",
+            "6: wg0    inet 10.8.0.1/24 scope global wg0",
+        ]);
+        let labels: Vec<&str> = addresses.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            ["Public IPv4", "Docker", "Docker", "Tailscale", "WireGuard"]
+        );
+        // hostname -I has no interface names: the range decides
+        assert_eq!(address_label("", "172.17.0.1"), "Private IPv4");
+        assert_eq!(address_label("br-3f2a9c1d7e4b", "172.18.0.1"), "Docker");
+        // OpenWrt's LAN bridge.
+        assert_eq!(address_label("br-lan", "192.168.1.1"), "Private IPv4");
+        assert_eq!(address_label("", "100.64.0.1"), "CGNAT");
+        assert_eq!(address_label("", "169.254.1.1"), "Link-local");
+        assert_eq!(address_label("", "fd00::1"), "Private IPv6");
+        assert_eq!(address_label("", "fe80::1"), "Link-local");
+        assert_eq!(address_label("", "127.0.0.1"), "Loopback");
     }
 
     #[test]

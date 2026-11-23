@@ -13,6 +13,7 @@ use gpui_component::{
 use crate::ui::dialog_chrome;
 use crate::ui::file_pane::{fmt_mtime, fmt_size};
 use crate::ui::sftp_browser::{SftpBrowser, Side};
+use crate::ui::{rems_from_px, scaled_px};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConflictChoice {
@@ -194,7 +195,7 @@ pub fn transfer_conflict_dialog(
     let close_browser = browser.clone();
 
     dialog_chrome(dialog)
-        .w(px(480.))
+        .w(scaled_px(px(480.), cx))
         // Escape, Enter, the close button or a click outside: this one item is
         // not transferred.
         .on_close(move |_, _, cx| {
@@ -204,15 +205,15 @@ pub fn transfer_conflict_dialog(
         })
         .child(
             v_flex()
-                .p(px(12.))
-                .gap(px(8.))
+                .p(rems_from_px(12.))
+                .gap(rems_from_px(8.))
                 .child(DialogHeader::new().child(
                     DialogTitle::new().child(format!("\"{}\" already exists", conflict.name)),
                 ))
                 .child(div().text_sm().child(place_line(conflict)))
                 .child(
                     v_flex()
-                        .gap(px(2.))
+                        .gap(rems_from_px(2.))
                         .text_sm()
                         .text_color(muted)
                         .child(facts_line("Incoming", &conflict.source))

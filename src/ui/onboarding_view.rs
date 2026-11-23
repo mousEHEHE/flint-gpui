@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{
-    px, AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Window,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -11,6 +11,7 @@ use gpui_component::{
 
 use crate::preferences::{Preferences, UpdateChecks};
 use crate::ui::lock_screen;
+use crate::ui::rems_from_px;
 use crate::ui::update_service::UpdateService;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -161,7 +162,7 @@ impl OnboardingView {
             ))
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .child(
                         Button::new("onboarding-skip")
                             .secondary()
@@ -191,7 +192,7 @@ impl OnboardingView {
 
 /// Wider than the form column, for the longer text.
 fn column() -> Div {
-    v_flex().w(px(400.)).gap(px(12.))
+    v_flex().w(rems_from_px(400.)).gap(rems_from_px(12.))
 }
 
 impl Render for OnboardingView {

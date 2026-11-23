@@ -20,14 +20,18 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 
+use crate::ui::rems_from_px;
+
 /// One selectable row in a menu.
 pub struct ContextMenuItem {
     id: ElementId,
-    label: SharedString,
+    pub(crate) label: SharedString,
     icon: Option<SharedString>,
     shortcut: Option<SharedString>,
     danger: bool,
     on_click: ClickHandler,
+    /// Shown to the right while the row is hovered; the row itself does nothing.
+    pub(crate) submenu: Vec<ContextMenuItem>,
 }
 
 impl ContextMenuItem {
@@ -43,7 +47,13 @@ impl ContextMenuItem {
             shortcut: None,
             danger: false,
             on_click: Box::new(on_click),
+            submenu: Vec::new(),
         }
+    }
+
+    pub fn submenu(mut self, items: Vec<ContextMenuItem>) -> Self {
+        self.submenu = items;
+        self
     }
 
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
@@ -54,6 +64,12 @@ impl ContextMenuItem {
     /// The key that does the same, shown dimmed at the right edge of the row.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    /// Like `shortcut`, for a key the user can unbind.
+    pub fn bound_shortcut(mut self, shortcut: Option<SharedString>) -> Self {
+        self.shortcut = shortcut;
         self
     }
 
@@ -70,7 +86,9 @@ fn menu_panel(
     id: ElementId,
     items: Vec<ContextMenuItem>,
     on_dismiss: DismissHandler,
-    cx: &App,
+    is_submenu: bool,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::Stateful<gpui::Div> {
     let fg = cx.theme().foreground;
     let danger = cx.theme().danger;
@@ -82,33 +100,94 @@ fn menu_panel(
     let hover_bg = cx.theme().list_hover;
     let active_bg = cx.theme().list_active;
     let has_icons = items.iter().any(|item| item.icon.is_some());
+    // The row whose submenu is open. It stays open until another row of this
+    // panel is hovered; a submenu's own rows leave it alone.
+    let open_submenu = (!is_submenu)
+        .then(|| window.use_keyed_state("menu-open-submenu", cx, |_, _| None::<usize>));
+    let open_ix = open_submenu.as_ref().and_then(|state| *state.read(cx));
+    // A click in the submenu is outside this panel's bounds, but must not close the menu.
+    let submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
 
-    div()
-        .id(id)
-        .occlude()
-        .on_mouse_down_out(on_dismiss)
-        .bg(bg)
-        .border_1()
-        .border_color(border_c)
-        .rounded(radius)
-        .shadow_md()
-        .p(px(2.))
-        .min_w(px(140.))
-        .children(items.into_iter().map(move |item| {
-            let item_fg = if item.danger { danger } else { fg };
+    let mut rows = Vec::with_capacity(items.len());
+    for (ix, item) in items.into_iter().enumerate() {
+        let item_fg = if item.danger { danger } else { fg };
+        let has_submenu = !item.submenu.is_empty();
+        let is_open = has_submenu && open_ix == Some(ix);
+        let target = has_submenu.then_some(ix);
+        let open_submenu = open_submenu.clone();
+        let submenu = is_open.then(|| {
+            let panel = menu_panel(
+                ("menu-submenu", ix).into(),
+                item.submenu,
+                Box::new(|_, _, _| {}),
+                true,
+                window,
+                cx,
+            );
+            let bounds = submenu_bounds.clone();
+            let anchor_point = Rc::new(Cell::new(Point::default()));
+            let flip_x = Rc::new(Cell::new(px(0.)));
+            // The row's corners, past this panel's padding and onto its border: a gap
+            // would be outside both panels. The first rows of both line up.
+            let row_probe = canvas(
+                {
+                    let (anchor_point, flip_x) = (anchor_point.clone(), flip_x.clone());
+                    move |row: Bounds<Pixels>, window, _| {
+                        let padding = rems_from_px(2.).to_pixels(window.rem_size());
+                        anchor_point
+                            .set(point(row.right() + padding, row.top() - padding - px(1.)));
+                        flip_x.set(row.left() - padding);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full();
+            let panel = div().child(panel).child(
+                canvas(move |area, _, _| bounds.set(Some(area)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            );
+            (
+                row_probe,
+                AnchoredToTrigger {
+                    anchor: Anchor::TopLeft,
+                    anchor_point,
+                    margin: px(8.),
+                    flip_x: Some(flip_x),
+                    child: panel.into_any_element(),
+                },
+            )
+        });
+        rows.push(
             div()
                 .id(item.id)
-                .h(px(22.))
-                .px(px(6.))
+                .relative()
+                .h(rems_from_px(22.))
+                .px(rems_from_px(6.))
                 .rounded(inner_radius)
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
+                .gap(rems_from_px(6.))
+                .text_size(rems_from_px(12.))
                 .text_color(item_fg)
                 .cursor_pointer()
+                .when(is_open, |el| el.bg(hover_bg))
                 .hover(move |s| s.bg(hover_bg))
                 .active(move |s| s.bg(active_bg))
+                .when_some(open_submenu, |el, open_submenu| {
+                    el.on_hover(move |is_hovered, _, cx| {
+                        if !*is_hovered {
+                            return;
+                        }
+                        open_submenu.update(cx, |open, cx| {
+                            if *open != target {
+                                *open = target;
+                                cx.notify();
+                            }
+                        });
+                    })
+                })
                 .on_click(item.on_click)
                 .map(|el| match item.icon {
                     Some(path) => el.child(
@@ -118,18 +197,53 @@ fn menu_panel(
                             .text_color(item_fg),
                     ),
                     // Keep labels on one edge when only some items have icons.
-                    None => el.when(has_icons, |el| el.child(div().size(px(12.)).flex_none())),
+                    None => el.when(has_icons, |el| {
+                        el.child(div().size(rems_from_px(12.)).flex_none())
+                    }),
                 })
                 .child(item.label)
                 .children(item.shortcut.map(|shortcut| {
                     div()
                         .ml_auto()
-                        .pl(px(16.))
-                        .text_size(px(10.5))
+                        .pl(rems_from_px(16.))
+                        .text_size(rems_from_px(10.5))
                         .text_color(muted)
                         .child(shortcut)
                 }))
-        }))
+                .when(has_submenu, |el| {
+                    el.child(
+                        div()
+                            .ml_auto()
+                            .pl(rems_from_px(16.))
+                            .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted)),
+                    )
+                })
+                .when_some(submenu, |el, (row_probe, submenu)| {
+                    // The probe first: the submenu reads the row's corners in the same frame.
+                    el.child(row_probe).child(submenu)
+                }),
+        );
+    }
+
+    div()
+        .id(id)
+        .occlude()
+        .on_mouse_down_out(move |event, window, cx| {
+            if !submenu_bounds
+                .get()
+                .is_some_and(|bounds| bounds.contains(&event.position))
+            {
+                on_dismiss(event, window, cx)
+            }
+        })
+        .bg(bg)
+        .border_1()
+        .border_color(border_c)
+        .rounded(radius)
+        .shadow_md()
+        .p(rems_from_px(2.))
+        .min_w(rems_from_px(140.))
+        .children(rows)
 }
 
 /// A menu pinned to a window-absolute point. Use it for right-click context
@@ -162,8 +276,8 @@ impl ContextMenu {
 }
 
 impl RenderOnce for ContextMenu {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let panel = menu_panel(self.id, self.items, self.on_dismiss, cx);
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let panel = menu_panel(self.id, self.items, self.on_dismiss, false, window, cx);
         deferred(
             gpui::anchored()
                 .position(self.position)
@@ -235,7 +349,7 @@ impl PopoverMenu {
 }
 
 impl RenderOnce for PopoverMenu {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         // The trigger probe writes its anchor point here at prepaint. The
         // deferred anchor element reads it at its own, later, prepaint, so the
         // menu lands on the current trigger bounds.
@@ -277,11 +391,19 @@ impl RenderOnce for PopoverMenu {
             );
 
         if self.open {
-            let panel = menu_panel("popover-menu-panel".into(), self.items, self.on_dismiss, cx);
+            let panel = menu_panel(
+                "popover-menu-panel".into(),
+                self.items,
+                self.on_dismiss,
+                false,
+                window,
+                cx,
+            );
             wrapper = wrapper.child(deferred(AnchoredToTrigger {
                 anchor,
                 anchor_point,
                 margin: px(8.),
+                flip_x: None,
                 child: panel.into_any_element(),
             }));
         }
@@ -298,6 +420,9 @@ pub struct AnchoredToTrigger {
     pub anchor: Anchor,
     pub anchor_point: Rc<Cell<Point<Pixels>>>,
     pub margin: Pixels,
+    /// Where the child's right edge goes when it would leave the window on the
+    /// right: a submenu opens on the other side of its menu instead.
+    pub flip_x: Option<Rc<Cell<Pixels>>>,
     pub child: AnyElement,
 }
 
@@ -351,6 +476,11 @@ impl Element for AnchoredToTrigger {
         // Keep the menu inside the window, leaving `margin` at the edges.
         let viewport = window.viewport_size();
         let m = self.margin;
+        if let Some(flip_x) = &self.flip_x {
+            if desired.right() > viewport.width - m {
+                desired.origin.x = flip_x.get() - size.width;
+            }
+        }
         if desired.right() > viewport.width - m {
             desired.origin.x -= desired.right() - (viewport.width - m);
         }

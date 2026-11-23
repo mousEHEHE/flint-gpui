@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, EventEmitter, Window};
+use gpui::{div, App, Context, Entity, EventEmitter, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::app_discovery::{discover_apps, DiscoveredApp};
 use crate::file_associations::SharedFileAssociations;
 use crate::file_open::open_in_specific_app;
+use crate::ui::rems_from_px;
 
 pub struct AppPicker {
     extension: String,
@@ -165,8 +166,8 @@ impl Render for AppPicker {
         let radius = cx.theme().radius;
 
         v_flex()
-            .p(px(12.))
-            .gap(px(8.))
+            .p(rems_from_px(12.))
+            .gap(rems_from_px(8.))
             .child(DialogHeader::new().child(DialogTitle::new().child(title)))
             .child(Input::new(&filter_input).small())
             .child(if filtered.is_empty() {
@@ -179,7 +180,7 @@ impl Render for AppPicker {
             } else {
                 v_flex()
                     .id("picker-app-list")
-                    .max_h(px(240.))
+                    .max_h(rems_from_px(240.))
                     .overflow_y_scroll()
                     .border_1()
                     .border_color(border)
@@ -189,14 +190,20 @@ impl Render for AppPicker {
                         let name = app.name.clone();
                         h_flex()
                             .id(("app-row", i))
-                            .h(px(24.))
-                            .px(px(8.))
-                            .gap(px(6.))
+                            .h(rems_from_px(24.))
+                            .px(rems_from_px(8.))
+                            .gap(rems_from_px(6.))
                             .items_center()
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover_bg))
                             .active(|s| s.bg(crate::theme::element_active()))
-                            .child(div().flex_1().text_size(px(12.)).text_color(fg).child(name))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(rems_from_px(12.))
+                                    .text_color(fg)
+                                    .child(name),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.confirm_with(app_path.clone(), cx);
                             }))

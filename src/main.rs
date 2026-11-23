@@ -75,6 +75,7 @@ fn main() {
             let prefs = Preferences::load_or_default();
             let theme_preference = prefs.theme;
             cx.set_global(prefs);
+            crate::ui::keymap::apply(cx);
             theme::apply_preference(theme_preference, None, cx);
 
             let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
@@ -116,6 +117,7 @@ fn main() {
                         })
                         .detach();
 
+                    theme::sync_ui_scale(window, cx);
                     let view = cx.new(|cx| RootView::new(window, cx));
                     // gpui defaults every line box to 1.618x the font size, which
                     // makes rows a third taller than the text needs. The whole UI

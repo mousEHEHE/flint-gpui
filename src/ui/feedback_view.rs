@@ -2,7 +2,7 @@
 //! sent to the sync server under the signed-in account.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, EventEmitter, SharedString, Window};
+use gpui::{div, Context, Entity, EventEmitter, SharedString, Window};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::DialogHeader,
@@ -14,6 +14,7 @@ use gpui_component::{
 use crate::account::api::FeedbackKind;
 use crate::account::{Api, ApiError};
 use crate::theme;
+use crate::ui::rems_from_px;
 use crate::ui::VaultState;
 
 /// The server takes at most this many characters.
@@ -130,9 +131,9 @@ fn kind_switch(selected: FeedbackKind, cx: &mut Context<FeedbackView>) -> impl I
     ];
     h_flex()
         .flex_none()
-        .p(px(2.))
-        .gap(px(2.))
-        .rounded(px(7.))
+        .p(rems_from_px(2.))
+        .gap(rems_from_px(2.))
+        .rounded(rems_from_px(7.))
         .bg(theme::field())
         .children(kinds.into_iter().map(|(kind, label)| {
             let is_selected = selected == kind;
@@ -142,15 +143,15 @@ fn kind_switch(selected: FeedbackKind, cx: &mut Context<FeedbackView>) -> impl I
                 // this replaced did.
                 .focusable()
                 .tab_stop(true)
-                .h(px(24.))
-                .px(px(10.))
+                .h(rems_from_px(24.))
+                .px(rems_from_px(10.))
                 .flex()
                 .items_center()
-                .rounded(px(5.))
+                .rounded(rems_from_px(5.))
                 .border_1()
                 .border_color(gpui::transparent_black())
                 .focus_visible(|s| s.border_color(theme::accent()))
-                .text_size(px(12.5))
+                .text_size(rems_from_px(12.5))
                 .cursor_pointer()
                 .when(is_selected, |el| el.bg(theme::element()).text_color(fg))
                 .when(!is_selected, |el| {
@@ -186,7 +187,7 @@ impl Render for FeedbackView {
         );
         let caption = |text: &'static str| {
             div()
-                .text_size(px(11.5))
+                .text_size(rems_from_px(11.5))
                 .text_color(theme::text_dim())
                 .child(text)
         };
@@ -198,10 +199,10 @@ impl Render for FeedbackView {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(FeedbackEvent::Closed)))
         };
 
-        let body = v_flex().p(px(8.)).gap(px(12.)).child(
+        let body = v_flex().p(rems_from_px(8.)).gap(rems_from_px(12.)).child(
             DialogHeader::new().child(
                 div()
-                    .text_size(px(15.))
+                    .text_size(rems_from_px(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(fg)
                     .child("Write to the developer"),
@@ -210,7 +211,7 @@ impl Render for FeedbackView {
 
         if self.session_token(cx).is_none() {
             return body
-                .child(div().text_size(px(13.)).text_color(muted_fg).child(
+                .child(div().text_size(rems_from_px(13.)).text_color(muted_fg).child(
                     "Messages are sent from your sync account. Sign in under Settings, Sync first.",
                 ))
                 .child(h_flex().justify_end().child(close("Close", cx)));
@@ -219,7 +220,7 @@ impl Render for FeedbackView {
             return body
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(rems_from_px(13.))
                         .text_color(success)
                         .child("Sent. Thank you."),
                 )
@@ -229,14 +230,14 @@ impl Render for FeedbackView {
         let is_sending = matches!(self.status, Status::Sending);
 
         body.child(h_flex().child(kind_switch(self.kind, cx)))
-            .child(Textarea::new(&self.message).h(px(160.)))
+            .child(Textarea::new(&self.message).h(rems_from_px(160.)))
             .child(caption(
                 "Sent with your GitHub login, the app version and your OS.",
             ))
             .children(match &self.status {
                 Status::Failed(problem) => Some(
                     div()
-                        .text_size(px(12.))
+                        .text_size(rems_from_px(12.))
                         .text_color(danger)
                         .child(problem.clone()),
                 ),
@@ -244,7 +245,7 @@ impl Render for FeedbackView {
             })
             .child(
                 h_flex()
-                    .gap(px(8.))
+                    .gap(rems_from_px(8.))
                     .justify_end()
                     .child(close("Cancel", cx).disabled(is_sending))
                     .child(
