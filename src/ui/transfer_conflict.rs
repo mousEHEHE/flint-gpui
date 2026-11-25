@@ -78,7 +78,7 @@ impl TransferConflict {
 const DOUBLE_EXTENSIONS: [&str; 4] = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"];
 
 /// Where the extension of a file name starts, dot included.
-fn extension_start(name: &str) -> Option<usize> {
+pub(crate) fn extension_start(name: &str) -> Option<usize> {
     // ASCII lowercasing keeps every byte in place, so the lengths match.
     let lower = name.to_ascii_lowercase();
     let double = DOUBLE_EXTENSIONS

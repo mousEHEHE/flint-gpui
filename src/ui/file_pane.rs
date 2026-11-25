@@ -12,7 +12,8 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState, Search as InputSearch},
     spinner::Spinner,
-    v_flex, ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    StyledExt as _,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use crate::ui::file_pane_keys::{
 };
 use crate::ui::file_preview::{preview_plan, FilePreview, PreviewContent, PreviewPlan};
 use crate::ui::file_selection::{ClickKind, FileSelection};
+use crate::ui::folder_history::FolderHistory;
 use crate::ui::keymap;
 
 #[derive(Clone, Debug)]
@@ -58,7 +60,7 @@ impl PaneKind {
 /// Which metadata columns the file list shows at the current pane width.
 /// The NAME column is always visible; the rest drop out as the pane narrows,
 /// least useful first, so file names never get squeezed onto a second line.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 struct VisibleColumns {
     type_col: bool,
     perms: bool,
@@ -76,21 +78,7 @@ fn visible_columns(width: Pixels, is_remote: bool) -> VisibleColumns {
     }
 }
 
-/// Which column the file list is sorted by (set by clicking its header).
-#[derive(Clone, Copy, PartialEq)]
-enum SortKey {
-    Name,
-    Type,
-    Perms,
-    Size,
-    Modified,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum SortDir {
-    Asc,
-    Desc,
-}
+use crate::preferences::{FileSortDir as SortDir, FileSortKey as SortKey};
 
 /// Sort rank among non-folders (folders are grouped first separately).
 fn kind_rank(k: EntryKind) -> u8 {
@@ -195,10 +183,30 @@ pub enum FilePaneEvent {
     CreateDir {
         path: String,
     },
+    /// Create an empty file at this full path.
+    CreateFile {
+        path: String,
+    },
+    /// Copy the file `from` to `to` in the same folder.
+    Duplicate {
+        from: String,
+        to: String,
+    },
+    /// Cmd+C on the selection: remember it for a paste.
+    CopyRequested {
+        items: Vec<EntryRef>,
+    },
+    /// Cmd+V: copy what was copied into the folder this pane shows.
+    PasteRequested,
     /// Rename `from` to `to` (full paths, same parent directory).
     Rename {
         from: String,
         to: String,
+    },
+    /// Move entries of this pane into `dir`, a folder of the same pane.
+    MoveInto {
+        items: Vec<EntryRef>,
+        dir: String,
     },
     /// Delete these entries (confirmed by the user in the pane's dialog).
     Delete {
@@ -265,6 +273,9 @@ enum PaneDialog {
         input: Entity<InputState>,
     },
     NewFolder {
+        input: Entity<InputState>,
+    },
+    NewFile {
         input: Entity<InputState>,
     },
     DeleteConfirm {
@@ -377,22 +388,144 @@ fn visible_entry_indices(entries: &[FileEntry], filter: &str, show_hidden: bool)
         .collect()
 }
 
-pub(crate) struct DragPreview(pub(crate) SharedString);
+/// A dragged entry looks like its row, lifted off the list. Several entries
+/// show the first one and how many there are.
+#[derive(Default)]
+struct EntryDragPreview {
+    entry: Option<FileEntry>,
+    count: usize,
+    cols: VisibleColumns,
+    width: f32,
+}
 
-impl Render for DragPreview {
+impl Render for EntryDragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py(rems_from_px(2.))
-            .rounded(rems_from_px(4.))
-            .bg(cx.theme().list_active)
+        let Some(entry) = &self.entry else {
+            return div().into_any_element();
+        };
+        // Drawn outside the app's root, so the font is not inherited.
+        entry_row(entry, None, None, self.cols, cx)
+            .w(rems_from_px(self.width))
+            .bg(crate::theme::element())
             .border_1()
-            .border_color(cx.theme().border)
-            .text_sm()
-            .text_color(cx.theme().foreground)
+            .border_color(crate::theme::border())
             .shadow_md()
-            .child(self.0.clone())
+            .font_family(crate::theme::UI_FONT)
+            .when(self.count > 1, |el| {
+                el.child(
+                    div()
+                        .flex_shrink_0()
+                        .px(rems_from_px(6.))
+                        .rounded_full()
+                        .bg(crate::theme::accent())
+                        .text_size(rems_from_px(11.))
+                        .text_color(cx.theme().background)
+                        .child(self.count.to_string()),
+                )
+            })
+            .into_any_element()
     }
+}
+
+/// Where `item` lands when moved into `dir`, or `None` when it is already there.
+pub(crate) fn move_destination(item: &str, dir: &str) -> Option<String> {
+    let (parent, name) = item.rsplit_once(['/', '\\'])?;
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if name.is_empty() || parent.trim_end_matches(['/', '\\']) == dir {
+        return None;
+    }
+    Some(format!("{dir}/{name}"))
+}
+
+/// Whether `dir` is `item` itself or inside it: no folder moves into itself.
+fn is_within(dir: &str, item: &str) -> bool {
+    let dir = dir.trim_end_matches(['/', '\\']);
+    dir == item
+        || dir
+            .strip_prefix(item)
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+}
+
+fn can_move_into(items: &[EntryRef], dir: &str) -> bool {
+    !items.iter().any(|item| is_within(dir, &item.path))
+        && items
+            .iter()
+            .any(|item| move_destination(&item.path, dir).is_some())
+}
+
+/// A row that takes a drag from its own pane and moves it into `dir`. A drag
+/// from the other pane goes to the pane's folder, as on empty space.
+fn move_drop_target(
+    row: gpui::Stateful<gpui::Div>,
+    dir: String,
+    cx: &mut Context<FilePane>,
+) -> gpui::Stateful<gpui::Div> {
+    let pane_id = cx.entity_id();
+    let over_dir = dir.clone();
+    row.drag_over::<DraggedEntry>(move |style, entry, _, cx| {
+        if entry.source == pane_id && can_move_into(&entry.items, &over_dir) {
+            style.bg(cx.theme().drop_target)
+        } else {
+            style
+        }
+    })
+    .on_drop(cx.listener(move |_this, entry: &DraggedEntry, _, cx| {
+        if entry.source != cx.entity_id() {
+            cx.emit(FilePaneEvent::EntryDropped(entry.clone()));
+        } else if can_move_into(&entry.items, &dir) {
+            cx.emit(FilePaneEvent::MoveInto {
+                items: entry.items.to_vec(),
+                dir: dir.clone(),
+            });
+        }
+    }))
+}
+
+/// "report copy.txt", then "report copy 2.txt", and so on: a name for a copy
+/// in the same folder.
+pub(crate) fn duplicate_name(name: &str, is_dir: bool, is_taken: impl Fn(&str) -> bool) -> String {
+    let (stem, extension) = match crate::ui::transfer_conflict::extension_start(name) {
+        // A leading dot is a hidden file, not an extension.
+        Some(dot) if dot > 0 && !is_dir => name.split_at(dot),
+        _ => (name, ""),
+    };
+    (1u32..)
+        .map(|number| match number {
+            1 => format!("{stem} copy{extension}"),
+            _ => format!("{stem} copy {number}{extension}"),
+        })
+        .find(|candidate| !is_taken(candidate))
+        .unwrap_or_else(|| format!("{stem} copy{extension}"))
+}
+
+/// Show `path` in the system file manager: selected in Finder and Explorer,
+/// its folder elsewhere.
+fn reveal_in_file_manager(path: &str) {
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+            .args(["-R", path])
+            .spawn()
+    } else if cfg!(windows) {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{path}"))
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(parent_dir(path))
+            .spawn()
+    };
+    if let Err(e) = result {
+        tracing::warn!(path, %e, "could not open the file manager");
+    }
+}
+
+/// The folder the "../" row opens, "/" at the top.
+fn up_folder(path: &str) -> String {
+    PathBuf::from(path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/".to_string())
 }
 
 const SPIN_CYCLE: Duration = Duration::from_millis(800);
@@ -433,6 +566,7 @@ pub struct FilePane {
     pub sync_states: HashMap<String, SyncIndicator>,
     sort_key: SortKey,
     sort_dir: SortDir,
+    history: FolderHistory,
     is_animating: bool,
     animation_start: Option<Instant>,
     animation_gen: u64,
@@ -503,6 +637,7 @@ impl FilePane {
             PaneKind::Local => ("Local", "Upload"),
             PaneKind::Session | PaneKind::Peer => ("", "Download"),
         };
+        let (sort_key, sort_dir) = Preferences::file_sort(cx);
         Self {
             focus_handle: cx.focus_handle(),
             kind,
@@ -516,8 +651,9 @@ impl FilePane {
             type_ahead: TypeAhead::default(),
             is_loading: false,
             sync_states: HashMap::new(),
-            sort_key: SortKey::Name,
-            sort_dir: SortDir::Asc,
+            sort_key,
+            sort_dir,
+            history: FolderHistory::default(),
             is_animating: false,
             animation_start: None,
             animation_gen: 0,
@@ -735,6 +871,15 @@ impl FilePane {
         cx.notify();
     }
 
+    fn drag_preview(&self, name: &str, count: usize) -> EntryDragPreview {
+        EntryDragPreview {
+            entry: self.entries.iter().find(|e| e.name == name).cloned(),
+            count,
+            cols: visible_columns(self.list_width, self.kind.is_remote()),
+            width: self.list_width / px(1.) - 2. * LIST_INSET,
+        }
+    }
+
     /// A drag began on the row `name`. Dragging a row outside the selection
     /// moves the selection to it, so what is highlighted is what is dragged.
     fn drag_started(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -942,7 +1087,10 @@ impl FilePane {
             return false;
         }
         // The list is hidden behind the error, so only leaving makes sense.
-        let leaves_error = matches!(command, PaneCommand::GoUp | PaneCommand::Refresh);
+        let leaves_error = matches!(
+            command,
+            PaneCommand::GoUp | PaneCommand::Refresh | PaneCommand::Back | PaneCommand::Forward
+        );
         if self.list_error.is_some() && !leaves_error {
             return false;
         }
@@ -950,7 +1098,20 @@ impl FilePane {
             PaneCommand::Move { to, is_extending } => self.move_selection(to, is_extending, cx),
             PaneCommand::Open => self.activate_selection(cx),
             PaneCommand::GoUp => self.go_up(cx),
+            PaneCommand::Back => self.go_back(cx),
+            PaneCommand::Forward => self.go_forward(cx),
             PaneCommand::Refresh => self.refresh(cx),
+            PaneCommand::Copy if self.focus_handle.is_focused(window) => {
+                let items = self.selected_items();
+                if items.is_empty() {
+                    return false;
+                }
+                cx.emit(FilePaneEvent::CopyRequested { items });
+            }
+            PaneCommand::Paste if self.focus_handle.is_focused(window) && !self.is_loading => {
+                cx.emit(FilePaneEvent::PasteRequested);
+            }
+            PaneCommand::Copy | PaneCommand::Paste => return false,
             PaneCommand::ToggleFilter => self.focus_or_close_filter(window, cx),
             PaneCommand::ToggleHidden => self.toggle_hidden(cx),
             PaneCommand::SelectAll if self.focus_handle.is_focused(window) => self.select_all(cx),
@@ -1134,12 +1295,18 @@ impl FilePane {
             self.sort_key = key;
             self.sort_dir = SortDir::Asc;
         }
+        let sort = (self.sort_key, self.sort_dir);
+        Preferences::update(cx, |prefs| prefs.file_sort = sort);
         self.sort_entries();
         cx.notify();
     }
 
     pub fn set_entries(&mut self, path: String, entries: Vec<FileEntry>, cx: &mut Context<Self>) {
         let path_changed = self.path != path;
+        // Before the first listing `path` is only a placeholder.
+        if path_changed && self.is_listed {
+            self.history.landed(self.path.clone(), &path);
+        }
         self.path = path;
         self.entries = entries;
         self.is_listed = true;
@@ -1262,12 +1429,22 @@ impl FilePane {
         cx.notify();
     }
 
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.history.go_back(&self.path) {
+            self.begin_load(cx);
+            cx.emit(FilePaneEvent::NavigateTo(path));
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.history.go_forward(&self.path) {
+            self.begin_load(cx);
+            cx.emit(FilePaneEvent::NavigateTo(path));
+        }
+    }
+
     fn go_up(&mut self, cx: &mut Context<Self>) {
-        let parent = PathBuf::from(&self.path)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| "/".to_string());
+        let parent = up_folder(&self.path);
         self.begin_load(cx);
         cx.emit(FilePaneEvent::NavigateTo(parent));
     }
@@ -1351,6 +1528,17 @@ impl FilePane {
             |this, _input, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.commit_dialog(window, cx),
                 InputEvent::Change => cx.notify(),
+                // A click elsewhere keeps the new name, as in Finder, and the
+                // keys stay where the click put them.
+                InputEvent::Blur if matches!(this.dialog, Some(PaneDialog::Rename { .. })) => {
+                    let focused = window.focused(cx);
+                    this.commit_dialog(window, cx);
+                    this.dialog = None;
+                    if let Some(focused) = focused {
+                        window.focus(&focused, cx);
+                    }
+                    cx.notify();
+                }
                 _ => {}
             },
         )
@@ -1365,11 +1553,35 @@ impl FilePane {
         cx: &mut Context<Self>,
     ) {
         let input = self.dialog_input(&entry.name, window, cx);
+        // The name without its extension is what gets retyped most.
+        let stem_end = match crate::ui::transfer_conflict::extension_start(&entry.name) {
+            Some(dot) if dot > 0 && !entry.is_dir => dot,
+            _ => entry.name.len(),
+        };
+        input.update(cx, |state, cx| state.set_selected_range(0..stem_end, cx));
         self.dialog = Some(PaneDialog::Rename {
             from: entry.path.clone(),
             input,
         });
         cx.notify();
+    }
+
+    fn open_new_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.dialog_input("", window, cx);
+        self.dialog = Some(PaneDialog::NewFile { input });
+        cx.notify();
+    }
+
+    fn duplicate(&mut self, entry: &MenuEntry, cx: &mut Context<Self>) {
+        let name = duplicate_name(&entry.name, entry.is_dir, |candidate| {
+            self.entries.iter().any(|e| e.name == candidate)
+        });
+        let to = format!("{}/{}", parent_dir(&entry.path).trim_end_matches('/'), name);
+        self.begin_load(cx);
+        cx.emit(FilePaneEvent::Duplicate {
+            from: entry.path.clone(),
+            to,
+        });
     }
 
     fn open_new_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1457,6 +1669,18 @@ impl FilePane {
                 let path = format!("{}/{}", self.path.trim_end_matches('/'), name);
                 self.begin_load(cx);
                 cx.emit(FilePaneEvent::CreateDir { path });
+            }
+            Some(PaneDialog::NewFile { input }) => {
+                let name = input.read(cx).value().trim().to_string();
+                // An upload over a file of that name would empty it.
+                let is_taken = self.entries.iter().any(|e| e.name == name);
+                if !is_valid_entry_name(&name) || is_taken {
+                    self.dialog = Some(PaneDialog::NewFile { input });
+                    return;
+                }
+                let path = format!("{}/{}", self.path.trim_end_matches('/'), name);
+                self.begin_load(cx);
+                cx.emit(FilePaneEvent::CreateFile { path });
             }
             Some(PaneDialog::DeleteConfirm { items, .. }) => {
                 self.begin_load(cx);
@@ -1606,6 +1830,42 @@ impl FilePane {
                     .icon("icons/pen-line.svg")
                     .bound_shortcut(keymap::label("files.rename", cx)),
                 );
+                // A folder on a server would need a copy of its whole tree.
+                if !entry.is_dir {
+                    items.push(
+                        ContextMenuItem::new(
+                            "ctx-duplicate",
+                            "Duplicate",
+                            cx.listener({
+                                let entry = entry.clone();
+                                move |this, _, _, cx| {
+                                    this.context_menu = None;
+                                    this.duplicate(&entry, cx);
+                                }
+                            }),
+                        )
+                        .icon("icons/copy.svg"),
+                    );
+                }
+                if self.kind == PaneKind::Local {
+                    let path = entry.path.clone();
+                    items.push(
+                        ContextMenuItem::new(
+                            "ctx-reveal",
+                            if cfg!(target_os = "macos") {
+                                "Reveal in Finder"
+                            } else {
+                                "Show in File Manager"
+                            },
+                            cx.listener(move |this, _, _, cx| {
+                                this.context_menu = None;
+                                reveal_in_file_manager(&path);
+                                cx.notify();
+                            }),
+                        )
+                        .icon("icons/folder-open.svg"),
+                    );
+                }
             }
             // Open, Rename and Copy Path are about one entry.
             _ => items.push(self.transfer_menu_item(entries, cx)),
@@ -1794,6 +2054,26 @@ impl FilePane {
             .icon("icons/folder-plus.svg")
             .bound_shortcut(keymap::label("files.new_folder", cx)),
             ContextMenuItem::new(
+                "ctx-new-file",
+                "New File\u{2026}",
+                cx.listener(|this, _, window, cx| {
+                    this.context_menu = None;
+                    this.open_new_file_dialog(window, cx);
+                }),
+            )
+            .icon("icons/file-plus.svg"),
+            ContextMenuItem::new(
+                "ctx-paste",
+                "Paste",
+                cx.listener(|this, _, _, cx| {
+                    this.context_menu = None;
+                    cx.emit(FilePaneEvent::PasteRequested);
+                    cx.notify();
+                }),
+            )
+            .icon("icons/clipboard-paste.svg")
+            .bound_shortcut(keymap::label("files.paste", cx)),
+            ContextMenuItem::new(
                 "ctx-refresh",
                 "Refresh",
                 cx.listener(|this, _, _, cx| {
@@ -1859,8 +2139,10 @@ impl FilePane {
 
         let (title, body, confirm_label, confirm_danger): (String, gpui::AnyElement, &str, bool) =
             match dialog {
-                PaneDialog::Rename { from, input } => (
-                    "Rename".to_string(),
+                // Edited in its row, see `render_entry`.
+                PaneDialog::Rename { .. } => return None,
+                PaneDialog::NewFile { input } => (
+                    "New file".to_string(),
                     v_flex()
                         .gap_2()
                         .child(
@@ -1868,11 +2150,11 @@ impl FilePane {
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .truncate()
-                                .child(from.clone()),
+                                .child(format!("in {}", self.path)),
                         )
                         .child(Input::new(input).small())
                         .into_any_element(),
-                    "Rename",
+                    "Create",
                     false,
                 ),
                 PaneDialog::NewFolder { input } => (
@@ -2194,6 +2476,24 @@ impl Render for FilePane {
                     .gap(rems_from_px(4.))
                     .items_center()
                     .child(pill)
+                    .child(
+                        Button::new("go-back")
+                            .ghost()
+                            .icon(Icon::empty().path("icons/arrow-left.svg"))
+                            .xsmall()
+                            .disabled(!self.history.can_go_back())
+                            .tooltip(keymap::with_label("Back", "files.back", cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
+                    )
+                    .child(
+                        Button::new("go-forward")
+                            .ghost()
+                            .icon(Icon::empty().path("icons/arrow-right.svg"))
+                            .xsmall()
+                            .disabled(!self.history.can_go_forward())
+                            .tooltip(keymap::with_label("Forward", "files.forward", cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
+                    )
                     .child(path_area)
                     .children(filter_field)
                     .child(
@@ -2330,6 +2630,7 @@ impl Render for FilePane {
                 // hover repaint (which redraws the whole window) stays cheap even
                 // with hundreds of entries. Item 0 is the "../" row when shown.
                 let view = cx.entity();
+                let pane_id = cx.entity_id();
                 let item_count = self.visible_indices().len() + show_parent as usize;
                 // Built once a frame and shared: every selected row drags the
                 // whole selection, and the list calls back more than once.
@@ -2347,7 +2648,8 @@ impl Render for FilePane {
                         let mut out = Vec::with_capacity(range.len());
                         for ix in range {
                             if show_parent && ix == 0 {
-                                out.push(render_parent_row(is_loading, cols, cx));
+                                let parent = up_folder(&pane_path);
+                                out.push(render_parent_row(parent, is_loading, cols, cx));
                                 continue;
                             }
                             let vis_pos = ix - show_parent as usize;
@@ -2357,6 +2659,7 @@ impl Render for FilePane {
                             if let Some(e) = this.entries.get(entry_ix) {
                                 let full =
                                     format!("{}/{}", pane_path.trim_end_matches('/'), e.name);
+                                let full_path = full.clone();
                                 let sync = this.sync_states.get(&full).cloned();
                                 let is_selected = this.selection.contains(&e.name);
                                 let drag_items = match &selected_items {
@@ -2366,9 +2669,18 @@ impl Render for FilePane {
                                         is_dir: e.is_dir,
                                     }]),
                                 };
+                                let rename = match &this.dialog {
+                                    Some(PaneDialog::Rename { from, input })
+                                        if *from == full_path =>
+                                    {
+                                        Some(input.clone())
+                                    }
+                                    _ => None,
+                                };
                                 out.push(render_entry(
                                     entry_ix,
                                     e,
+                                    rename,
                                     selection_bg(is_selected, has_focus),
                                     drag_items,
                                     &pane_path,
@@ -2396,7 +2708,14 @@ impl Render for FilePane {
                 .on_drop(cx.listener(|_this, paths: &ExternalPaths, _window, cx| {
                     cx.emit(FilePaneEvent::ExternalDropped(paths.paths().to_vec()));
                 }))
-                .drag_over::<DraggedEntry>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+                .drag_over::<DraggedEntry>(move |style, entry, _, cx| {
+                    // A drag within the pane only lands on a folder row.
+                    if entry.source == pane_id {
+                        style
+                    } else {
+                        style.bg(cx.theme().drop_target)
+                    }
+                })
                 .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
                 // A click anywhere in the list, also between the rows, brings
                 // the keys to this pane.
@@ -2505,14 +2824,15 @@ fn is_at_root(path: &str) -> bool {
 // The "../" pseudo-entry pinned to the top of the list. Clicking it navigates
 // to the parent directory. Laid out to line up with the real entry columns.
 fn render_parent_row(
+    parent: String,
     is_loading: bool,
     cols: VisibleColumns,
     cx: &mut Context<FilePane>,
 ) -> gpui::AnyElement {
     let muted_fg = cx.theme().muted_foreground;
 
-    h_flex()
-        .id("entry-parent")
+    let row = h_flex().id("entry-parent");
+    move_drop_target(row, parent, cx)
         .w_full()
         .h(rems_from_px(ROW_HEIGHT))
         .px(rems_from_px(ROW_PADDING))
@@ -2640,26 +2960,21 @@ fn external_drag_payload(
     None
 }
 
-// One row reads all of this to draw itself; a struct would only move the list.
-#[allow(clippy::too_many_arguments)]
-fn render_entry(
-    ix: usize,
+/// The look of a file row: icon, name and the columns that fit.
+fn entry_row(
     entry: &FileEntry,
-    selected_bg: Option<Hsla>,
-    drag_items: Rc<[EntryRef]>,
-    pane_path: &str,
-    kind: PaneKind,
-    is_loading: bool,
+    rename: Option<&Entity<InputState>>,
     sync: Option<SyncIndicator>,
     cols: VisibleColumns,
-    cx: &mut Context<FilePane>,
-) -> gpui::AnyElement {
+    cx: &App,
+) -> gpui::Div {
     let muted_fg = cx.theme().muted_foreground;
     let dim_fg = crate::theme::text_dim();
     let fg = cx.theme().foreground;
     let danger = cx.theme().danger;
     let primary = cx.theme().primary;
 
+    let is_dir = entry.is_dir;
     let opens_as_folder = entry.opens_as_folder();
     let icon = if opens_as_folder {
         IconName::FolderClosed
@@ -2686,19 +3001,6 @@ fn render_entry(
     let is_dim = name.starts_with('.');
     let name_color = if is_dim { muted_fg } else { fg };
 
-    let full_path = format!("{}/{}", pane_path.trim_end_matches('/'), entry.name);
-    let is_remote = kind.is_remote();
-    let is_session = kind == PaneKind::Session;
-    let is_dir = entry.is_dir;
-    // Every remote row reports hover: directories get their listing prefetched,
-    // files get a head start on the local copy an outbound drag will need.
-    let hover_path = is_remote.then(|| full_path.clone());
-    let drag_value = DraggedEntry {
-        source: cx.entity_id(),
-        items: drag_items,
-    };
-    let pane = cx.entity().downgrade();
-
     let sync_elem: Option<gpui::AnyElement> = sync.map(|state| {
         let (label, color) = match state {
             SyncIndicator::Uploading => ("syncing".to_string(), None),
@@ -2716,62 +3018,28 @@ fn render_entry(
             .into_any_element()
     });
 
-    let mut el = h_flex()
-        .id(("entry", ix))
+    h_flex()
         .w_full()
         .h(rems_from_px(ROW_HEIGHT))
         .px(rems_from_px(ROW_PADDING))
         .gap(rems_from_px(8.))
         .items_center()
         .rounded(rems_from_px(6.))
-        .cursor_pointer()
-        .when_some(selected_bg, |s, bg| s.bg(bg))
-        .when(selected_bg.is_none(), |s| {
-            s.hover(|s| s.bg(crate::theme::field()))
-        })
-        .active(|s| s.bg(crate::theme::element_active()))
-        .on_drag(drag_value, {
-            let pane = pane.clone();
-            let row_name = entry.name.clone();
-            move |entry, _, _, cx| {
-                pane.update(cx, |pane, cx| {
-                    pane.drag_started(&row_name, cx);
-                    cx.emit(FilePaneEvent::DragStarted(entry.clone()))
-                })
-                .ok();
-                let label: SharedString = items_label(&entry.items).into();
-                cx.new(|_| DragPreview(label))
-            }
-        })
-        .external_drag_payload::<DraggedEntry>(move |entry, _, cx| {
-            external_drag_payload(entry, &pane, cx)
-        })
-        .when(!is_loading, |s| {
-            s.on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    window.focus(&this.focus_handle, cx);
-                    let kind = click_kind(event.modifiers());
-                    this.row_clicked(ix, kind, cx);
-                    if kind == ClickKind::Single && event.click_count() == 2 && is_session {
-                        let Some(e) = this.entries.get(ix) else {
-                            return;
-                        };
-                        if !e.opens_as_folder() {
-                            let path = format!("{}/{}", this.path.trim_end_matches('/'), e.name);
-                            open_file(path, cx);
-                        }
-                    }
-                }),
-            )
-        })
         .child(
             Icon::new(icon)
                 .size(rems_from_px(15.))
                 .flex_shrink_0()
                 .text_color(icon_color),
         )
-        .child(match link_target {
-            None => div()
+        .child(match (rename, link_target) {
+            (Some(input), _) => div()
+                .flex_1()
+                .min_w_0()
+                // The row under it would take the click and the keys.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Input::new(input).xsmall().text_size(rems_from_px(13.)))
+                .into_any_element(),
+            (None, None) => div()
                 .flex_1()
                 .min_w_0()
                 .text_size(rems_from_px(13.))
@@ -2783,7 +3051,7 @@ fn render_entry(
                 .child(name)
                 .into_any_element(),
             // A link shows where it points, dimmed, after its own name.
-            Some(target) => h_flex()
+            (None, Some(target)) => h_flex()
                 .flex_1()
                 .min_w_0()
                 .gap(rems_from_px(5.))
@@ -2862,7 +3130,85 @@ fn render_entry(
                     .text_color(dim_fg)
                     .child(modified_str),
             )
+        })
+}
+
+// One row reads all of this to draw itself; a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
+fn render_entry(
+    ix: usize,
+    entry: &FileEntry,
+    rename: Option<Entity<InputState>>,
+    selected_bg: Option<Hsla>,
+    drag_items: Rc<[EntryRef]>,
+    pane_path: &str,
+    kind: PaneKind,
+    is_loading: bool,
+    sync: Option<SyncIndicator>,
+    cols: VisibleColumns,
+    cx: &mut Context<FilePane>,
+) -> gpui::AnyElement {
+    let full_path = format!("{}/{}", pane_path.trim_end_matches('/'), entry.name);
+    let is_remote = kind.is_remote();
+    let is_session = kind == PaneKind::Session;
+    // Every remote row reports hover: directories get their listing prefetched,
+    // files get a head start on the local copy an outbound drag will need.
+    let hover_path = is_remote.then(|| full_path.clone());
+    let drag_value = DraggedEntry {
+        source: cx.entity_id(),
+        items: drag_items,
+    };
+    let pane = cx.entity().downgrade();
+
+    let row = entry_row(entry, rename.as_ref(), sync, cols, cx)
+        .id(("entry", ix))
+        .cursor_pointer()
+        .when_some(selected_bg, |s, bg| s.bg(bg))
+        .when(selected_bg.is_none(), |s| {
+            s.hover(|s| s.bg(crate::theme::field()))
+        })
+        .active(|s| s.bg(crate::theme::element_active()))
+        .on_drag(drag_value, {
+            let pane = pane.clone();
+            let row_name = entry.name.clone();
+            move |entry, _, _, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.drag_started(&row_name, cx);
+                    cx.emit(FilePaneEvent::DragStarted(entry.clone()))
+                })
+                .ok();
+                let preview = pane
+                    .upgrade()
+                    .map(|pane| pane.read(cx).drag_preview(&row_name, entry.items.len()));
+                cx.new(|_| preview.unwrap_or_default())
+            }
+        })
+        .external_drag_payload::<DraggedEntry>(move |entry, _, cx| {
+            external_drag_payload(entry, &pane, cx)
+        })
+        .when(!is_loading, |s| {
+            s.on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    let kind = click_kind(event.modifiers());
+                    this.row_clicked(ix, kind, cx);
+                    if kind == ClickKind::Single && event.click_count() == 2 && is_session {
+                        let Some(e) = this.entries.get(ix) else {
+                            return;
+                        };
+                        if !e.opens_as_folder() {
+                            let path = format!("{}/{}", this.path.trim_end_matches('/'), e.name);
+                            open_file(path, cx);
+                        }
+                    }
+                }),
+            )
         });
+    let mut el = if entry.opens_as_folder() && !is_loading {
+        move_drop_target(row, full_path, cx)
+    } else {
+        row
+    };
 
     if let Some(hover_path) = hover_path {
         if !is_loading {
@@ -3040,6 +3386,48 @@ mod tests {
         // Rows are built with '/' joins, so local paths can mix separators.
         assert_eq!(parent_dir("C:\\Users\\me/f.txt"), "C:\\Users\\me");
         assert_eq!(parent_dir("noseparator"), "");
+    }
+
+    #[test]
+    fn moves_into_folder_but_not_into_itself() {
+        assert_eq!(
+            move_destination("/a/x.txt", "/a/b"),
+            Some("/a/b/x.txt".into())
+        );
+        assert_eq!(move_destination("/a/b/x", "/"), Some("/x".into()));
+        assert_eq!(move_destination("/a/x.txt", "/a/"), None);
+        assert_eq!(move_destination("/x", "/"), None);
+
+        let item = |path: &str| EntryRef {
+            path: path.into(),
+            is_dir: true,
+        };
+        assert!(can_move_into(&[item("/a/b")], "/a/c"));
+        assert!(!can_move_into(&[item("/a/b")], "/a/b"));
+        assert!(!can_move_into(&[item("/a/b")], "/a/b/c"));
+        assert!(can_move_into(&[item("/a/b")], "/a/bc"));
+        // One folder of a selection dropped onto another one moves nothing.
+        assert!(!can_move_into(&[item("/a/b"), item("/a/c")], "/a/c"));
+    }
+
+    #[test]
+    fn a_duplicate_is_named_copy_before_the_extension() {
+        let taken = ["notes copy.txt", "notes copy 2.txt"];
+        let is_taken = |name: &str| taken.contains(&name);
+        assert_eq!(
+            duplicate_name("notes.txt", false, |_| false),
+            "notes copy.txt"
+        );
+        assert_eq!(
+            duplicate_name("notes.txt", false, is_taken),
+            "notes copy 3.txt"
+        );
+        assert_eq!(
+            duplicate_name("app.tar.gz", false, |_| false),
+            "app copy.tar.gz"
+        );
+        assert_eq!(duplicate_name(".bashrc", false, |_| false), ".bashrc copy");
+        assert_eq!(duplicate_name("v1.2", true, |_| false), "v1.2 copy");
     }
 
     #[test]

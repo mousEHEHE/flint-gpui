@@ -1,6 +1,8 @@
 pub mod app_picker;
 pub mod app_view;
+pub mod closed_tabs;
 pub mod command_palette;
+pub mod confirm_dialog;
 pub mod context_menu;
 pub mod create_vault_view;
 pub mod feedback_view;
@@ -8,7 +10,9 @@ pub mod file_pane;
 pub mod file_pane_keys;
 pub mod file_preview;
 pub mod file_selection;
+pub mod folder_history;
 pub mod forwards_popover;
+pub mod hidden_hosts;
 pub mod host_icon;
 pub mod host_sharing;
 pub mod import_view;

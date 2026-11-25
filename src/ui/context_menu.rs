@@ -146,6 +146,8 @@ fn menu_panel(
             let panel = div().child(panel).child(
                 canvas(move |area, _, _| bounds.set(Some(area)), |_, _, _, _| {})
                     .absolute()
+                    .top_0()
+                    .left_0()
                     .size_full(),
             );
             (

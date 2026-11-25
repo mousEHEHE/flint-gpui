@@ -778,6 +778,8 @@ pub struct ServerSession {
     pub(crate) active_terminal: usize,
     /// The tab being renamed and its name field.
     pub(crate) tab_rename: Option<(Entity<TerminalView>, Entity<InputState>)>,
+    /// The terminal tab whose right-click menu is open, and where.
+    pub(crate) tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// The active terminal should take the keyboard on the next render.
     pub(crate) is_terminal_focus_pending: bool,
     /// The file panes are hidden and the terminal fills the tab.
@@ -1009,6 +1011,7 @@ impl ServerSession {
             terminals: Vec::new(),
             active_terminal: 0,
             tab_rename: None,
+            tab_menu: None,
             is_terminal_focus_pending: false,
             is_sftp_hidden: false,
             shell_history: Vec::new(),
@@ -1090,6 +1093,7 @@ impl ServerSession {
             terminals: Vec::new(),
             active_terminal: 0,
             tab_rename: None,
+            tab_menu: None,
             is_terminal_focus_pending: true,
             is_sftp_hidden: true,
             shell_history: Vec::new(),

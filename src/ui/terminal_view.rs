@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
-    KeyBinding, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, Subscription, Task, Window,
+    actions, div, px, App, Bounds, ClipboardItem, Context, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, Keystroke, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
+    Subscription, Task, Window,
 };
 
 use crate::preferences::{Preferences, DEFAULT_TERMINAL_FONT_SIZE};
@@ -14,6 +15,7 @@ use crate::shell::{
     ShellEvent, ShellHandle, TermSnapshot,
 };
 use crate::theme as flint_theme;
+use crate::ui::confirm_dialog::{self, Question};
 use crate::ui::context_menu::{ContextMenu, ContextMenuItem};
 use crate::ui::keyboard_layout::bind_chord;
 use crate::ui::mouse_report::{encode_mouse_event, MouseButton as ReportButton, MouseEventKind};
@@ -157,6 +159,8 @@ pub struct TerminalView {
     _preferences_subscription: Subscription,
     /// When set, a right-click context menu is open, anchored at this point.
     context_menu: Option<Point<Pixels>>,
+    /// The link the right-click was on.
+    context_menu_link: Option<String>,
     /// Line count of the last copy, while its note is on screen.
     copied_line_count: Option<usize>,
     /// Takes the note down again. Replaced (and so cancelled) by the next copy.
@@ -174,6 +178,8 @@ pub struct TerminalView {
 pub enum TerminalEvent {
     /// The remote shell ended while the connection stayed up.
     Exited,
+    /// Files from Finder or Explorer were dropped on a shell on the server.
+    FilesDropped(Vec<std::path::PathBuf>),
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -256,6 +262,7 @@ impl TerminalView {
             search: SearchState::default(),
             _preferences_subscription: preferences_subscription,
             context_menu: None,
+            context_menu_link: None,
             copied_line_count: None,
             copied_hint_task: None,
             is_link_click: false,
@@ -401,6 +408,17 @@ impl TerminalView {
         let has_clipboard = cx.read_from_clipboard().and_then(|i| i.text()).is_some();
         let mut items: Vec<ContextMenuItem> = Vec::new();
 
+        if let Some(url) = self.context_menu_link.clone() {
+            items.push(ContextMenuItem::new(
+                "term-open-link",
+                "Open Link",
+                cx.listener(move |this, _, _, cx| {
+                    this.context_menu = None;
+                    cx.open_url(&url);
+                    cx.notify();
+                }),
+            ));
+        }
         if has_selection {
             items.push(ContextMenuItem::new(
                 "term-copy",
@@ -718,10 +736,24 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub(crate) fn end_selection(&mut self) {
-        self.is_selecting = false;
+    pub(crate) fn end_selection(&mut self, cx: &mut Context<Self>) {
+        let was_selecting = std::mem::take(&mut self.is_selecting);
         self.drag_position = None;
         self.autoscroll_task = None;
+        if !was_selecting || self.selection.is_none() || !Preferences::is_copy_on_select(cx) {
+            return;
+        }
+        // Read after the head updates the drag queued, so it is the whole selection.
+        let shell = self.shell.clone();
+        cx.spawn(async move |_, cx| {
+            let Some(text) = shell.extract_selection_text().await else {
+                return;
+            };
+            if !text.is_empty() {
+                cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn set_drag_position(&mut self, position: Point<Pixels>) {
@@ -906,7 +938,7 @@ impl TerminalView {
         // On X11/Wayland the clipboard lives in the app that owns it, so a
         // synchronous read stalls the frame until that app answers.
         let clipboard = cx.read_from_clipboard_async();
-        cx.spawn(async move |_, _| {
+        cx.spawn_in(window, async move |_, cx| {
             let item = match clipboard.await {
                 Ok(item) => item,
                 Err(e) => {
@@ -917,9 +949,62 @@ impl TerminalView {
             let Some(text) = item.and_then(|item| item.text()) else {
                 return;
             };
-            shell.send_input(paste_bytes(&text, is_bracketed)).await;
+            if is_bracketed || !runs_several_lines(&text) {
+                shell.send_input(paste_bytes(&text, is_bracketed)).await;
+                return;
+            }
+            // Without bracketed paste every line runs as it arrives.
+            cx.update(|window, cx| {
+                let question = Question {
+                    title: "Paste several lines?".into(),
+                    message: format!(
+                        "The shell will run each of the {} lines as a command.",
+                        text.trim_end_matches(['\r', '\n']).lines().count()
+                    )
+                    .into(),
+                    preview: Some(paste_preview(&text).into()),
+                    confirm_label: "Paste".into(),
+                    is_danger: false,
+                };
+                confirm_dialog::ask(question, window, cx, move |_, cx| {
+                    let shell = shell.clone();
+                    let bytes = paste_bytes(&text, false);
+                    cx.background_executor()
+                        .spawn(async move { shell.send_input(bytes).await })
+                        .detach();
+                });
+            })
+            .ok();
         })
         .detach();
+    }
+
+    /// A local shell gets the paths typed in. A shell on a server gets them
+    /// uploaded first, see `ServerSession`.
+    fn files_dropped(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        if !self.is_local {
+            cx.emit(TerminalEvent::FilesDropped(paths));
+            return;
+        }
+        let typed: Vec<String> = paths
+            .iter()
+            .map(|path| shell_quote(&path.to_string_lossy()))
+            .collect();
+        self.type_paths(&typed, cx);
+    }
+
+    /// Type already quoted paths at the prompt, with a space after them.
+    pub(crate) fn type_paths(&self, quoted: &[String], cx: &mut Context<Self>) {
+        if quoted.is_empty() {
+            return;
+        }
+        self.send_input(format!("{} ", quoted.join(" ")).into_bytes(), cx);
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1099,6 +1184,7 @@ impl TerminalView {
         // Right-click (outside mouse-reporting mode): open the context menu.
         if event.button == MouseButton::Right {
             self.context_menu = Some(event.position);
+            self.context_menu_link = self.link_at_position(event.position).map(|link| link.url);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -1364,6 +1450,10 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.opacity(0.85))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.files_dropped(paths.paths().to_vec(), window, cx);
+            }))
             .child(TerminalElement::new(cx.entity()))
             .children(search_bar)
             .children(self.render_copied_hint())
@@ -1405,6 +1495,42 @@ fn copied_hint_text(line_count: usize) -> String {
     format!("Copied {line_count} lines")
 }
 
+/// A paste that would run more than one command: a line break before the end.
+fn runs_several_lines(text: &str) -> bool {
+    text.trim_end_matches(['\r', '\n']).contains(['\r', '\n'])
+}
+
+/// The first lines of a paste, for the question before it runs.
+fn paste_preview(text: &str) -> String {
+    const LINES: usize = 6;
+    const WIDTH: usize = 80;
+    let lines: Vec<&str> = text.trim_end_matches(['\r', '\n']).lines().collect();
+    let mut preview: Vec<String> = lines
+        .iter()
+        .take(LINES)
+        .map(|line| match line.char_indices().nth(WIDTH) {
+            Some((cut, _)) => format!("{}\u{2026}", &line[..cut]),
+            None => line.to_string(),
+        })
+        .collect();
+    if lines.len() > LINES {
+        preview.push(format!("\u{2026} {} more lines", lines.len() - LINES));
+    }
+    preview.join("\n")
+}
+
+/// A path as one word for a POSIX shell.
+pub(crate) fn shell_quote(path: &str) -> String {
+    let is_plain = !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%".contains(c));
+    if is_plain {
+        return path.to_string();
+    }
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
 /// Turn clipboard text into the bytes to send for a paste.
 ///
 /// With bracketed paste on, the text goes between the ESC[200~ / ESC[201~
@@ -1430,7 +1556,39 @@ fn paste_bytes(text: &str, is_bracketed: bool) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{copied_hint_text, paste_bytes, take_whole_lines};
+    use super::{
+        copied_hint_text, paste_bytes, paste_preview, runs_several_lines, shell_quote,
+        take_whole_lines,
+    };
+
+    #[test]
+    fn only_a_break_before_the_end_makes_a_paste_several_lines() {
+        assert!(!runs_several_lines("ls -la"));
+        assert!(!runs_several_lines("ls -la\n"));
+        assert!(!runs_several_lines("ls -la\r\n"));
+        assert!(runs_several_lines("cd /tmp\nrm -rf x"));
+        assert!(runs_several_lines("a\r\nb\n"));
+    }
+
+    #[test]
+    fn the_paste_preview_shows_the_first_lines_and_counts_the_rest() {
+        let text = (1..=9)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = paste_preview(&text);
+        assert!(preview.starts_with("line 1\nline 2"));
+        assert!(preview.ends_with("\u{2026} 3 more lines"));
+        let long = "x".repeat(100);
+        assert_eq!(paste_preview(&long), format!("{}\u{2026}", "x".repeat(80)));
+    }
+
+    #[test]
+    fn dropped_paths_are_quoted_for_the_shell() {
+        assert_eq!(shell_quote("/Users/me/notes.txt"), "/Users/me/notes.txt");
+        assert_eq!(shell_quote("/tmp/My File.txt"), "'/tmp/My File.txt'");
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
 
     #[test]
     fn copy_note_counts_lines_only_for_a_multi_line_copy() {

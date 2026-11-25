@@ -1616,6 +1616,19 @@ impl SettingsView {
                 "Shows matching commands as you type. Reads the host's shell history \
                  when a session connects.",
             ))
+            .child(
+                Checkbox::new("terminal-copy-on-select")
+                    .checked(Preferences::is_copy_on_select(cx))
+                    .label("Copy on select")
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let is_on = *checked;
+                        Preferences::update(cx, |prefs| prefs.is_copy_on_select = is_on);
+                        cx.notify();
+                    })),
+            )
+            .child(caption(
+                "Selecting text with the mouse copies it to the clipboard.",
+            ))
             .when(cfg!(target_os = "macos"), |el| {
                 el.child(
                     Checkbox::new("terminal-option-meta")

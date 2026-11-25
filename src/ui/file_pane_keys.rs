@@ -41,6 +41,8 @@ pub enum PaneCommand {
     },
     Open,
     GoUp,
+    Back,
+    Forward,
     Rename,
     Delete,
     /// Upload from the local pane, download from the remote one.
@@ -50,6 +52,8 @@ pub enum PaneCommand {
     ToggleHidden,
     NewFolder,
     SelectAll,
+    Copy,
+    Paste,
     /// Escape: close whatever is open, then drop the selection.
     Cancel,
 }

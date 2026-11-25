@@ -56,6 +56,12 @@ pub enum SidebarEvent {
     /// A tab that is not a saved host: a local terminal. Carries its session id.
     ShowTab(String),
     CloseTab(String),
+    ConnectInNewTab(Uuid),
+    OpenInSplit(Uuid),
+    MoveToGroup {
+        host: Uuid,
+        group: Option<Uuid>,
+    },
 }
 
 pub struct Sidebar {
@@ -131,18 +137,9 @@ impl Sidebar {
         let text_dim = flint_theme::text_dim();
         let row_hover = flint_theme::field();
         let row_selected = flint_theme::element();
-        let status_online = flint_theme::status_online();
-        let status_connecting = theme.warning;
-        let status_down = theme.danger;
 
         let entry_id = entry.id;
-        // An imported host can have an empty label; its address stands in.
-        let label: SharedString = if entry.label.is_empty() {
-            entry.host.clone()
-        } else {
-            entry.label.clone()
-        }
-        .into();
+        let label = host_label(entry);
         let team_name = entry.team_name.clone();
         let entry_id_str = entry_id.to_string();
         let is_active = self.active_server_id.as_deref() == Some(entry_id_str.as_str());
@@ -150,17 +147,7 @@ impl Sidebar {
 
         let label_color = if is_dimmed { text_muted } else { text };
 
-        let dot_color = match status {
-            HostStatus::Connected => status_online,
-            HostStatus::Connecting => status_connecting,
-            HostStatus::Disconnected => status_down,
-            HostStatus::Offline => flint_theme::status_off(),
-        };
-        let dot = div()
-            .size(rems_from_px(6.))
-            .flex_none()
-            .rounded_full()
-            .bg(dot_color);
+        let dot = status_dot(status, cx);
 
         h_flex()
             .id(("sidebar-host", ui_idx))
@@ -279,6 +266,12 @@ impl Sidebar {
                     cx.notify();
                 }),
             )
+            .when(show_close, |row| {
+                row.on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::CloseServer(entry_id))),
+                )
+            })
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::OpenServer(entry_id));
             }))
@@ -300,7 +293,8 @@ impl Sidebar {
         let text_dim = flint_theme::text_dim();
         let is_active = self.active_server_id.as_deref() == Some(session_id.as_str());
         let group_id: SharedString = format!("{SIDEBAR_GROUP}-{ui_idx}").into();
-        let (show_id, close_id) = (session_id.clone(), session_id);
+        let (show_id, close_id, middle_close_id) =
+            (session_id.clone(), session_id.clone(), session_id);
 
         h_flex()
             .id(("sidebar-local", ui_idx))
@@ -367,6 +361,12 @@ impl Sidebar {
                                 .child(Icon::new(IconName::Close).size(rems_from_px(10.))),
                         )
                     }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |_, _, _, cx| {
+                    cx.emit(SidebarEvent::CloseTab(middle_close_id.clone()))
+                }),
             )
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(SidebarEvent::ShowTab(show_id.clone()));
@@ -511,8 +511,65 @@ impl Sidebar {
             },
         );
 
+        let groups = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .map(|vm| vm.list_group_paths())
+            .unwrap_or_default();
+        let group_items: Vec<ContextMenuItem> = groups
+            .into_iter()
+            .map(|(group, name)| (Some(group), name))
+            .chain(std::iter::once((None, "No group".to_string())))
+            .enumerate()
+            .map(|(ix, (group, name))| {
+                ContextMenuItem::new(
+                    ("sidebar-menu-group", ix),
+                    name,
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_menu_for = None;
+                        cx.emit(SidebarEvent::MoveToGroup {
+                            host: entry_id,
+                            group,
+                        });
+                        cx.notify();
+                    }),
+                )
+            })
+            .collect();
+        // Only "No group" when there are no folders.
+        let move_to_group = (group_items.len() > 1).then(|| {
+            ContextMenuItem::new("sidebar-menu-move", "Move to group\u{2026}", |_, _, _| {})
+                .submenu(group_items)
+                .icon("icons/folder.svg")
+        });
+
         let mut menu = PopoverMenu::new(("sidebar-host-more", ui_idx), is_menu_open, trigger)
             .anchor(Anchor::TopRight)
+            .item(
+                ContextMenuItem::new(
+                    "sidebar-menu-new-tab",
+                    "Connect in new tab",
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_menu_for = None;
+                        cx.emit(SidebarEvent::ConnectInNewTab(entry_id));
+                        cx.notify();
+                    }),
+                )
+                .icon("icons/terminal.svg"),
+            )
+            .item(
+                ContextMenuItem::new(
+                    "sidebar-menu-split",
+                    "Open in split",
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_menu_for = None;
+                        cx.emit(SidebarEvent::OpenInSplit(entry_id));
+                        cx.notify();
+                    }),
+                )
+                .icon("icons/servers.svg"),
+            )
             .item(
                 ContextMenuItem::new(
                     "sidebar-menu-edit",
@@ -553,7 +610,8 @@ impl Sidebar {
             );
         }
 
-        menu.items(export_key.map(|item| item.icon("icons/key-round.svg")))
+        menu.items(move_to_group)
+            .items(export_key.map(|item| item.icon("icons/key-round.svg")))
             .items(sharing_items)
             .item(
                 ContextMenuItem::new(
@@ -576,6 +634,146 @@ impl Sidebar {
                 cx.notify();
             }))
     }
+}
+
+/// An imported host can have an empty label; its address stands in.
+fn host_label(entry: &ServerEntrySummary) -> SharedString {
+    if entry.label.is_empty() {
+        entry.host.clone()
+    } else {
+        entry.label.clone()
+    }
+    .into()
+}
+
+fn status_dot(status: HostStatus, cx: &gpui::App) -> gpui::Div {
+    let color = match status {
+        HostStatus::Connected => flint_theme::status_online(),
+        HostStatus::Connecting => cx.theme().warning,
+        HostStatus::Disconnected => cx.theme().danger,
+        HostStatus::Offline => flint_theme::status_off(),
+    };
+    div()
+        .size(rems_from_px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(color)
+}
+
+/// A pinned host on the move. Its preview is the hovered row, lifted.
+#[derive(Clone)]
+struct DraggedPin {
+    id: Uuid,
+    label: SharedString,
+    status: HostStatus,
+    has_session: bool,
+    has_team: bool,
+    width: f32,
+    height: f32,
+}
+
+impl Render for DraggedPin {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let text_dim = flint_theme::text_dim();
+        let control = |icon: Icon| {
+            div()
+                .size(rems_from_px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(text_dim)
+                .child(icon)
+        };
+        // Drawn outside the app's root, so the font is not inherited.
+        h_flex()
+            .w(rems_from_px(self.width))
+            .h(rems_from_px(self.height))
+            .gap(rems_from_px(8.))
+            .pl(rems_from_px(8.))
+            .pr(rems_from_px(4.))
+            .items_center()
+            .rounded(rems_from_px(6.))
+            .bg(flint_theme::element())
+            .border_1()
+            .border_color(flint_theme::border())
+            .shadow_md()
+            .font_family(flint_theme::UI_FONT)
+            .text_size(rems_from_px(13.))
+            .child(status_dot(self.status, cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(rems_from_px(4.))
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(if self.has_session {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(self.label.clone()),
+                    )
+                    .when(self.has_team, |el| {
+                        el.child(
+                            div()
+                                .text_color(text_dim)
+                                .child(Icon::new(IconName::User).size(rems_from_px(10.))),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(1.))
+                    .child(control(
+                        Icon::empty()
+                            .path("icons/star-filled.svg")
+                            .size(rems_from_px(11.)),
+                    ))
+                    .when(self.has_session, |el| {
+                        el.child(control(Icon::new(IconName::Close).size(rems_from_px(10.))))
+                    })
+                    .child(control(
+                        Icon::new(IconName::Ellipsis).size(rems_from_px(12.)),
+                    )),
+            )
+    }
+}
+
+/// A pinned row that can be dragged onto another pinned row to reorder.
+fn pin_drag_target(
+    ui_idx: usize,
+    entry: &ServerEntrySummary,
+    status: Option<HostStatus>,
+    row: AnyElement,
+    cx: &mut Context<Sidebar>,
+) -> AnyElement {
+    let onto = entry.id;
+    let pin = DraggedPin {
+        id: entry.id,
+        label: host_label(entry),
+        status: status.unwrap_or(HostStatus::Offline),
+        has_session: status.is_some(),
+        has_team: entry.team_name.is_some(),
+        // The list's own side padding is 8 on each edge.
+        width: Preferences::sidebar_width(cx) - 16.,
+        height: row_height(cx),
+    };
+    div()
+        .id(("sidebar-pin-drag", ui_idx))
+        .rounded(rems_from_px(6.))
+        .on_drag(pin, |pin, _, _, cx| cx.new(|_| pin.clone()))
+        .drag_over::<DraggedPin>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+        .on_drop(cx.listener(move |_, pin: &DraggedPin, _, cx| {
+            Preferences::move_pin(pin.id, onto, cx);
+            cx.notify();
+        }))
+        .child(row)
+        .into_any_element()
 }
 
 /// Small heading over a group of sidebar rows.
@@ -727,7 +925,13 @@ impl Sidebar {
                     self.host_row(ui_idx, e, sub, HostStatus::Offline, true, false, None, cx)
                 }
             };
-            content.push(row);
+            content.push(pin_drag_target(
+                ui_idx,
+                e,
+                session.map(|(_, status)| status),
+                row,
+                cx,
+            ));
             ui_idx += 1;
         }
 
@@ -905,12 +1109,13 @@ impl Render for Sidebar {
         let bg = theme.sidebar;
         let text = theme.foreground;
 
-        let entries = self
+        let mut entries = self
             .vault_state
             .read(cx)
             .manager()
             .and_then(|vm| vm.list_entries().ok())
             .unwrap_or_default();
+        entries.retain(|e| !crate::ui::hidden_hosts::is_hidden(e.id, cx));
         let content = self.host_list(&entries, cx);
 
         v_flex()

@@ -29,8 +29,8 @@ use crate::ssh::{
 };
 use crate::theme;
 use crate::ui::file_pane::{
-    source_icon, source_pill, DraggedEntry, EntryRef, FilePane, FilePaneEvent, PaneKind,
-    SourcePillClick, StagedFile, SyncIndicator,
+    duplicate_name, move_destination, source_icon, source_pill, DraggedEntry, EntryRef, FilePane,
+    FilePaneEvent, PaneKind, SourcePillClick, StagedFile, SyncIndicator,
 };
 use crate::ui::file_pane_keys::{pane_command, PaneCommand, SwitchPane, KEY_CONTEXT};
 use crate::ui::rems_from_px;
@@ -270,6 +270,10 @@ struct LiveTransfer {
     kind: TransferKind,
     from: Endpoint,
     to: Endpoint,
+    /// What is sent, for a retry.
+    source_path: String,
+    /// The panes of both ends. A retry needs them to still show the same places.
+    panes: (Option<gpui::EntityId>, Option<gpui::EntityId>),
     /// The folder at `to` it writes into, and the name it writes.
     target_dir: String,
     name: String,
@@ -307,6 +311,10 @@ pub struct SftpBrowser {
     left_focus_before_change: Option<(FocusHandle, Option<Entity<InputState>>)>,
     /// Tracked transfers that are still running, by id.
     transfers: HashMap<u64, LiveTransfer>,
+    /// Failed transfers that can be started again, by id.
+    failed_transfers: HashMap<u64, LiveTransfer>,
+    /// What Cmd+C took, and the pane it was shown in.
+    copied: Option<(gpui::EntityId, Vec<EntryRef>)>,
     /// The session's own connection ended. This browser stays on screen until
     /// the session is connected again, and nothing may start on the right
     /// server in the meantime.
@@ -626,6 +634,8 @@ impl SftpBrowser {
             peer_password_input: None,
             left_focus_before_change: None,
             transfers: HashMap::new(),
+            failed_transfers: HashMap::new(),
+            copied: None,
             is_session_down: false,
             ended_early: HashSet::new(),
             in_flight_downloads: HashSet::new(),
@@ -914,6 +924,7 @@ impl SftpBrowser {
             if transfer.to == Endpoint::Server(Side::Right) {
                 self.ended_early.insert(id);
             }
+            self.failed_transfers.insert(id, transfer);
             cx.emit(BrowserEvent::TransferFinished {
                 id,
                 outcome: TransferOutcome::Failed(reason.to_string()),
@@ -1119,6 +1130,8 @@ impl SftpBrowser {
                         self.reload_after_stopped_transfer(side, &transfer, cx);
                         if let TransferOutcome::Canceled = outcome {
                             cx.emit(BrowserEvent::StatusChanged(format!("Canceled: {name}")));
+                        } else {
+                            self.failed_transfers.insert(id, transfer);
                         }
                     }
                 }
@@ -1206,8 +1219,42 @@ impl SftpBrowser {
             FilePaneEvent::CreateDir { path } => {
                 self.local_fs_op(std::fs::create_dir(path), "Folder created", cx);
             }
+            FilePaneEvent::CreateFile { path } => {
+                let result = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map(drop);
+                self.local_fs_op(result, "File created", cx);
+            }
+            FilePaneEvent::Duplicate { from, to } => {
+                let item = EntryRef {
+                    path: from.clone(),
+                    is_dir: false,
+                };
+                self.copy_within(Endpoint::Local, vec![(item, to.clone())], cx);
+            }
+            FilePaneEvent::CopyRequested { items } => {
+                self.copy_entries(self.local_pane.entity_id(), items, cx);
+            }
+            FilePaneEvent::PasteRequested => self.paste(Endpoint::Local, cx),
             FilePaneEvent::Rename { from, to } => {
                 self.local_fs_op(std::fs::rename(from, to), "Renamed", cx);
+            }
+            FilePaneEvent::MoveInto { items, dir } => {
+                let (items, dir) = (items.clone(), dir.clone());
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { move_local_items(&items, &dir) })
+                        .await;
+                    this.update(cx, |browser, cx| {
+                        let result = result.map_err(std::io::Error::other);
+                        browser.local_fs_op(result, "Moved", cx);
+                    })
+                    .ok();
+                })
+                .detach();
             }
             FilePaneEvent::Delete { items } => {
                 self.delete_local(items.clone(), cx);
@@ -1413,8 +1460,42 @@ impl SftpBrowser {
                     cx,
                 );
             }
-            // Both run as one operation over the whole list, so the folder
+            FilePaneEvent::CreateFile { path } => {
+                let Some(sftp) = self.primary(side) else {
+                    return;
+                };
+                let path = path.clone();
+                let op = async move {
+                    let empty = scratch_file();
+                    std::fs::write(&empty, b"")?;
+                    let result = sftp.upload_file(empty.clone(), path).await;
+                    let _ = std::fs::remove_file(&empty);
+                    result
+                };
+                self.remote_fs_op(side, op, "File created", cx);
+            }
+            FilePaneEvent::Duplicate { from, to } => {
+                let item = EntryRef {
+                    path: from.clone(),
+                    is_dir: false,
+                };
+                self.copy_within(Endpoint::Server(side), vec![(item, to.clone())], cx);
+            }
+            FilePaneEvent::CopyRequested { items } => {
+                if let Some(pane) = self.side(side).map(|remote| remote.pane.entity_id()) {
+                    self.copy_entries(pane, items, cx);
+                }
+            }
+            FilePaneEvent::PasteRequested => self.paste(Endpoint::Server(side), cx),
+            // These run as one operation over the whole list, so the folder
             // is listed again once, not once per entry.
+            FilePaneEvent::MoveInto { items, dir } => {
+                let Some(sftp) = self.side(side).map(|remote| remote.primary.clone()) else {
+                    return;
+                };
+                let op = move_remote_items(sftp, items.clone(), dir.clone());
+                self.remote_fs_op(side, op, "Moved", cx);
+            }
             FilePaneEvent::Delete { items } => {
                 let Some(sftp) = self.side(side).map(|remote| remote.primary.clone()) else {
                     return;
@@ -1614,17 +1695,20 @@ impl SftpBrowser {
         target_dir: &str,
         name: &str,
         kind: TransferKind,
-        from: Endpoint,
+        (from, source_path): (Endpoint, &str),
         to: Endpoint,
         route: Option<String>,
         cx: &mut Context<Self>,
     ) -> (u64, CancelFlag) {
         let id = NEXT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
         let cancel = CancelFlag::default();
+        let pane_id = |endpoint| self.endpoint_pane(endpoint).map(Entity::entity_id);
         let transfer = LiveTransfer {
             kind,
             from,
             to,
+            source_path: source_path.to_string(),
+            panes: (pane_id(from), pane_id(to)),
             target_dir: target_dir.to_string(),
             name: name.to_string(),
             cancel: cancel.clone(),
@@ -1706,6 +1790,135 @@ impl SftpBrowser {
 
     /// Send each source into the folder the pane of `to` shows, or ask first
     /// when its name is taken there. All sources come from one place.
+    /// Whether the failed transfer `id` can start again: both ends still
+    /// show the places it was between.
+    pub(crate) fn can_retry(&self, id: u64) -> bool {
+        self.failed_transfers.get(&id).is_some_and(|transfer| {
+            let pane_id = |endpoint| self.endpoint_pane(endpoint).map(Entity::entity_id);
+            transfer.panes == (pane_id(transfer.from), pane_id(transfer.to))
+        })
+    }
+
+    /// Start a failed transfer again, to the same target name.
+    pub(crate) fn retry_transfer(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_retry(id) {
+            return;
+        }
+        let Some(transfer) = self.failed_transfers.remove(&id) else {
+            return;
+        };
+        tracing::info!(id, name = transfer.name, "retrying a failed transfer");
+        let source = Source::at(transfer.from, &transfer.source_path);
+        self.start_transfer(
+            source,
+            transfer.to,
+            &transfer.target_dir,
+            &transfer.name,
+            cx,
+        );
+    }
+
+    fn copy_entries(&mut self, pane: gpui::EntityId, items: &[EntryRef], cx: &mut Context<Self>) {
+        let status = match items {
+            [item] => format!(
+                "Copied {}",
+                item.path.rsplit(['/', '\\']).next().unwrap_or("")
+            ),
+            _ => format!("Copied {} items", items.len()),
+        };
+        self.copied = Some((pane, items.to_vec()));
+        cx.emit(BrowserEvent::StatusChanged(status));
+    }
+
+    /// Put what was copied into the folder the pane of `to` shows: a copy
+    /// within the same pane, or a transfer from the other one.
+    fn paste(&mut self, to: Endpoint, cx: &mut Context<Self>) {
+        let Some((source_pane, items)) = self.copied.clone() else {
+            cx.emit(BrowserEvent::StatusChanged(
+                "Nothing to paste. Copy files first.".to_string(),
+            ));
+            return;
+        };
+        let Some(pane) = self.endpoint_pane(to).cloned() else {
+            return;
+        };
+        if pane.entity_id() == source_pane {
+            let pairs = paste_targets(&items, &pane.read(cx).path, |name| {
+                pane.read(cx).entries.iter().any(|e| e.name == name)
+            });
+            self.copy_within(to, pairs, cx);
+            return;
+        }
+        let from = self
+            .opposite(to)
+            .filter(|from| self.endpoint_pane(*from).map(Entity::entity_id) == Some(source_pane));
+        let Some(from) = from else {
+            cx.emit(BrowserEvent::StatusChanged(
+                "The copied files are no longer shown here.".to_string(),
+            ));
+            return;
+        };
+        let sources = items
+            .iter()
+            .map(|item| Source::at(from, &item.path))
+            .collect();
+        self.request_transfers(sources, to, cx);
+    }
+
+    /// Copy each item to its path in the same place. On a server a file goes
+    /// there and back through this computer: SFTP has no copy.
+    fn copy_within(
+        &mut self,
+        at: Endpoint,
+        pairs: Vec<(EntryRef, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(count = pairs.len(), ?at, "copying within one place");
+        let Endpoint::Server(side) = at else {
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { copy_local_items(&pairs) })
+                    .await;
+                this.update(cx, |browser, cx| {
+                    let result = result.map_err(std::io::Error::other);
+                    browser.local_fs_op(result, "Copied", cx);
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        };
+        let Some(sftp) = self.primary(side) else {
+            return;
+        };
+        let op = async move {
+            let total = pairs.len();
+            let mut errors = Vec::new();
+            for (item, to) in pairs {
+                if item.is_dir {
+                    errors.push(format!(
+                        "{}: folders can't be copied on the server",
+                        item.path
+                    ));
+                    continue;
+                }
+                let local = scratch_file();
+                let result = match sftp.download_file(item.path.clone(), local.clone()).await {
+                    Ok(_) => sftp.upload_file(local.clone(), to).await,
+                    Err(e) => Err(e),
+                };
+                let _ = std::fs::remove_file(&local);
+                if let Err(e) = result {
+                    tracing::warn!(path = %item.path, ?e, "copy on the server failed");
+                    errors.push(format!("{}: {e}", item.path));
+                }
+            }
+            batch_result("copy", total, errors).map_err(anyhow::Error::msg)
+        };
+        self.remote_fs_op(side, op, "Copied", cx);
+    }
+
     fn request_transfers(&mut self, sources: Vec<Source>, to: Endpoint, cx: &mut Context<Self>) {
         let Some(first) = sources.first() else {
             return;
@@ -1797,6 +2010,7 @@ impl SftpBrowser {
         // The left server may have gone while a name conflict was being asked about.
         let not_connected = BrowserEvent::StatusChanged(LEFT_NOT_CONNECTED.to_string());
         let from = source.endpoint();
+        let source_path = source.path();
         match (source, to) {
             (Source::Local(local), Endpoint::Server(side)) => {
                 let Some(sftp) = self.primary(side) else {
@@ -1809,7 +2023,7 @@ impl SftpBrowser {
                     target_dir,
                     name,
                     TransferKind::Upload,
-                    from,
+                    (from, &source_path),
                     to,
                     route,
                     cx,
@@ -1833,14 +2047,14 @@ impl SftpBrowser {
                     target_dir,
                     name,
                     TransferKind::Download,
-                    from,
+                    (from, &source_path),
                     to,
                     route,
                     cx,
                 );
                 sftp.download(remote, local, id, cancel);
             }
-            (Source::Server(from_side, source_path), Endpoint::Server(to_side)) => {
+            (Source::Server(from_side, _), Endpoint::Server(to_side)) => {
                 let (Some(source), Some(target)) = (self.primary(from_side), self.primary(to_side))
                 else {
                     return cx.emit(not_connected);
@@ -1848,10 +2062,17 @@ impl SftpBrowser {
                 let remote = format!("{}/{}", target_dir.trim_end_matches('/'), name);
                 let route = self.transfer_route(from, to);
                 tracing::info!(source_path, remote, ?route, "queuing copy between servers");
-                let (id, cancel) =
-                    self.begin_transfer(target_dir, name, TransferKind::Copy, from, to, route, cx);
+                let (id, cancel) = self.begin_transfer(
+                    target_dir,
+                    name,
+                    TransferKind::Copy,
+                    (from, &source_path),
+                    to,
+                    route,
+                    cx,
+                );
                 // The target's worker pulls the files and reports the progress.
-                target.relay(source, source_path, remote, id, cancel);
+                target.relay(source, source_path.clone(), remote, id, cancel);
             }
             // Both panes never show this computer.
             (Source::Local(_), Endpoint::Local) => {}
@@ -2178,6 +2399,25 @@ impl SftpBrowser {
     }
 
     /// Upload files dropped from the OS to the server that side shows.
+    /// Files dropped on the session's terminal go to the folder its file
+    /// pane shows. Returns that folder, or `None` when nothing was sent.
+    pub(crate) fn upload_from_terminal(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let pane = self.right.pane.read(cx);
+        if self.is_session_down || !pane.is_listed() {
+            cx.emit(BrowserEvent::StatusChanged(
+                SESSION_NOT_CONNECTED.to_string(),
+            ));
+            return None;
+        }
+        let dir = pane.path.clone();
+        self.upload_paths(Side::Right, paths, cx);
+        Some(dir)
+    }
+
     fn upload_paths(&mut self, side: Side, paths: &[PathBuf], cx: &mut Context<Self>) {
         let sources = paths
             .iter()
@@ -3394,6 +3634,118 @@ fn batch_result(action: &str, total: usize, mut errors: Vec<String>) -> Result<(
     ))
 }
 
+/// Where each copied item lands in `dir`. A name that is taken there, by
+/// the item itself or another, gets " copy" added.
+fn paste_targets(
+    items: &[EntryRef],
+    dir: &str,
+    is_taken: impl Fn(&str) -> bool,
+) -> Vec<(EntryRef, String)> {
+    let mut used: Vec<String> = Vec::new();
+    items
+        .iter()
+        .filter_map(|item| {
+            let name = item.path.rsplit(['/', '\\']).next()?;
+            let is_free =
+                |candidate: &str| !is_taken(candidate) && !used.iter().any(|u| u == candidate);
+            let name = if is_free(name) {
+                name.to_string()
+            } else {
+                duplicate_name(name, item.is_dir, |candidate| !is_free(candidate))
+            };
+            used.push(name.clone());
+            Some((
+                item.clone(),
+                format!("{}/{name}", dir.trim_end_matches(['/', '\\'])),
+            ))
+        })
+        .collect()
+}
+
+/// A file in the temp folder for a copy that passes through this computer.
+fn scratch_file() -> PathBuf {
+    std::env::temp_dir().join(format!("flint-copy-{}", uuid::Uuid::new_v4()))
+}
+
+fn copy_local_items(pairs: &[(EntryRef, String)]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (item, to) in pairs {
+        let to = std::path::Path::new(to);
+        // Never over something that is there: the names were picked free.
+        let result = if std::fs::symlink_metadata(to).is_ok() {
+            Err(format!("{} already exists", to.display()))
+        } else {
+            copy_local_tree(std::path::Path::new(&item.path), to)
+                .map_err(|e| format!("{}: {e}", item.path))
+        };
+        if let Err(e) = result {
+            tracing::warn!(path = %item.path, e, "local copy failed");
+            errors.push(e);
+        }
+    }
+    batch_result("copy", pairs.len(), errors)
+}
+
+fn copy_local_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if !std::fs::metadata(from)?.is_dir() {
+        return std::fs::copy(from, to).map(drop);
+    }
+    std::fs::create_dir(to)?;
+    for child in std::fs::read_dir(from)? {
+        let child = child?;
+        copy_local_tree(&child.path(), &to.join(child.file_name()))?;
+    }
+    Ok(())
+}
+
+/// A move never replaces: `rename` would silently overwrite a file there.
+fn move_local_items(items: &[EntryRef], dir: &str) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for item in items {
+        let Some(to) = move_destination(&item.path, dir) else {
+            continue;
+        };
+        let result = if std::fs::symlink_metadata(&to).is_ok() {
+            Err(format!("{to} already exists"))
+        } else {
+            std::fs::rename(&item.path, &to).map_err(|e| format!("{}: {e}", item.path))
+        };
+        if let Err(e) = result {
+            tracing::warn!(path = %item.path, dir, e, "local move failed");
+            errors.push(e);
+        }
+    }
+    batch_result("move", items.len(), errors)
+}
+
+/// Some servers' rename replaces an existing target, so a taken name is
+/// refused first.
+async fn move_remote_items(
+    sftp: SftpHandle,
+    items: Vec<EntryRef>,
+    dir: String,
+) -> anyhow::Result<()> {
+    let total = items.len();
+    let mut errors = Vec::new();
+    for item in items {
+        let Some(to) = move_destination(&item.path, &dir) else {
+            continue;
+        };
+        let result = if sftp.stat_file(to.clone()).await.is_ok() {
+            Err(format!("{to} already exists"))
+        } else {
+            sftp.rename(item.path.clone(), to)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        if let Err(e) = result {
+            tracing::warn!(path = %item.path, dir, e, "remote move failed");
+            errors.push(e);
+        }
+    }
+    batch_result("move", total, errors).map_err(anyhow::Error::msg)
+}
+
 fn delete_local_items(items: &[EntryRef]) -> Result<(), String> {
     let mut errors = Vec::new();
     for item in items {
@@ -3515,6 +3867,8 @@ mod tests {
             kind: TransferKind::Upload,
             from,
             to,
+            source_path: "/home/a.txt".into(),
+            panes: (None, None),
             target_dir: "/srv".into(),
             name: "a.txt".into(),
             cancel: CancelFlag::default(),
@@ -3744,6 +4098,52 @@ mod tests {
     #[test]
     fn copy_route_names_the_source_first() {
         assert_eq!(copy_route("web-02", "web-01"), "from web-02 to web-01");
+    }
+
+    #[test]
+    fn pasted_items_keep_free_names_and_never_collide() {
+        let item = |path: &str| EntryRef {
+            path: path.to_string(),
+            is_dir: false,
+        };
+        let items = [
+            item("/src/a.txt"),
+            item("/here/b.txt"),
+            item("/other/b.txt"),
+        ];
+        let taken = ["b.txt"];
+        let targets: Vec<String> = paste_targets(&items, "/here/", |name| taken.contains(&name))
+            .into_iter()
+            .map(|(_, to)| to)
+            .collect();
+        assert_eq!(
+            targets,
+            ["/here/a.txt", "/here/b copy.txt", "/here/b copy 2.txt"]
+        );
+    }
+
+    #[test]
+    fn a_local_copy_takes_the_whole_folder_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("site");
+        std::fs::create_dir_all(from.join("css")).unwrap();
+        std::fs::write(from.join("css/main.css"), "body {}").unwrap();
+        let to = dir.path().join("site copy");
+        let pair = |to: &std::path::Path| {
+            (
+                EntryRef {
+                    path: from.to_string_lossy().into_owned(),
+                    is_dir: true,
+                },
+                to.to_string_lossy().into_owned(),
+            )
+        };
+        copy_local_items(&[pair(&to)]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("css/main.css")).unwrap(),
+            "body {}"
+        );
+        assert!(copy_local_items(&[pair(&to)]).is_err());
     }
 
     #[test]

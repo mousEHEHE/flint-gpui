@@ -15,12 +15,14 @@ use crate::preferences::Preferences;
 use crate::ui::app_view::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, CloseTab, DecreaseUiScale, IncreaseUiScale,
-    LockVault, NewConnection, NewTerminal, NextTab, OpenLocalTerminal, PrevTab, Quit, ResetUiScale,
-    SplitLocalTerminal, SplitTerminal, ToggleCommandPalette, ToggleFilesFocus, ToggleServerPanel,
-    ToggleSettings, ToggleSftpPane, ToggleSidebar,
+    LockVault, NewConnection, NewTerminal, NextTab, OpenLocalTerminal, PrevTab, Quit,
+    ReopenClosedTab, ResetUiScale, SplitLocalTerminal, SplitTerminal, ToggleCommandPalette,
+    ToggleFilesFocus, ToggleServerPanel, ToggleSettings, ToggleSftpPane, ToggleSidebar,
 };
 use crate::ui::file_pane_keys::{PaneCommand, KEY_CONTEXT as FILE_PANE};
 use crate::ui::keyboard_layout::{chord_variants, unshifted_us_key, us_layout_key};
+use crate::ui::server_form::{SaveForm, KEY_CONTEXT as SERVER_FORM};
+use crate::ui::servers_view::{DeleteSelectedHosts, FocusHostSearch, KEY_CONTEXT as HOST_LIST};
 use crate::ui::terminal_search::ToggleSearch;
 use crate::ui::terminal_view::{
     ClearScreen, CopySelection, DecreaseFontSize, IncreaseFontSize, Paste, ResetFontSize, SelectAll,
@@ -36,10 +38,17 @@ pub enum Group {
     Tabs,
     Terminal,
     Files,
+    Hosts,
 }
 
 impl Group {
-    pub const ALL: [Group; 4] = [Group::General, Group::Tabs, Group::Terminal, Group::Files];
+    pub const ALL: [Group; 5] = [
+        Group::General,
+        Group::Tabs,
+        Group::Terminal,
+        Group::Files,
+        Group::Hosts,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -47,6 +56,7 @@ impl Group {
             Group::Tabs => "Tabs & panes",
             Group::Terminal => "Terminal",
             Group::Files => "Files",
+            Group::Hosts => "Host list",
         }
     }
 }
@@ -144,6 +154,24 @@ const fn files(
     }
 }
 
+const fn hosts(
+    id: &'static str,
+    label: &'static str,
+    mac: &'static str,
+    other: &'static str,
+    bind: fn(&str, Option<&str>) -> KeyBinding,
+) -> Command {
+    Command {
+        id,
+        label,
+        group: Group::Hosts,
+        mac,
+        other,
+        context: Some(HOST_LIST),
+        run: Run::Action(bind),
+    }
+}
+
 use Group::{General, Tabs};
 
 // Off macOS, plain Ctrl+letter belongs to readline at a shell prompt, so the
@@ -158,10 +186,19 @@ pub const COMMANDS: &[Command] = &[
     global("app.lock", "Lock vault", General, "cmd-l", "ctrl-shift-l", action::<LockVault>),
     global("app.new_host", "New host", General, "cmd-t", "ctrl-shift-t", action::<NewConnection>),
     global("app.toggle_sidebar", "Show or hide sidebar", General, "ctrl-cmd-s", "ctrl-shift-s", action::<ToggleSidebar>),
+    Command {
+        id: "app.save_host",
+        label: "Save host form",
+        group: General,
+        mac: "cmd-s cmd-enter",
+        other: "ctrl-s ctrl-enter",
+        context: Some(SERVER_FORM),
+        run: Run::Action(action::<SaveForm>),
+    },
     global("app.zoom_in", "Zoom in", General, "cmd-alt-=", "ctrl-alt-=", action::<IncreaseUiScale>),
     global("app.zoom_out", "Zoom out", General, "cmd-alt--", "ctrl-alt--", action::<DecreaseUiScale>),
     global("app.zoom_reset", "Reset zoom", General, "cmd-alt-0", "ctrl-alt-0", action::<ResetUiScale>),
-    global("tabs.new_terminal", "New terminal", Tabs, "cmd-shift-t", "ctrl-shift-n", action::<NewTerminal>),
+    global("tabs.new_terminal", "New terminal", Tabs, "cmd-n", "ctrl-shift-n", action::<NewTerminal>),
     global("tabs.local_terminal", "Local terminal", Tabs, "cmd-alt-t", "ctrl-alt-shift-t", action::<OpenLocalTerminal>),
     global("tabs.split", "Split or join terminals", Tabs, "cmd-d", "ctrl-shift-d", action::<SplitTerminal>),
     global("tabs.local_beside", "Local terminal beside", Tabs, "cmd-shift-d", "ctrl-alt-shift-d", action::<SplitLocalTerminal>),
@@ -169,6 +206,8 @@ pub const COMMANDS: &[Command] = &[
     global("tabs.server_panel", "Show or hide server panel", Tabs, "cmd-i", "ctrl-shift-i", action::<ToggleServerPanel>),
     global("tabs.focus_files", "Focus files", Tabs, "cmd-shift-e", "ctrl-shift-e", action::<ToggleFilesFocus>),
     global("tabs.close", "Close tab", Tabs, "cmd-w", "ctrl-shift-w", action::<CloseTab>),
+    // Off macOS Ctrl+Shift+T is already New host, the twin of Cmd+T.
+    global("tabs.reopen", "Reopen closed tab", Tabs, "cmd-shift-t", "ctrl-shift-r", action::<ReopenClosedTab>),
     global("tabs.next", "Next tab", Tabs, "cmd-}", "ctrl-tab", action::<NextTab>),
     global("tabs.prev", "Previous tab", Tabs, "cmd-{", "ctrl-shift-tab", action::<PrevTab>),
     global("tabs.tab_1", "Go to tab 1", Tabs, "cmd-1", "ctrl-1", action::<ActivateTab1>),
@@ -198,6 +237,12 @@ pub const COMMANDS: &[Command] = &[
     files("files.select_all", "Select all", "cmd-a", "ctrl-a", PaneCommand::SelectAll),
     files("files.new_folder", "New folder", "cmd-shift-n", "f7", PaneCommand::NewFolder),
     files("files.hidden", "Show or hide hidden files", "cmd->", "ctrl->", PaneCommand::ToggleHidden),
+    files("files.back", "Back", "cmd-[", "alt-left", PaneCommand::Back),
+    files("files.forward", "Forward", "cmd-]", "alt-right", PaneCommand::Forward),
+    files("files.copy", "Copy files", "cmd-c", "ctrl-c", PaneCommand::Copy),
+    files("files.paste", "Paste files", "cmd-v", "ctrl-v", PaneCommand::Paste),
+    hosts("hosts.delete", "Delete hosts", "cmd-backspace", "delete", action::<DeleteSelectedHosts>),
+    hosts("hosts.search", "Search hosts", "cmd-f", "ctrl-f", action::<FocusHostSearch>),
 ];
 
 /// Marks the bindings made from this table, so `apply` can take them out
@@ -735,15 +780,12 @@ mod tests {
         let none = Overrides::new();
         assert_eq!(conflict_ids(lock, "cmd-t", &none), ["app.new_host"]);
         // Modifier order does not matter.
-        assert_eq!(
-            conflict_ids(lock, "shift-cmd-t", &none),
-            ["tabs.new_terminal"]
-        );
+        assert_eq!(conflict_ids(lock, "shift-cmd-t", &none), ["tabs.reopen"]);
         // A global chord also runs in the terminal and the file pane.
         assert_eq!(conflict_ids(lock, "cmd-k", &none), ["terminal.clear"]);
         assert_eq!(
             conflict_ids(lock, "cmd-f", &none),
-            ["terminal.find", "files.filter"]
+            ["terminal.find", "files.filter", "hosts.search"]
         );
         // A second default chord is held too.
         assert_eq!(conflict_ids(lock, "f5", &none), ["files.transfer"]);

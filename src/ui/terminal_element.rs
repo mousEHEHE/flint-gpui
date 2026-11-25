@@ -1140,11 +1140,11 @@ impl Element for TerminalElement {
             if view.update(cx, |view, _| view.end_scrollbar_drag()) {
                 return;
             }
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 if std::mem::take(&mut view.is_link_click) {
                     return;
                 }
-                view.end_selection();
+                view.end_selection(cx);
             });
         });
 

@@ -20,6 +20,10 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::ui::context_menu::AnchoredToTrigger;
+
+gpui::actions!(server_form, [SaveForm]);
+
+pub const KEY_CONTEXT: &str = "ServerForm";
 use crate::ui::dialog_max_height;
 use crate::ui::rems_from_px;
 
@@ -1449,7 +1453,25 @@ impl Render for ServerFormView {
         });
 
         v_flex()
+            .key_context(KEY_CONTEXT)
             .max_h(dialog_max_height(window))
+            .on_action(cx.listener(|this, _: &SaveForm, _, cx| this.submit(cx)))
+            // Capture: a text field would take Escape first. The group and tag
+            // suggestions use it themselves and are checked here.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
+                    return;
+                }
+                if this.group_highlight.is_some() || this.tag_highlight.is_some() {
+                    return;
+                }
+                cx.stop_propagation();
+                if this.key_dropdown_open || this.jump_dropdown_open || this.startup_dropdown_open {
+                    this.close_dropdowns(cx);
+                } else {
+                    cx.emit(FormEvent::Cancelled);
+                }
+            }))
             .child(
                 div()
                     .flex_none()

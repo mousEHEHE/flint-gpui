@@ -10,8 +10,9 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogFooter, DialogHeader, DialogTitle},
     h_flex,
+    notification::Notification,
     tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Icon, IconName, WindowExt as _,
+    v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -23,8 +24,11 @@ use crate::preferences::Preferences;
 use crate::ssh::{AuthCredential, ForwardState, SshRoute, TransferOutcome};
 use crate::ssh_target::{find_saved_host, find_saved_jump_host, SshTarget};
 use crate::ui::app_picker::{AppPicker, AppPickerEvent};
+use crate::ui::closed_tabs::ClosedTabs;
 use crate::ui::command_palette::{CommandPalette, CommandPaletteEvent, PaletteCommand};
+use crate::ui::confirm_dialog::{self, Question};
 use crate::ui::feedback_view::{FeedbackEvent, FeedbackView};
+use crate::ui::hidden_hosts;
 use crate::ui::import_view::{plural, ImportView, ImportViewEvent};
 use crate::ui::keymap;
 use crate::ui::passphrase_prompt::{PassphrasePromptEvent, PassphrasePromptView};
@@ -80,6 +84,7 @@ actions!(
         IncreaseUiScale,
         DecreaseUiScale,
         ResetUiScale,
+        ReopenClosedTab,
     ]
 );
 
@@ -104,6 +109,9 @@ const UPDATE_QUESTION_DELAY: std::time::Duration = std::time::Duration::from_mil
 /// How long small vault changes, like the last folder of a host, wait before
 /// they are written. Folder changes come in bursts.
 const VAULT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Tags the "Deleted · Undo" toast, one per delete.
+struct HostDeleteToast;
 
 /// What a connect that may first ask for a key passphrase is for.
 #[derive(Clone)]
@@ -153,6 +161,7 @@ pub struct AppView {
     file_associations: SharedFileAssociations,
     tabs: Vec<Entity<ServerSession>>,
     active_tab: usize,
+    closed_tabs: ClosedTabs,
 }
 
 impl Focusable for AppView {
@@ -178,11 +187,16 @@ impl AppView {
 
         cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| match event {
             SidebarEvent::OpenServer(id) => this.open_server_by_id(*id, window, cx),
-            SidebarEvent::CloseServer(id) => this.close_server_by_id(*id, cx),
+            SidebarEvent::CloseServer(id) => this.close_server_by_id(*id, window, cx),
             SidebarEvent::AddServerRequested => this.show_server_form(FormMode::Add, window, cx),
             SidebarEvent::ShowAllServers => this.show_all_servers(cx),
             SidebarEvent::EditServerRequested(id) => this.show_edit_form(*id, window, cx),
-            SidebarEvent::DeleteServerRequested(id) => this.show_remove_dialog(*id, window, cx),
+            SidebarEvent::DeleteServerRequested(id) => this.delete_hosts(vec![*id], window, cx),
+            SidebarEvent::ConnectInNewTab(id) => this.connect_in_new_tab(*id, window, cx),
+            SidebarEvent::OpenInSplit(id) => this.open_in_split(*id, window, cx),
+            SidebarEvent::MoveToGroup { host, group } => {
+                this.move_hosts_to_group(&[*host], *group, cx)
+            }
             SidebarEvent::SettingsRequested => this.toggle_settings(window, cx),
             SidebarEvent::FeedbackRequested => this.show_feedback_dialog(window, cx),
             SidebarEvent::ExportKeyRequested { host, key } => {
@@ -195,7 +209,7 @@ impl AppView {
             }
             SidebarEvent::CloseTab(session_id) => {
                 if let Some(idx) = this.tab_index_for_host(session_id, cx) {
-                    this.close_tab(idx, cx);
+                    this.close_tab_asking(idx, window, cx);
                 }
             }
         })
@@ -214,8 +228,13 @@ impl AppView {
                 ServersViewEvent::ImportRequested => this.show_import_dialog(window, cx),
                 ServersViewEvent::EditServerRequested(id) => this.show_edit_form(*id, window, cx),
                 ServersViewEvent::DuplicateServerRequested(id) => this.duplicate_server(*id, cx),
-                ServersViewEvent::DeleteServerRequested(id) => {
-                    this.show_remove_dialog(*id, window, cx)
+                ServersViewEvent::DeleteServersRequested(ids) => {
+                    this.delete_hosts(ids.clone(), window, cx)
+                }
+                ServersViewEvent::ConnectInNewTab(id) => this.connect_in_new_tab(*id, window, cx),
+                ServersViewEvent::OpenInSplit(id) => this.open_in_split(*id, window, cx),
+                ServersViewEvent::MoveToGroup { hosts, group } => {
+                    this.move_hosts_to_group(hosts, *group, cx)
                 }
                 ServersViewEvent::ExportKeyRequested { host, key } => {
                     this.add_key_to_host(*host, *key, window, cx)
@@ -265,6 +284,7 @@ impl AppView {
         .detach();
 
         cx.on_app_quit(|this, cx| {
+            this.delete_hidden_hosts(&hidden_hosts::all(cx), cx);
             this.save_vault_now(cx);
             async {}
         })
@@ -298,6 +318,7 @@ impl AppView {
             )),
             tabs: vec![],
             active_tab: 0,
+            closed_tabs: ClosedTabs::default(),
         }
     }
 
@@ -314,6 +335,7 @@ impl AppView {
         }
 
         self.close_overlays(window, cx);
+        self.delete_hidden_hosts(&hidden_hosts::all(cx), cx);
 
         // A lock must hold after a restart too.
         crate::touch_id::forget_remembered();
@@ -592,10 +614,13 @@ impl AppView {
                 crate::ui::settings::set_theme_preference(pref, window, cx)
             }
             PaletteCommand::CloseSession => {
-                self.close_tab(self.active_tab, cx);
+                self.close_tab_asking(self.active_tab, window, cx);
                 // The palette had the focus; give it to the tab that is now shown.
-                self.set_active_tab(self.active_tab, window, cx);
+                if !window.has_active_dialog(cx) {
+                    self.set_active_tab(self.active_tab, window, cx);
+                }
             }
+            PaletteCommand::ReopenClosedTab => self.reopen_closed_tab(window, cx),
             PaletteCommand::NewTerminal => self.open_extra_terminal(cx),
             PaletteCommand::ToggleSplit => self.toggle_split(cx),
             PaletteCommand::SwapPanes => {
@@ -1036,8 +1061,11 @@ impl AppView {
     fn focus_front_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let front = self.tabs.get(self.active_tab).cloned();
         self.focused_tab = front.as_ref().map(|session| session.entity_id());
+        let is_host_list = front.is_none();
         match front.and_then(|session| session.read(cx).focus_target(cx)) {
             Some(target) => target.focus(window, cx),
+            // The host list takes the arrow keys.
+            None if is_host_list => self.servers_view.focus_handle(cx).focus(window, cx),
             None => self.focus_handle.focus(window, cx),
         }
     }
@@ -1283,9 +1311,9 @@ impl AppView {
         self.change_active_tab(self.active_tab, cx);
     }
 
-    fn close_server_by_id(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    fn close_server_by_id(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(idx) = self.tab_index_for_host(&id.to_string(), cx) {
-            self.close_tab(idx, cx);
+            self.close_tab_asking(idx, window, cx);
         }
     }
 
@@ -1681,7 +1709,7 @@ impl AppView {
                 }
                 ServerSessionEvent::CloseRequested => {
                     if let Some(idx) = this.tabs.iter().position(|s| s == session_entity) {
-                        this.close_tab(idx, cx);
+                        this.close_tab_asking(idx, window, cx);
                     }
                 }
                 ServerSessionEvent::ReconnectRequested => {
@@ -1876,6 +1904,106 @@ impl AppView {
         }
     }
 
+    fn running_transfers(&self, cx: &App) -> usize {
+        self.tabs
+            .iter()
+            .map(|session| session.read(cx).transfers.len())
+            .sum()
+    }
+
+    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let running = self.running_transfers(cx);
+        if running == 0 {
+            tracing::info!("quit from the keyboard");
+            cx.quit();
+            return;
+        }
+        let question = Question {
+            title: "Quit Flint?".into(),
+            message: format!(
+                "{} still running. Quitting stops them.",
+                plural(running, "transfer")
+            )
+            .into(),
+            preview: None,
+            confirm_label: "Quit".into(),
+            is_danger: true,
+        };
+        confirm_dialog::ask(question, window, cx, |_, cx| {
+            tracing::info!("quit with transfers running");
+            cx.quit();
+        });
+    }
+
+    /// Close a tab the user asked to close, after a question when its
+    /// transfers would stop.
+    fn close_tab_asking(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.tabs.get(idx).cloned() else {
+            return;
+        };
+        let running = session.read(cx).transfers.len();
+        if running == 0 {
+            self.close_tab_by_user(idx, cx);
+            return;
+        }
+        let question = Question {
+            title: "Close tab?".into(),
+            message: format!(
+                "{} still running in {}. Closing the tab stops them.",
+                plural(running, "transfer"),
+                session.read(cx).conn_info.display_name()
+            )
+            .into(),
+            preview: None,
+            confirm_label: "Close".into(),
+            is_danger: true,
+        };
+        let session = session.downgrade();
+        let this = cx.weak_entity();
+        confirm_dialog::ask(question, window, cx, move |window, cx| {
+            this.update(cx, |this, cx| {
+                let idx = this.tabs.iter().position(|s| s.downgrade() == session);
+                if let Some(idx) = idx {
+                    this.close_tab_by_user(idx, cx);
+                    this.set_active_tab(this.active_tab, window, cx);
+                }
+            })
+            .ok();
+        });
+    }
+
+    fn close_tab_by_user(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(session) = self.tabs.get(idx).map(|s| s.read(cx)) {
+            if session.is_local {
+                self.closed_tabs.push(None);
+            } else if let Ok(id) = Uuid::parse_str(&session.server_id) {
+                self.closed_tabs.push(Some(id));
+            }
+        }
+        self.close_tab(idx, cx);
+    }
+
+    fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_vault_locked(cx) {
+            return;
+        }
+        while let Some(closed) = self.closed_tabs.pop() {
+            let Some(id) = closed else {
+                self.open_local_terminal(window, cx);
+                return;
+            };
+            let exists = self
+                .vault_state
+                .read(cx)
+                .manager()
+                .is_some_and(|vm| vm.get_entry(id).is_ok());
+            if exists && !hidden_hosts::is_hidden(id, cx) {
+                self.open_server_by_id(id, window, cx);
+                return;
+            }
+        }
+    }
+
     fn close_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.tabs.len() {
             return;
@@ -2063,113 +2191,189 @@ impl AppView {
         }
     }
 
-    fn show_remove_dialog(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let vault = self.vault_state.read(cx);
-        let label = vault
-            .manager()
-            .and_then(|vm| vm.get_entry(id).ok())
-            .map(|e| e.label.clone())
-            .filter(|l| !l.is_empty())
-            .unwrap_or_else(|| "this host".to_string());
-        // Removing a bastion silently drops the jump-host link of every host
-        // behind it, so name them before it happens.
-        let behind = vault
-            .manager()
-            .map(|vm| vm.servers_using_jump_host(id))
-            .unwrap_or_default();
-        let jump_warning = (!behind.is_empty()).then(|| {
-            format!(
-                "Jump host for: {}. Those hosts will connect directly instead.",
-                behind.join(", ")
-            )
-        });
+    /// Hide the hosts at once and delete them when the "Undo" toast goes.
+    fn delete_hosts(&mut self, ids: Vec<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault_state.read(cx).manager() else {
+            return;
+        };
+        let names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| vault.get_entry(*id).ok())
+            .map(|e| if e.label.is_empty() { e.host } else { e.label })
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        // Deleting a bastion drops the jump-host link of every host behind it.
+        let behind: Vec<String> = ids
+            .iter()
+            .flat_map(|id| vault.servers_using_jump_host(*id))
+            .filter(|name| !names.contains(name))
+            .collect();
+        let mut message = match names.as_slice() {
+            [name] => format!("Deleted \u{201C}{name}\u{201D}"),
+            _ => format!("Deleted {}", plural(names.len(), "host")),
+        };
+        if !behind.is_empty() {
+            message.push_str(&format!(". {} will connect directly", behind.join(", ")));
+        }
+        for id in &ids {
+            self.closed_tabs.forget(*id);
+            if let Some(idx) = self.tab_index_for_host(&id.to_string(), cx) {
+                self.close_tab(idx, cx);
+            }
+        }
+        hidden_hosts::hide(&ids, cx);
+        self.vault_state.update(cx, |_, cx| cx.notify());
+        tracing::info!(count = ids.len(), "hosts hidden until the undo toast goes");
 
-        let weak = cx.weak_entity();
-
-        window.open_dialog(&mut *cx, move |dialog, _window, cx| {
-            let (weak2, label2) = (weak.clone(), label.clone());
-            let jump_warning = jump_warning.clone();
-            let warning_color = cx.theme().warning;
-            dialog_chrome(dialog).w(scaled_px(DIALOG_NARROW, cx)).child(
-                v_flex()
-                    .p(rems_from_px(12.))
-                    .gap(rems_from_px(8.))
-                    .child(
-                        DialogHeader::new()
-                            .child(DialogTitle::new().child("Delete host")),
-                    )
-                    .child(
-                        div()
-                            .text_size(rems_from_px(12.5))
-                            .child(format!("Delete \"{}\"? This cannot be undone.", label2)),
-                    )
-                    .when_some(jump_warning, |el, warning| {
-                        el.child(div().text_size(rems_from_px(12.5)).text_color(warning_color).child(warning))
+        let toast_key = ids.first().map(|id| id.to_string()).unwrap_or_default();
+        let (undo_ids, close_ids) = (ids.clone(), ids);
+        let (undo_this, close_this) = (cx.weak_entity(), cx.weak_entity());
+        let toast = Notification::new()
+            .message(message)
+            .id1::<HostDeleteToast>(gpui::SharedString::from(toast_key))
+            .action(move |_, _, _| {
+                let (ids, this) = (undo_ids.clone(), undo_this.clone());
+                Button::new("undo-delete")
+                    .small()
+                    .ghost()
+                    .child("Undo")
+                    .on_click(move |_, _, cx| {
+                        this.update(cx, |this, cx| this.undo_delete_hosts(&ids, cx))
+                            .ok();
                     })
-                    .child(
-                        DialogFooter::new().child(
-                            DialogAction::new().child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("cancel-remove")
-                                            .ghost()
-                                            .child("Cancel")
-                                            .on_click(|_, window, cx| {
-                                                window.close_dialog(cx);
-                                            }),
-                                    )
-                                    .child(
-                                        Button::new("confirm-remove")
-                                            .danger()
-                                            .child("Delete")
-                                            .on_click(move |_, window, cx| {
-                                                weak2
-                                                    .update(cx, |this, inner_cx| {
-                                                        // Close tab first so cleanup runs before
-                                                        // the entry is gone from the vault.
-                                                        let server_id_str = id.to_string();
-                                                        this.drop_peer_for(&server_id_str, inner_cx);
-                                                        if let Some(idx) = this
-                                                            .tab_index_for_host(&server_id_str, inner_cx)
-                                                        {
-                                                            this.close_tab(idx, inner_cx);
-                                                        }
-                                                        let result = this.vault_state.update(
-                                                            inner_cx,
-                                                            |vs, cx| {
-                                                                let r = vs.manager_mut().map(|vm| {
-                                                                    vm.delete_entry(id)
-                                                                });
-                                                                cx.notify();
-                                                                r
-                                                            },
-                                                        );
-                                                        if matches!(result, Some(Ok(_)))
-                                                            && Preferences::is_pinned(id, inner_cx)
-                                                        {
-                                                            Preferences::set_pinned(id, false, inner_cx);
-                                                        }
-                                                        if let Some(Err(e)) = result {
-                                                            tracing::error!(
-                                                                ?e,
-                                                                "failed to delete entry"
-                                                            );
-                                                            this.set_status(
-                                                                format!("Could not delete the host: {e}"),
-                                                                inner_cx,
-                                                            );
-                                                        }
-                                                    })
-                                                    .ok();
-                                                window.close_dialog(cx);
-                                            }),
-                                    ),
-                            ),
-                        ),
-                    ),
-            )
+            })
+            .autohide(true)
+            .on_close(move |_, cx| {
+                close_this
+                    .update(cx, |this, cx| this.delete_hidden_hosts(&close_ids, cx))
+                    .ok();
+            });
+        window.push_notification(toast, cx);
+    }
+
+    /// One more terminal on the host: in its tab when it is open, else the
+    /// first one of a new tab.
+    fn connect_in_new_tab(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(idx) = self.tab_index_for_host(&id.to_string(), cx) else {
+            self.open_server_by_id(id, window, cx);
+            return;
+        };
+        self.set_active_tab(idx, window, cx);
+        if let Some(session) = self.tabs.get(idx) {
+            session.update(cx, |session, cx| session.open_extra_terminal(cx));
+        }
+    }
+
+    /// The host's files in the left pane of the session in front, beside
+    /// its own. With no server session in front it just opens.
+    fn open_in_split(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let front = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|session| !session.read(cx).is_local)
+            .cloned();
+        match front {
+            Some(session) => {
+                self.focus_handle.focus(window, cx);
+                self.open_peer(&session.downgrade(), Some(id), window, cx);
+            }
+            None => self.open_server_by_id(id, window, cx),
+        }
+    }
+
+    fn move_hosts_to_group(&mut self, hosts: &[Uuid], group: Option<Uuid>, cx: &mut Context<Self>) {
+        let result = self.vault_state.update(cx, |vs, cx| {
+            let result = vs.manager_mut().map(|vm| {
+                vm.batch(|vm| {
+                    for id in hosts {
+                        let mut entry = vm.get_entry(*id)?;
+                        if entry.group == group {
+                            continue;
+                        }
+                        entry.group = group;
+                        vm.update_entry(entry)?;
+                    }
+                    Ok::<(), crate::vault::VaultError>(())
+                })
+            });
+            cx.notify();
+            result
         });
+        let error = match result {
+            Some(Ok(Ok(()))) => None,
+            Some(Ok(Err(e)) | Err(e)) => Some(e),
+            None => return,
+        };
+        if let Some(e) = error {
+            tracing::error!(%e, "failed to move hosts to another group");
+            self.set_status(format!("Could not move the hosts: {e}"), cx);
+            return;
+        }
+        tracing::info!(count = hosts.len(), "hosts moved to another group");
+    }
+
+    fn undo_delete_hosts(&mut self, ids: &[Uuid], cx: &mut Context<Self>) {
+        let restored = hidden_hosts::unhide(ids, cx);
+        tracing::info!(count = restored.len(), "host delete undone");
+        self.vault_state.update(cx, |_, cx| cx.notify());
+        // The toast closes after the click and must find nothing left to delete.
+        if let Some(window) = cx.active_window() {
+            let key = ids.first().map(|id| id.to_string()).unwrap_or_default();
+            cx.defer(move |cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        window.remove_notification1::<HostDeleteToast>(
+                            gpui::SharedString::from(key),
+                            cx,
+                        )
+                    })
+                    .ok();
+            });
+        }
+    }
+
+    /// Delete those of `ids` that are still hidden. Called when the toast
+    /// goes, on lock and on quit.
+    fn delete_hidden_hosts(&mut self, ids: &[Uuid], cx: &mut Context<Self>) {
+        let ids = hidden_hosts::unhide(ids, cx);
+        if ids.is_empty() {
+            return;
+        }
+        for id in &ids {
+            self.drop_peer_for(&id.to_string(), cx);
+        }
+        let result = self.vault_state.update(cx, |vs, cx| {
+            let result = vs.manager_mut().map(|vm| {
+                vm.batch(|vm| {
+                    ids.iter()
+                        .map(|id| vm.delete_entry(*id))
+                        .collect::<Vec<_>>()
+                })
+            });
+            cx.notify();
+            result
+        });
+        let errors: Vec<String> = match result {
+            Some(Ok(results)) => results
+                .into_iter()
+                .filter_map(|r| r.err().map(|e| e.to_string()))
+                .collect(),
+            Some(Err(e)) => vec![e.to_string()],
+            None => vec!["the vault is locked".to_string()],
+        };
+        for id in &ids {
+            if Preferences::is_pinned(*id, cx) {
+                Preferences::set_pinned(*id, false, cx);
+            }
+        }
+        if let Some(e) = errors.first() {
+            tracing::error!(%e, "failed to delete hosts");
+            self.set_status(format!("Could not delete the host: {e}"), cx);
+            return;
+        }
+        tracing::info!(count = ids.len(), "hosts deleted");
     }
 
     /// Dialog for importing hosts from ~/.ssh/config and PuTTY sessions.
@@ -2582,7 +2786,7 @@ impl AppView {
             return;
         }
         let idx = self.active_tab;
-        self.close_tab(idx, cx);
+        self.close_tab_asking(idx, window, cx);
     }
 
     fn shortcut_toggle_files_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2597,6 +2801,11 @@ impl AppView {
 
     fn shortcut_new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_overlay_open(window, cx) {
+            return;
+        }
+        // With no tab in front there is no session to add a shell to.
+        if self.tabs.get(self.active_tab).is_none() {
+            self.open_local_terminal(window, cx);
             return;
         }
         self.open_extra_terminal(cx);
@@ -2846,6 +3055,11 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_front_tab_if_changed(window, cx);
+        // The keys came back here (a closed palette, a start with no tabs)
+        // while the host list shows: they belong to the list.
+        if self.active_tab >= self.tabs.len() && self.focus_handle.is_focused(window) {
+            self.servers_view.focus_handle(cx).focus(window, cx);
+        }
         let chrome = crate::theme::chrome();
         let panel = cx.theme().background;
         let border = crate::theme::border();
@@ -2930,6 +3144,12 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &ToggleServerPanel, window, cx| {
                 this.shortcut_toggle_server_panel(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                if !this.is_overlay_open(window, cx) {
+                    this.reopen_closed_tab(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &LockVault, window, cx| {
                 this.lock_vault(window, cx);

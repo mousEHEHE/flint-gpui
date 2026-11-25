@@ -14,6 +14,7 @@ use crate::preferences::{Preferences, ThemePreference};
 use crate::ssh_target::{find_saved_host, find_saved_host_by_name, parse_ssh_target, SshTarget};
 use crate::theme as flint_theme;
 use crate::ui::file_pane::{self, PaneKind};
+use crate::ui::hidden_hosts;
 use crate::ui::host_icon::host_icon;
 use crate::ui::keymap;
 use crate::ui::rems_from_px;
@@ -69,6 +70,7 @@ pub enum PaletteCommand {
     ToggleServerPanel,
     FocusFiles,
     CloseSession,
+    ReopenClosedTab,
     ReconnectSession,
     ChooseLeftSource,
     OpenLocalTerminal,
@@ -89,7 +91,7 @@ struct CommandSpec {
     needs_session: bool,
 }
 
-const COMMANDS: [CommandSpec; 19] = [
+const COMMANDS: [CommandSpec; 20] = [
     CommandSpec {
         command: PaletteCommand::OpenLocalTerminal,
         label: "Local terminal",
@@ -234,6 +236,14 @@ const COMMANDS: [CommandSpec; 19] = [
         note: "",
         shortcut: Some("tabs.close"),
         needs_session: true,
+    },
+    CommandSpec {
+        command: PaletteCommand::ReopenClosedTab,
+        label: "Reopen closed tab",
+        keywords: "restore undo host last",
+        note: "",
+        shortcut: Some("tabs.reopen"),
+        needs_session: false,
     },
     CommandSpec {
         command: PaletteCommand::ReconnectSession,
@@ -458,7 +468,7 @@ impl CommandPalette {
         let q = self.query(cx);
         entries
             .into_iter()
-            .filter(|e| host_matches(e, &q))
+            .filter(|e| !hidden_hosts::is_hidden(e.id, cx) && host_matches(e, &q))
             .map(|e| {
                 let label = if e.label.is_empty() {
                     e.host.clone()
@@ -1068,7 +1078,9 @@ fn command_icon(command: PaletteCommand) -> Icon {
         PaletteCommand::ToggleSftpPane
         | PaletteCommand::FocusFiles
         | PaletteCommand::ChooseLeftSource => IconName::FolderOpen,
-        PaletteCommand::ReconnectSession => return Icon::empty().path("icons/rotate-cw.svg"),
+        PaletteCommand::ReconnectSession | PaletteCommand::ReopenClosedTab => {
+            return Icon::empty().path("icons/rotate-cw.svg")
+        }
         PaletteCommand::ImportHosts => return Icon::empty().path("icons/download.svg"),
     };
     Icon::new(name)
@@ -1382,7 +1394,7 @@ mod tests {
             command_labels("sftp", true),
             ["Show or hide files", "Focus files"]
         );
-        assert_eq!(command_labels("", false).len(), 9);
+        assert_eq!(command_labels("", false).len(), 10);
         assert_eq!(command_labels("", true).len(), COMMANDS.len() - 1);
     }
 

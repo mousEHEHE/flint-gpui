@@ -8,7 +8,7 @@
 use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, App, ClickEvent, Context, Entity, Focusable as _, MouseButton,
-    SharedString, Window,
+    MouseDownEvent, SharedString, Window,
 };
 use gpui_component::{
     h_flex,
@@ -22,6 +22,7 @@ use crate::connection::Connection;
 use crate::preferences::{Preferences, TerminalPosition};
 use crate::shell::ShellHandle;
 use crate::theme;
+use crate::ui::context_menu::{ContextMenu, ContextMenuItem};
 use crate::ui::keymap;
 use crate::ui::rems_from_px;
 use crate::ui::server_session::{ServerSession, ServerSessionEvent};
@@ -157,10 +158,47 @@ impl ServerSession {
             &terminal,
             |this, terminal, event: &TerminalEvent, cx| match event {
                 TerminalEvent::Exited => this.close_exited_terminal(&terminal, cx),
+                TerminalEvent::FilesDropped(paths) => {
+                    this.upload_dropped_files(&terminal, paths, cx)
+                }
             },
         )
         .detach();
         self.terminals.push(terminal);
+    }
+
+    /// Upload files dropped on a server shell into the folder the file pane
+    /// shows, and type where they land.
+    fn upload_dropped_files(
+        &mut self,
+        terminal: &Entity<TerminalView>,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(browser) = self.browser.clone() else {
+            cx.emit(ServerSessionEvent::StatusChanged(
+                "Can't upload: not connected".to_string(),
+            ));
+            return;
+        };
+        let Some(dir) = browser.update(cx, |browser, cx| browser.upload_from_terminal(paths, cx))
+        else {
+            return;
+        };
+        tracing::info!(
+            count = paths.len(),
+            dir,
+            "uploading files dropped on the terminal"
+        );
+        let typed: Vec<String> = paths
+            .iter()
+            .filter_map(|path| path.file_name())
+            .map(|name| {
+                let remote = format!("{}/{}", dir.trim_end_matches('/'), name.to_string_lossy());
+                crate::ui::terminal_view::shell_quote(&remote)
+            })
+            .collect();
+        terminal.update(cx, |terminal, cx| terminal.type_paths(&typed, cx));
     }
 
     fn is_server_terminal(&self, ix: usize, cx: &App) -> bool {
@@ -564,6 +602,82 @@ impl ServerSession {
         cx.notify();
     }
 
+    fn tab_menu_items(&self, ix: usize, cx: &Context<Self>) -> Vec<ContextMenuItem> {
+        let count = self.terminals.len();
+        let is_local_tab = !self.is_local
+            && self
+                .terminals
+                .get(ix)
+                .is_some_and(|terminal| terminal.read(cx).is_local);
+        let item = |id: &'static str,
+                    label: &'static str,
+                    run: fn(
+            &mut ServerSession,
+            usize,
+            &mut Window,
+            &mut Context<ServerSession>,
+        )| {
+            let this = cx.weak_entity();
+            ContextMenuItem::new(id, label, move |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.tab_menu = None;
+                    run(this, ix, window, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
+        let mut items = vec![item("tab-rename", "Rename", |this, ix, window, cx| {
+            this.start_tab_rename(ix, window, cx)
+        })];
+        if self.can_open_terminal() {
+            items.push(if is_local_tab {
+                item("tab-duplicate", "Duplicate", |this, _, _, cx| {
+                    this.open_local_terminal(cx)
+                })
+            } else {
+                item("tab-duplicate", "Duplicate", |this, _, _, cx| {
+                    this.open_extra_terminal(cx)
+                })
+            });
+        }
+        if !self.is_local && !is_local_tab {
+            items.push(item("tab-reconnect", "Reconnect", |_, _, _, cx| {
+                cx.emit(ServerSessionEvent::ReconnectRequested)
+            }));
+        }
+        items.push(item("tab-close", "Close", |this, ix, _, cx| {
+            if this.terminals.len() > 1 {
+                this.close_terminal(ix, cx);
+            } else {
+                cx.emit(ServerSessionEvent::CloseRequested);
+            }
+        }));
+        if count > 1 {
+            items.push(item(
+                "tab-close-others",
+                "Close others",
+                |this, ix, _, cx| {
+                    for other in (0..this.terminals.len()).rev().filter(|&other| other != ix) {
+                        this.close_terminal(other, cx);
+                    }
+                },
+            ));
+        }
+        if ix + 1 < count {
+            items.push(item(
+                "tab-close-right",
+                "Close to the right",
+                |this, ix, _, cx| {
+                    for other in (ix + 1..this.terminals.len()).rev() {
+                        this.close_terminal(other, cx);
+                    }
+                },
+            ));
+        }
+        items
+    }
+
     /// The user left a shell (`exit`, Ctrl+D). Its tab closes, the session
     /// stays. The only shell is kept on screen with its last output.
     fn close_exited_terminal(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
@@ -757,6 +871,18 @@ impl ServerSession {
         for ix in 0..self.terminals.len() {
             strip = strip.child(self.render_terminal_tab(ix, cx));
         }
+        if let Some((ix, position)) = self.tab_menu {
+            strip = strip.child(ContextMenu::new(
+                "terminal-tab-menu",
+                position,
+                gpui::Anchor::TopLeft,
+                cx.listener(|this, _, _, cx| {
+                    this.tab_menu = None;
+                    cx.notify();
+                }),
+                self.tab_menu_items(ix, cx),
+            ));
+        }
         if self.can_open_terminal() {
             strip = strip.child(
                 header_button("terminal-tab-add", cx)
@@ -864,6 +990,17 @@ impl ServerSession {
             .items_center()
             .rounded(rems_from_px(6.))
             .text_size(rems_from_px(12.5))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.tab_menu = Some((ix, event.position));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _, _, cx| this.close_terminal(ix, cx)),
+            )
             .child(self.tab_icon(ix, is_active, cx))
             .map(|el| {
                 if is_active {
@@ -1162,7 +1299,7 @@ impl Render for TabDragPreview {
         h_flex()
             .h(rems_from_px(26.))
             .pl(rems_from_px(8.))
-            .pr(rems_from_px(10.))
+            .pr(rems_from_px(4.))
             .gap(rems_from_px(6.))
             .items_center()
             .rounded(rems_from_px(6.))
@@ -1179,6 +1316,16 @@ impl Render for TabDragPreview {
                     .max_w(rems_from_px(160.))
                     .truncate()
                     .child(self.label.clone()),
+            )
+            // Only a closable tab can be dragged, and its close button shows.
+            .child(
+                div()
+                    .size(rems_from_px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme::text_dim())
+                    .child(Icon::empty().path("icons/x.svg").size(rems_from_px(11.))),
             )
     }
 }

@@ -62,6 +62,17 @@ impl ServerSession {
         }
     }
 
+    /// Start a failed transfer again. Its row leaves the history: the new
+    /// run gets a row of its own.
+    fn retry_transfer(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(browser) = self.browser.clone() else {
+            return;
+        };
+        self.transfer_history.retain(|t| t.id != id);
+        browser.update(cx, |browser, cx| browser.retry_transfer(id, cx));
+        cx.notify();
+    }
+
     fn toggle_transfer_expand(&mut self, id: u64, cx: &mut Context<Self>) {
         if let Some(t) = self
             .transfers
@@ -423,6 +434,30 @@ impl ServerSession {
         let id = t.id;
         let expanded = t.expanded;
         let detail = expanded.then(|| transfer_detail_panel(t, cx));
+        let can_retry = matches!(t.outcome, Some(TransferOutcome::Failed(_)))
+            && self
+                .browser
+                .as_ref()
+                .is_some_and(|browser| browser.read(cx).can_retry(id));
+        let retry = can_retry.then(|| {
+            div()
+                .id(("tr-retry", id as usize))
+                .px(rems_from_px(6.))
+                .h(rems_from_px(18.))
+                .flex()
+                .items_center()
+                .rounded(rems_from_px(3.))
+                .text_size(rems_from_px(10.5))
+                .text_color(cx.theme().foreground)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::element_hover()))
+                .active(|s| s.bg(theme::element_active()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.retry_transfer(id, cx);
+                }))
+                .child("Retry")
+        });
 
         let row = h_flex()
             .id(("tr-hrow", id as usize))
@@ -476,7 +511,8 @@ impl ServerSession {
                     .text_size(rems_from_px(10.))
                     .text_color(theme::text_dim())
                     .child(SharedString::from(when)),
-            );
+            )
+            .children(retry);
 
         v_flex().child(row).children(detail).into_any_element()
     }

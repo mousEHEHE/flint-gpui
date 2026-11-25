@@ -207,6 +207,26 @@ pub enum TerminalPosition {
     Beside,
 }
 
+/// The column the file lists sort by.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSortKey {
+    #[default]
+    Name,
+    Type,
+    Perms,
+    Size,
+    Modified,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSortDir {
+    #[default]
+    Asc,
+    Desc,
+}
+
 /// What a sidebar host row shows on its right when it has no status text.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,6 +391,12 @@ pub struct Preferences {
     pub is_sidebar_compact: bool,
     #[serde(default = "default_true")]
     pub is_feedback_button_shown: bool,
+    /// The sort of the file panes, so it outlives a restart.
+    #[serde(default, deserialize_with = "or_default")]
+    pub file_sort: (FileSortKey, FileSortDir),
+    /// Selecting text in the terminal copies it.
+    #[serde(default)]
+    pub is_copy_on_select: bool,
 }
 
 /// The update answer the raw file holds. Read on its own so that a file that
@@ -516,6 +542,8 @@ impl Default for Preferences {
             host_subtitle: HostSubtitle::default(),
             is_sidebar_compact: false,
             is_feedback_button_shown: true,
+            file_sort: Default::default(),
+            is_copy_on_select: false,
         }
     }
 }
@@ -658,6 +686,11 @@ impl Preferences {
         });
     }
 
+    /// Put a pinned host where `onto` is, from a drag in the sidebar.
+    pub fn move_pin(id: uuid::Uuid, onto: uuid::Uuid, cx: &mut gpui::App) {
+        Self::update(cx, |prefs| move_pin(&mut prefs.pinned_hosts, id, onto));
+    }
+
     pub fn is_panel_section_shown(section: PanelSection, cx: &gpui::App) -> bool {
         cx.try_global::<Self>()
             .is_none_or(|prefs| !prefs.hidden_panel_sections.contains(&section))
@@ -706,6 +739,17 @@ impl Preferences {
 
     /// Change the preferences and write them to disk. The change has already
     /// taken effect in memory, so a failed write is logged and not surfaced.
+    pub fn file_sort(cx: &gpui::App) -> (FileSortKey, FileSortDir) {
+        cx.try_global::<Self>()
+            .map(|prefs| prefs.file_sort)
+            .unwrap_or_default()
+    }
+
+    pub fn is_copy_on_select(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|prefs| prefs.is_copy_on_select)
+    }
+
     pub fn update(cx: &mut gpui::App, change: impl FnOnce(&mut Self)) {
         let prefs = cx.default_global::<Self>();
         change(prefs);
@@ -829,6 +873,18 @@ impl Preferences {
     fn path() -> Option<PathBuf> {
         Some(dirs::config_dir()?.join("Flint").join("preferences.json"))
     }
+}
+
+/// `id` takes the place of `onto`: dragged down it lands after `onto`, up before it.
+fn move_pin(pins: &mut Vec<uuid::Uuid>, id: uuid::Uuid, onto: uuid::Uuid) {
+    let (Some(from), Some(to)) = (
+        pins.iter().position(|pin| *pin == id),
+        pins.iter().position(|pin| *pin == onto),
+    ) else {
+        return;
+    };
+    let pin = pins.remove(from);
+    pins.insert(to, pin);
 }
 
 #[cfg(test)]
@@ -1113,6 +1169,32 @@ mod tests {
             serde_json::from_str(r#"{"theme":"light","hidden_panel_sections":["later"]}"#).unwrap();
         assert_eq!(unknown.theme, ThemePreference::Light);
         assert!(unknown.hidden_panel_sections.is_empty());
+    }
+
+    #[test]
+    fn the_file_sort_survives_a_save_and_a_bad_value_falls_back() {
+        let prefs = Preferences {
+            file_sort: (FileSortKey::Size, FileSortDir::Desc),
+            ..Preferences::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.file_sort, (FileSortKey::Size, FileSortDir::Desc));
+        let unknown: Preferences =
+            serde_json::from_str(r#"{"file_sort": ["colour", "up"]}"#).unwrap();
+        assert_eq!(unknown.file_sort, Default::default());
+    }
+
+    #[test]
+    fn a_dragged_pin_takes_the_place_of_the_one_it_is_dropped_on() {
+        let [a, b, c] = [(); 3].map(|_| uuid::Uuid::new_v4());
+        let mut pins = vec![a, b, c];
+        move_pin(&mut pins, a, c);
+        assert_eq!(pins, vec![b, c, a]);
+        move_pin(&mut pins, a, b);
+        assert_eq!(pins, vec![a, b, c]);
+        move_pin(&mut pins, b, uuid::Uuid::new_v4());
+        assert_eq!(pins, vec![a, b, c]);
     }
 
     #[test]

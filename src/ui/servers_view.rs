@@ -7,8 +7,8 @@ use crate::ui::context_menu::{ContextMenuItem, PopoverMenu};
 use crate::ui::{rems_from_px, scaled_px};
 use gpui::prelude::*;
 use gpui::{
-    div, px, svg, Anchor, App, ClipboardItem, Context, Entity, EventEmitter, Focusable,
-    MouseButton, MouseDownEvent, Window,
+    actions, div, px, svg, Anchor, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, Window,
 };
 use gpui_component::{
     h_flex,
@@ -25,6 +25,10 @@ use crate::ui::keymap;
 use crate::ui::sync_service::SyncService;
 use crate::ui::VaultState;
 use crate::vault::ServerEntrySummary;
+
+actions!(servers_view, [DeleteSelectedHosts, FocusHostSearch]);
+
+pub const KEY_CONTEXT: &str = "HostList";
 
 const SERVER_ROW_GROUP: &str = "server-row";
 const CARD_RADIUS: f32 = 10.;
@@ -54,12 +58,74 @@ pub enum ServersViewEvent {
     ImportRequested,
     EditServerRequested(Uuid),
     DuplicateServerRequested(Uuid),
-    DeleteServerRequested(Uuid),
-    ExportKeyRequested { host: Uuid, key: Uuid },
+    DeleteServersRequested(Vec<Uuid>),
+    ExportKeyRequested {
+        host: Uuid,
+        key: Uuid,
+    },
+    /// Open one more terminal on the host, connecting first if needed.
+    ConnectInNewTab(Uuid),
+    /// Show the host's files beside the session in front.
+    OpenInSplit(Uuid),
+    MoveToGroup {
+        hosts: Vec<Uuid>,
+        group: Option<Uuid>,
+    },
+}
+
+/// Hosts dragged onto a folder heading.
+#[derive(Clone)]
+struct DraggedHosts(Vec<Uuid>);
+
+struct DraggedHostsPreview(SharedString);
+
+impl Render for DraggedHostsPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(rems_from_px(8.))
+            .py(rems_from_px(3.))
+            .rounded(rems_from_px(6.))
+            .bg(flint_theme::element())
+            .border_1()
+            .border_color(flint_theme::border())
+            .shadow_md()
+            .font_family(flint_theme::UI_FONT)
+            .text_size(rems_from_px(12.5))
+            .text_color(cx.theme().foreground)
+            .child(self.0.clone())
+    }
+}
+
+/// The host an arrow key moves to: the next one in `order`, or the first
+/// when none is picked yet.
+fn step_host(order: &[Uuid], from: Option<Uuid>, is_down: bool) -> Option<Uuid> {
+    let Some(pos) = from.and_then(|from| order.iter().position(|id| *id == from)) else {
+        return order.first().copied();
+    };
+    let next = if is_down {
+        (pos + 1).min(order.len() - 1)
+    } else {
+        pos.saturating_sub(1)
+    };
+    order.get(next).copied()
+}
+
+/// The hosts from `anchor` to `to` in list order, both ends included.
+fn host_range(order: &[Uuid], anchor: Uuid, to: Uuid) -> Vec<Uuid> {
+    let find = |id: Uuid| order.iter().position(|candidate| *candidate == id);
+    match (find(anchor), find(to)) {
+        (Some(a), Some(b)) => order[a.min(b)..=a.max(b)].to_vec(),
+        _ => vec![to],
+    }
 }
 
 pub struct ServersView {
+    focus_handle: FocusHandle,
     vault_state: Entity<VaultState>,
+    /// Picked with the keys or Cmd/Shift+click. The last one is where the
+    /// arrow keys move from.
+    selected: Vec<Uuid>,
+    is_selection_menu_open: bool,
     search_input: Entity<InputState>,
     search: String,
     /// Which row's "more" menu is open (at most one).
@@ -82,6 +148,12 @@ pub struct ServersView {
 }
 
 impl EventEmitter<ServersViewEvent> for ServersView {}
+
+impl Focusable for ServersView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
 
 impl ServersView {
     pub fn new(
@@ -127,7 +199,10 @@ impl ServersView {
         .detach();
 
         Self {
+            focus_handle: cx.focus_handle(),
             vault_state,
+            selected: Vec::new(),
+            is_selection_menu_open: false,
             search_input,
             search: String::new(),
             open_menu_for: None,
@@ -164,6 +239,247 @@ impl ServersView {
             Ok(command) => cx.write_to_clipboard(ClipboardItem::new_string(command)),
             Err(e) => tracing::warn!(error = %e, "could not build the ssh command to copy"),
         }
+    }
+
+    fn all_entries(&self, cx: &App) -> Vec<ServerEntrySummary> {
+        let mut entries = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .and_then(|vm| vm.list_entries().ok())
+            .unwrap_or_default();
+        entries.retain(|e| !crate::ui::hidden_hosts::is_hidden(e.id, cx));
+        entries
+    }
+
+    /// The hosts the filters and the search leave, in the order they show:
+    /// folders by name, then the ungrouped ones.
+    fn visible_entries(&self, entries: Vec<ServerEntrySummary>) -> Vec<ServerEntrySummary> {
+        let search = self.search.trim().to_lowercase();
+        let mut visible: Vec<ServerEntrySummary> = entries
+            .into_iter()
+            .filter(|e| {
+                self.group_filter
+                    .as_ref()
+                    .is_none_or(|g| e.group_name.as_deref() == Some(g.as_str()))
+            })
+            .filter(|e| self.tag_filter.iter().all(|t| e.tag_names.contains(t)))
+            .filter(|e| crate::ui::command_palette::host_matches(e, &search))
+            .collect();
+        visible.sort_by(|a, b| {
+            (a.group_name.is_none(), &a.group_name).cmp(&(b.group_name.is_none(), &b.group_name))
+        });
+        visible
+    }
+
+    fn host_order(&self, cx: &App) -> Vec<Uuid> {
+        self.visible_entries(self.all_entries(cx))
+            .iter()
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// The row's own host, or every picked one when the row is among them.
+    fn hosts_for_row(&self, id: Uuid) -> Vec<Uuid> {
+        if self.selected.contains(&id) {
+            self.selected.clone()
+        } else {
+            vec![id]
+        }
+    }
+
+    fn row_clicked(
+        &mut self,
+        entry: &ServerEntrySummary,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let modifiers = event.modifiers();
+        if modifiers.secondary() {
+            if !self.selected.contains(&entry.id) {
+                self.selected.push(entry.id);
+            } else {
+                self.selected.retain(|id| *id != entry.id);
+            }
+        } else if modifiers.shift {
+            let anchor = self.selected.first().copied().unwrap_or(entry.id);
+            let mut range = host_range(&self.host_order(cx), anchor, entry.id);
+            // The anchor stays first, the clicked host last, for the arrow keys.
+            range.retain(|id| *id != anchor && *id != entry.id);
+            self.selected = std::iter::once(anchor)
+                .chain(range)
+                .chain((anchor != entry.id).then_some(entry.id))
+                .collect();
+        } else {
+            self.selected.clear();
+            cx.emit(ServersViewEvent::OpenServer(entry.clone()));
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let search = self.search_input.read(cx).focus_handle(cx);
+        // Down from the search field goes on into the list.
+        if search.is_focused(window) {
+            if keystroke.key == "down" && !keystroke.modifiers.modified() {
+                window.focus(&self.focus_handle, cx);
+                self.selected = self.host_order(cx).first().copied().into_iter().collect();
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if !self.focus_handle.is_focused(window) || keystroke.modifiers.modified() {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "up" | "down" => {
+                let order = self.host_order(cx);
+                let next = step_host(
+                    &order,
+                    self.selected.last().copied(),
+                    keystroke.key == "down",
+                );
+                self.selected = next.into_iter().collect();
+            }
+            "enter" => {
+                let Some(id) = self.selected.last().copied() else {
+                    return;
+                };
+                let entry = self.all_entries(cx).into_iter().find(|e| e.id == id);
+                if let Some(entry) = entry {
+                    self.selected.clear();
+                    cx.emit(ServersViewEvent::OpenServer(entry));
+                }
+            }
+            "escape" => self.selected.clear(),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let hosts = std::mem::take(&mut self.selected);
+        cx.emit(ServersViewEvent::DeleteServersRequested(hosts));
+        cx.notify();
+    }
+
+    /// "Move to group…": every folder, and out of any folder.
+    fn group_menu(
+        &self,
+        id: &'static str,
+        hosts: Vec<Uuid>,
+        cx: &mut Context<Self>,
+    ) -> Option<ContextMenuItem> {
+        let groups = self
+            .vault_state
+            .read(cx)
+            .manager()
+            .map(|vm| vm.list_group_paths())
+            .unwrap_or_default();
+        if groups.is_empty() {
+            return None;
+        }
+        let choices = groups
+            .into_iter()
+            .map(|(group, name)| (Some(group), name))
+            .chain(std::iter::once((None, "No group".to_string())));
+        let items = choices
+            .enumerate()
+            .map(|(ix, (group, name))| {
+                let hosts = hosts.clone();
+                ContextMenuItem::new(
+                    (id, ix),
+                    name,
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_menu_for = None;
+                        this.is_selection_menu_open = false;
+                        this.selected.clear();
+                        cx.emit(ServersViewEvent::MoveToGroup {
+                            hosts: hosts.clone(),
+                            group,
+                        });
+                        cx.notify();
+                    }),
+                )
+            })
+            .collect();
+        Some(ContextMenuItem::new(id, "Move to group\u{2026}", |_, _, _| {}).submenu(items))
+    }
+
+    /// Shown while more than one host is picked.
+    fn selection_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.selected.len() < 2 {
+            return None;
+        }
+        let is_menu_open = self.is_selection_menu_open;
+        let button = |id: &'static str, label: &'static str| {
+            h_flex()
+                .id(id)
+                .h(rems_from_px(24.))
+                .px(rems_from_px(9.))
+                .items_center()
+                .rounded(rems_from_px(6.))
+                .border_1()
+                .border_color(flint_theme::border())
+                .bg(flint_theme::field())
+                .text_size(rems_from_px(12.5))
+                .cursor_pointer()
+                .hover(|s| s.bg(flint_theme::element_hover()))
+                .child(label)
+        };
+        let move_trigger = button("selection-move", "Move to group\u{2026}").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.is_selection_menu_open = !this.is_selection_menu_open;
+                cx.notify();
+            }),
+        );
+        let move_menu = self
+            .group_menu("selection-move-menu", self.selected.clone(), cx)
+            .map(|item| {
+                PopoverMenu::new("selection-move-popover", is_menu_open, move_trigger)
+                    .anchor(Anchor::TopLeft)
+                    .items(item.submenu)
+                    .on_dismiss(cx.listener(|this, _, _, cx| {
+                        this.is_selection_menu_open = false;
+                        cx.notify();
+                    }))
+            });
+        let bar = h_flex()
+            .w_full()
+            .px(rems_from_px(20.))
+            .pb(rems_from_px(6.))
+            .gap(rems_from_px(6.))
+            .items_center()
+            .child(
+                div()
+                    .text_size(rems_from_px(12.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("{} selected", self.selected.len())),
+            )
+            .children(move_menu)
+            .child(
+                button("selection-delete", "Delete")
+                    .text_color(cx.theme().danger)
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
+            )
+            .child(
+                button("selection-clear", "Clear").on_click(cx.listener(|this, _, _, cx| {
+                    this.selected.clear();
+                    cx.notify();
+                })),
+            );
+        Some(bar.into_any_element())
     }
 
     /// The "more" trigger and dropdown of a host row. Same anchored
@@ -243,8 +559,29 @@ impl ServersView {
                 }))
             });
 
+        let move_to_group = self.group_menu("row-menu-move", self.hosts_for_row(id), cx);
+        let delete_hosts = self.hosts_for_row(id);
+
         PopoverMenu::new(("server-row-more", ix), is_menu_open, trigger)
             .anchor(Anchor::TopRight)
+            .item(ContextMenuItem::new(
+                "row-menu-new-tab",
+                "Connect in new tab",
+                cx.listener(move |this, _, _, cx| {
+                    this.open_menu_for = None;
+                    cx.emit(ServersViewEvent::ConnectInNewTab(id));
+                    cx.notify();
+                }),
+            ))
+            .item(ContextMenuItem::new(
+                "row-menu-split",
+                "Open in split",
+                cx.listener(move |this, _, _, cx| {
+                    this.open_menu_for = None;
+                    cx.emit(ServersViewEvent::OpenInSplit(id));
+                    cx.notify();
+                }),
+            ))
             .item(ContextMenuItem::new(
                 "row-menu-edit",
                 "Edit",
@@ -281,18 +618,27 @@ impl ServersView {
                     cx.notify();
                 }),
             ))
+            .items(move_to_group)
             .items(export_key)
             .items(sharing_items)
             .item(
                 ContextMenuItem::new(
                     "row-menu-delete",
-                    "Delete",
+                    if delete_hosts.len() > 1 {
+                        "Delete selected"
+                    } else {
+                        "Delete"
+                    },
                     cx.listener(move |this, _, _, cx| {
                         this.open_menu_for = None;
-                        cx.emit(ServersViewEvent::DeleteServerRequested(id));
+                        this.selected.clear();
+                        cx.emit(ServersViewEvent::DeleteServersRequested(
+                            delete_hosts.clone(),
+                        ));
                         cx.notify();
                     }),
                 )
+                .bound_shortcut(keymap::label("hosts.delete", cx))
                 .danger(),
             )
             .on_dismiss(cx.listener(move |this, _, _, cx| {
@@ -370,9 +716,27 @@ impl ServersView {
     }
 
     /// Section heading for a host folder: name + count, quiet and small.
-    fn group_header(&self, name: &str, count: usize, cx: &App) -> gpui::AnyElement {
+    /// Hosts dropped on it move into the folder; `group` is `None` for the
+    /// ungrouped ones.
+    fn group_header(
+        &self,
+        name: &str,
+        group: Option<Uuid>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         h_flex()
+            .id(SharedString::from(format!("group-header-{name}")))
             .w_full()
+            .rounded(rems_from_px(6.))
+            .drag_over::<DraggedHosts>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+            .on_drop(cx.listener(move |this, dragged: &DraggedHosts, _, cx| {
+                this.selected.clear();
+                cx.emit(ServersViewEvent::MoveToGroup {
+                    hosts: dragged.0.clone(),
+                    group,
+                });
+            }))
             .h(rems_from_px(32.))
             .mt(rems_from_px(8.))
             .px(rems_from_px(4.))
@@ -455,7 +819,13 @@ impl ServersView {
         let tag_names = entry.tag_names.clone();
         let team_name = entry.team_name.clone();
         let is_menu_open = self.open_menu_for == Some(id);
+        let is_selected = self.selected.contains(&id);
         let is_connected = self.connected_ids.contains(&id.to_string());
+        let dragged = DraggedHosts(self.hosts_for_row(id));
+        let drag_label: SharedString = match dragged.0.len() {
+            1 => name.clone().into(),
+            count => format!("{count} hosts").into(),
+        };
         let group_id: gpui::SharedString = format!("{SERVER_ROW_GROUP}-{ix}").into();
 
         h_flex()
@@ -472,7 +842,11 @@ impl ServersView {
             .cursor_pointer()
             .hover(|s| s.bg(row_hover))
             .when(is_menu_open, |el| el.bg(row_hover))
+            .when(is_selected, |el| el.bg(flint_theme::element()))
             .active(|s| s.bg(flint_theme::element_active()))
+            .on_drag(dragged, move |_, _, _, cx| {
+                cx.new(|_| DraggedHostsPreview(drag_label.clone()))
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -481,8 +855,8 @@ impl ServersView {
                     cx.notify();
                 }),
             )
-            .on_click(cx.listener(move |_, _, _, cx| {
-                cx.emit(ServersViewEvent::OpenServer(entry.clone()));
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.row_clicked(&entry, event, window, cx);
             }))
             .when(!place.is_first, |row| {
                 row.child(
@@ -600,13 +974,10 @@ impl ServersView {
 
 impl Render for ServersView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = self
-            .vault_state
-            .read(cx)
-            .manager()
-            .and_then(|vm| vm.list_entries().ok())
-            .unwrap_or_default();
+        let entries = self.all_entries(cx);
         let host_count = entries.len();
+        self.selected
+            .retain(|id| entries.iter().any(|entry| entry.id == *id));
 
         // Every group and tag in use, for the filter bar's buttons.
         let mut all_groups: Vec<String> = entries
@@ -635,16 +1006,7 @@ impl Render for ServersView {
         let has_filters = self.group_filter.is_some() || !self.tag_filter.is_empty();
 
         let search_lower = self.search.trim().to_lowercase();
-        let filtered: Vec<ServerEntrySummary> = entries
-            .into_iter()
-            .filter(|e| {
-                self.group_filter
-                    .as_ref()
-                    .is_none_or(|g| e.group_name.as_deref() == Some(g.as_str()))
-            })
-            .filter(|e| self.tag_filter.iter().all(|t| e.tag_names.contains(t)))
-            .filter(|e| crate::ui::command_palette::host_matches(e, &search_lower))
-            .collect();
+        let filtered = self.visible_entries(entries);
 
         let is_search_empty = search_lower.is_empty();
         let search_text = self.search.clone();
@@ -950,11 +1312,23 @@ impl Render for ServersView {
             }
             let has_groups = !grouped.is_empty();
 
+            let group_ids: std::collections::HashMap<String, Uuid> = self
+                .vault_state
+                .read(cx)
+                .manager()
+                .map(|vm| {
+                    vm.list_group_paths()
+                        .into_iter()
+                        .map(|(id, path)| (path, id))
+                        .collect()
+                })
+                .unwrap_or_default();
             let now = crate::ui::sidebar::unix_now();
             let mut content: Vec<gpui::AnyElement> = Vec::new();
             let mut ix = 0usize;
             for (group_name, entries) in grouped {
-                content.push(self.group_header(&group_name, entries.len(), cx));
+                let group = group_ids.get(&group_name).copied();
+                content.push(self.group_header(&group_name, group, entries.len(), cx));
                 let count = entries.len();
                 content.push(self.host_card(entries, ix, now, cx));
                 ix += count;
@@ -964,7 +1338,7 @@ impl Render for ServersView {
                 // A heading only when folders render above; alone, the card
                 // just needs room under the filters.
                 if has_groups {
-                    content.push(self.group_header("Ungrouped", ungrouped.len(), cx));
+                    content.push(self.group_header("Ungrouped", None, ungrouped.len(), cx));
                 } else {
                     content.push(div().h(rems_from_px(8.)).into_any_element());
                 }
@@ -981,20 +1355,54 @@ impl Render for ServersView {
                 .into_any_element()
         };
 
+        let selection_bar = self.selection_bar(cx);
+
         // No background of its own: the card it sits in paints it, rounded.
-        div().size_full().child(
-            v_flex()
-                .size_full()
-                .child(header)
-                .children(filter_bar)
-                .child(body),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(|this, _: &DeleteSelectedHosts, _, cx| this.delete_selected(cx)))
+            .on_action(cx.listener(|this, _: &FocusHostSearch, window, cx| {
+                this.search_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }))
+            .child(
+                v_flex()
+                    .size_full()
+                    .child(header)
+                    .children(filter_bar)
+                    .children(selection_bar)
+                    .child(body),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrow_keys_walk_the_list_and_stop_at_its_ends() {
+        let [a, b, c] = [(); 3].map(|_| Uuid::new_v4());
+        let order = [a, b, c];
+        assert_eq!(step_host(&order, None, true), Some(a));
+        assert_eq!(step_host(&order, Some(a), true), Some(b));
+        assert_eq!(step_host(&order, Some(c), true), Some(c));
+        assert_eq!(step_host(&order, Some(a), false), Some(a));
+        assert_eq!(step_host(&order, Some(Uuid::new_v4()), false), Some(a));
+        assert_eq!(step_host(&[], None, true), None);
+    }
+
+    #[test]
+    fn shift_click_takes_every_host_between_both_ways() {
+        let [a, b, c, d] = [(); 4].map(|_| Uuid::new_v4());
+        let order = [a, b, c, d];
+        assert_eq!(host_range(&order, b, d), vec![b, c, d]);
+        assert_eq!(host_range(&order, c, a), vec![a, b, c]);
+        assert_eq!(host_range(&order, Uuid::new_v4(), c), vec![c]);
+    }
 
     #[test]
     fn the_ssh_config_offer_counts_hosts_and_hides_when_there_are_none() {
